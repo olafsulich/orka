@@ -1,2 +1,5 @@
 node_modules/
 .DS_Store
+
+# orca: job state, worktrees, and secrets
+.orca/

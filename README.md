@@ -4,6 +4,12 @@ Local jobs for one git repo. `orca init` marks the repo. `orca run` checks out a
 
 Not a fork of [limen](https://github.com/overment/limen). Not the old `orch` script. Fresh Node ESM, zero dependencies. Local git only.
 
+## How it works
+
+![How orca works](docs/orca-how-it-works.png)
+
+You run `orca run`. The CLI checks out branch `orca/<id>` in a linked worktree and spawns a Herdr pane there. A Claude job starts an orchestrator (default `opus`) that can spawn workers (default `sonnet`); a Pi job is one worker. Optional `orca verify` drives `agent-browser` from `orca.verify.json`. When the CLI marks the job `done`, `failed`, or `stopped`, it can POST `{job, status, branch}` to Grok Bot (`orca-finish-wake`).
+
 ## How this differs from limen
 
 Limen is a Pi coordinator you talk to. It plants tickets, a board, role prompts, reviewers, and advisors, and it can POST a finish webhook when a job ends.
