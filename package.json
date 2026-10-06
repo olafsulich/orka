@@ -1,0 +1,14 @@
+{
+  "name": "orca",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Local job CLI: one linked worktree, an orchestrator pane, Sonnet workers on request.",
+  "bin": {
+    "orca": "./bin/orca.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "UNLICENSED"
+}
