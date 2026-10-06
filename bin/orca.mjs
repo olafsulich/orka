@@ -8,10 +8,25 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ORCA = fileURLToPath(import.meta.url);
-const ORCHESTRATOR_MODEL = "opus";
-const WORKER_MODEL = "sonnet";
+// Defaults only. A claude job stores the aliases it will actually run.
+// opus is Opus 5.5 and sonnet is Sonnet 5.5 on current Claude Code; the alias
+// tracks the latest model of that family, so these are not pinned ids.
+const DEFAULT_ORCHESTRATOR_MODEL = "opus";
+const DEFAULT_WORKER_MODEL = "sonnet";
 const IDLE_RETRY_MS = 8000;
-const VALUE_FLAGS = new Set(["title", "goal", "cwd", "kind", "job", "name", "task", "pane"]);
+const VALUE_FLAGS = new Set([
+  "title",
+  "goal",
+  "cwd",
+  "kind",
+  "job",
+  "name",
+  "task",
+  "pane",
+  "orchestrator-model",
+  "worker-model",
+  "model",
+]);
 const BOOL_FLAGS = new Set(["dry-run", "help"]);
 
 function fail(msg) {
@@ -47,6 +62,93 @@ function parseArgs(argv) {
 function pathPrefix() {
   const extra = [join(homedir(), ".local", "bin"), join(homedir(), "bin"), dirname(ORCA)];
   return [...extra, process.env.PATH || ""].filter(Boolean).join(":");
+}
+
+function allowFlags(args, names) {
+  const allowed = new Set(names);
+  for (const key of Object.keys(args)) {
+    if (key === "_" || key === "help" || allowed.has(key)) continue;
+    fail(`--${key} is not used by this command`);
+  }
+}
+
+function flagValue(args, key) {
+  if (!(key in args)) return "";
+  const value = args[key];
+  if (value === true || String(value).trim() === "") fail(`--${key} needs a value`);
+  return String(value).trim();
+}
+
+let modelSpec;
+
+function claudeHelpText() {
+  const r = spawnSync("claude", ["--help"], {
+    encoding: "utf8",
+    timeout: 20000,
+    env: { ...process.env, PATH: pathPrefix() },
+  });
+  if (r.error && r.error.code === "ENOENT") fail("claude is not on PATH; cannot validate model aliases");
+  const text = `${r.stdout || ""}\n${r.stderr || ""}`;
+  if (!text.includes("--model")) {
+    const detail = (r.stderr || r.stdout || r.error?.message || "claude --help failed").trim();
+    fail(`could not read model aliases from claude --help\n${detail.slice(0, 400)}`);
+  }
+  return text;
+}
+
+function modelHelpBlob(text) {
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((line) => /^\s+--model\s+<model>/.test(line));
+  if (start < 0) return "";
+  const blob = [lines[start]];
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*(?:-\w|--\w)/.test(line) || /^Commands:/.test(line)) break;
+    blob.push(line);
+  }
+  return blob.join(" ");
+}
+
+function claudeModelSpec() {
+  if (modelSpec) return modelSpec;
+  const blob = modelHelpBlob(claudeHelpText());
+  const aliases = [];
+  for (const match of blob.matchAll(/['"]([A-Za-z0-9][A-Za-z0-9._:-]*)['"]/g)) aliases.push(match[1].toLowerCase());
+  modelSpec = {
+    aliases: [...new Set(aliases)],
+    acceptsFullName: /full name/i.test(blob),
+  };
+  if (!modelSpec.aliases.length) fail("could not read model aliases from claude --help");
+  return modelSpec;
+}
+
+function isFullModelName(alias) {
+  return /^claude-[a-z0-9]+(?:-[a-z0-9]+)+$/i.test(alias);
+}
+
+function assertClaudeModel(raw, role) {
+  const alias = String(raw ?? "").trim();
+  if (!alias) fail(`need a ${role} model alias`);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(alias)) fail(`invalid model alias "${alias}"`);
+  const spec = claudeModelSpec();
+  const known = spec.aliases.find((item) => item === alias.toLowerCase());
+  if (known) return known;
+  if (spec.acceptsFullName && isFullModelName(alias)) return alias.toLowerCase();
+  const extra = spec.acceptsFullName ? "\na full model name (claude-…) is also accepted" : "";
+  fail(`unknown model alias "${alias}" for ${role}\nknown aliases from claude --help: ${spec.aliases.join(", ")}${extra}`);
+}
+
+function claudeModels(job, args) {
+  return {
+    orchestratorModel: assertClaudeModel(
+      flagValue(args, "orchestrator-model") || job.orchestratorModel || job.model || DEFAULT_ORCHESTRATOR_MODEL,
+      "orchestrator",
+    ),
+    workerModel: assertClaudeModel(
+      flagValue(args, "worker-model") || job.workerModel || DEFAULT_WORKER_MODEL,
+      "worker",
+    ),
+  };
 }
 
 function sleep(ms) {
@@ -90,6 +192,7 @@ function ensureGitignore(repo) {
 }
 
 function cmdInit(args) {
+  allowFlags(args, ["cwd"]);
   const start = args.cwd || process.cwd();
   const { primary, linked } = gitMeta(start);
   if (linked) fail("orca init must run in the primary checkout, not a linked worktree");
@@ -252,12 +355,12 @@ function sh(args) {
   return args.map(q).join(" ");
 }
 
-function workerPrompt(job, name, task) {
+function workerPrompt(job, name, task, alias) {
   const dir = jobDir(job.repo, job.id);
   const result = join(dir, "results", `${name}.json`);
   const note = join(dir, "notes", `${name}.txt`);
   return [
-    `You are a Sonnet worker for orca job ${job.id}. Do this task and stop.`,
+    `You are a worker for orca job ${job.id} (claude --model ${alias}). Do this task and stop.`,
     `Work only in this shared checkout: ${job.worktree}`,
     `Branch: ${job.branch}`,
     `Other workers share this worktree. Do not revert their files. Do not create a branch, worktree, or push.`,
@@ -280,7 +383,7 @@ function orchestratorPrompt(job) {
   return [
     `You are the orchestrator for orca job ${job.id}, not the implementer.`,
     `Do not implement the goal yourself. Do not edit the repo to satisfy the goal.`,
-    `Split the goal into the smallest set of worker tasks, then start one Sonnet worker per task.`,
+    `Split the goal into the smallest set of worker tasks, then start one worker per task.`,
     ``,
     `Worktree (shared by every worker): ${job.worktree}`,
     `Branch: ${job.branch}`,
@@ -293,7 +396,8 @@ function orchestratorPrompt(job) {
     `  orca worker --job ${job.id} --name <worker> --task "<task>"`,
     `If orca is not on PATH, run ${ORCA} instead. The binary is the same file.`,
     `Worker names must match [a-z][a-z0-9_-]{0,31}.`,
-    `Pane command: ${paneCommand(WORKER_MODEL)}`,
+    `That uses this job's worker model (${job.workerModel}). Pass --model <alias> only to override one worker.`,
+    `Pane command: ${paneCommand(job.workerModel)}`,
     ``,
     `Each worker writes ${dir}/results/<name>.json and a one-line note at ${dir}/notes/<name>.txt,`,
     `then prompts you with that note. Read those files. Do not trust a worker that skipped them.`,
@@ -326,7 +430,9 @@ function printDryRun(repo, job) {
   const branch = job.branch || `orca/${job.id}`;
   const name = job.agent || agentName(job.id);
   const kind = job.kind === "pi" ? "pi" : "claude";
-  const alias = kind === "claude" ? ORCHESTRATOR_MODEL : "";
+  const orchestratorModel = kind === "claude" ? job.orchestratorModel || job.model : "";
+  const workerModel = kind === "claude" ? job.workerModel : "";
+  if (kind === "claude" && (!orchestratorModel || !workerModel)) fail("claude job is missing orchestratorModel or workerModel");
   console.log(`dry-run ${job.id} kind=${kind} status=${job.status}`);
   console.log(`repo: ${repo}`);
   console.log(`branch: ${branch}`);
@@ -334,23 +440,42 @@ function printDryRun(repo, job) {
   console.log(`layout: shared worktree (workers do not get sibling checkouts)`);
   console.log(`git: git -C ${q(repo)} worktree add -b ${q(branch)} ${q(wt)} HEAD`);
   console.log(`workspace: herdr workspace create --cwd ${q(wt)} --label ${q(`orca-${job.id}`.slice(0, 40))} --no-focus --env PATH=<orca-bins>:$PATH`);
-  console.log(`lead: herdr ${sh(startArgs(name, "<pane>", kind, alias))}`);
+  console.log(`lead: herdr ${sh(startArgs(name, "<pane>", kind, orchestratorModel))}`);
   if (kind === "claude") {
-    console.log(`pane: ${paneCommand(ORCHESTRATOR_MODEL)}`);
+    console.log(`models: orchestrator=${orchestratorModel} worker=${workerModel}`);
+    console.log(`pane: ${paneCommand(orchestratorModel)}`);
     console.log(`worker: orca worker --job ${job.id} --name <worker> --task "<task>"`);
-    console.log(`worker-pane: ${paneCommand(WORKER_MODEL)}`);
-    console.log(`worker-lead: herdr ${sh(startArgs("<worker>", "<pane>", "claude", WORKER_MODEL))}`);
+    console.log(`worker-pane: ${paneCommand(workerModel)}`);
+    console.log(`worker-lead: herdr ${sh(startArgs("<worker>", "<pane>", "claude", workerModel))}`);
   } else {
     console.log("workers: none (pi is a single worker)");
   }
 }
 
+function assignClaudeModels(job, args) {
+  if (job.kind !== "claude") {
+    if (args["orchestrator-model"] || args["worker-model"]) fail("--orchestrator-model and --worker-model are only for kind claude");
+    return;
+  }
+  const models = claudeModels(job, args);
+  job.orchestratorModel = models.orchestratorModel;
+  job.workerModel = models.workerModel;
+  job.model = models.orchestratorModel;
+}
+
 function cmdNew(args) {
+  if ("model" in args) fail("use --worker-model on orca new, not --model");
+  allowFlags(args, ["cwd", "title", "goal", "kind", "orchestrator-model", "worker-model"]);
   const title = args.title;
   const goal = args.goal;
   const kind = args.kind || "claude";
   if (!title || !goal) fail("need --title and --goal");
   if (kind !== "pi" && kind !== "claude") fail("kind must be pi or claude");
+  if (kind === "pi" && (args["orchestrator-model"] || args["worker-model"])) {
+    fail("--orchestrator-model and --worker-model are only for kind claude");
+  }
+  const orchestratorModel = kind === "claude" ? assertClaudeModel(flagValue(args, "orchestrator-model") || DEFAULT_ORCHESTRATOR_MODEL, "orchestrator") : "";
+  const workerModel = kind === "claude" ? assertClaudeModel(flagValue(args, "worker-model") || DEFAULT_WORKER_MODEL, "worker") : "";
   const repo = requireRepo(args.cwd || process.cwd());
   const id = slug(title);
   const branch = `orca/${id}`;
@@ -372,8 +497,9 @@ function cmdNew(args) {
     agent: "",
     workspace: "",
     role: kind === "claude" ? "orchestrator" : "worker",
-    model: kind === "claude" ? ORCHESTRATOR_MODEL : "",
-    workerModel: kind === "claude" ? WORKER_MODEL : "",
+    model: orchestratorModel,
+    orchestratorModel,
+    workerModel,
     workers: [],
     steers: [],
     started: null,
@@ -426,7 +552,8 @@ function startLead(job) {
   const name = agentName(job.id);
   assertAgentName(name);
   const kind = job.kind === "pi" ? "pi" : "claude";
-  const alias = kind === "claude" ? ORCHESTRATOR_MODEL : "";
+  const alias = kind === "claude" ? job.orchestratorModel || job.model : "";
+  if (kind === "claude" && !alias) fail("job has no orchestratorModel");
   let last = null;
   for (let attempt = 1; attempt <= 2; attempt++) {
     last = herdr(startArgs(name, job.pane, kind, alias), 90000);
@@ -441,16 +568,19 @@ function startLead(job) {
 }
 
 function cmdRun(args) {
+  if ("model" in args) fail("use --orchestrator-model and --worker-model on orca run, not --model");
+  allowFlags(args, ["cwd", "dry-run", "orchestrator-model", "worker-model"]);
   const id = args._[1];
   if (!id) fail("need id");
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, id);
+  if (job.status !== "queued") fail(`job ${id} is ${job.status}, not queued`);
+  assignClaudeModels(job, args);
   if (args["dry-run"]) {
-    if (job.status !== "queued") fail(`job ${id} is ${job.status}, not queued`);
     printDryRun(repo, job);
     return;
   }
-  if (job.status !== "queued") fail(`job ${id} is ${job.status}, not queued`);
+  if (job.kind === "claude") save(repo, job);
   try {
     job.worktree = addWorktree(repo, job);
     save(repo, job);
@@ -474,7 +604,7 @@ function cmdRun(args) {
     }
     throw err;
   }
-  const extra = job.kind === "claude" ? ` role=orchestrator model=${ORCHESTRATOR_MODEL}` : " role=worker";
+  const extra = job.kind === "claude" ? ` role=orchestrator model=${job.orchestratorModel} worker=${job.workerModel}` : " role=worker";
   console.log(`${id} running pane=${job.pane} agent=${job.agent} branch=${job.branch} worktree=${job.worktree}${extra}`);
 }
 
@@ -485,7 +615,15 @@ function splitPane(fromPane, cwd) {
   return pane;
 }
 
+function workerAlias(job, args) {
+  return assertClaudeModel(flagValue(args, "model") || job.workerModel || DEFAULT_WORKER_MODEL, "worker");
+}
+
 function cmdWorker(args) {
+  if ("orchestrator-model" in args || "worker-model" in args) {
+    fail("use --model to override a worker; the job default is workerModel");
+  }
+  allowFlags(args, ["cwd", "dry-run", "job", "name", "task", "pane", "model"]);
   const id = args.job;
   const name = args.name;
   const task = args.task || args._.slice(1).join(" ");
@@ -494,34 +632,35 @@ function cmdWorker(args) {
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, String(id));
   if (job.kind !== "claude") fail("workers are only for kind claude");
+  const alias = workerAlias(job, args);
   if (args["dry-run"]) {
     const wt = job.worktree || worktreePath(repo, job.id);
-    console.log(`dry-run worker ${name} job=${job.id} model=${WORKER_MODEL}`);
+    console.log(`dry-run worker ${name} job=${job.id} model=${alias}`);
     console.log(`worktree: ${wt}`);
     console.log("layout: shared worktree");
     console.log(`split: herdr pane split --pane ${q(job.pane || "<orchestrator-pane>")} --direction right --cwd ${q(wt)} --no-focus`);
-    console.log(`spawn: herdr ${sh(startArgs(String(name), args.pane || "<pane>", "claude", WORKER_MODEL))}`);
-    console.log(`pane: ${paneCommand(WORKER_MODEL)}`);
+    console.log(`spawn: herdr ${sh(startArgs(String(name), args.pane || "<pane>", "claude", alias))}`);
+    console.log(`pane: ${paneCommand(alias)}`);
     return;
   }
   if (!job.pane || !job.agent || !job.worktree) fail("orchestrator is not running");
   if (job.status !== "running") fail(`job ${id} is ${job.status}, not running`);
   ensureJobDir(repo, job.id);
   const pane = args.pane ? String(args.pane) : splitPane(job.pane, job.worktree);
-  const started = herdr(startArgs(String(name), pane, "claude", WORKER_MODEL), 90000);
+  const started = herdr(startArgs(String(name), pane, "claude", alias), 90000);
   if (started.code !== 0 || started.json?.error) herdrFail(started, "worker start");
-  promptWithRetry(String(name), workerPrompt(job, String(name), String(task)));
+  promptWithRetry(String(name), workerPrompt(job, String(name), String(task), alias));
   job.workers = job.workers || [];
   job.workers.push({
     name: String(name),
     pane,
-    model: WORKER_MODEL,
+    model: alias,
     task: String(task),
     result: join(jobDir(repo, job.id), "results", `${name}.json`),
     note: join(jobDir(repo, job.id), "notes", `${name}.txt`),
   });
   save(repo, job);
-  console.log(`${id} worker ${name} pane=${pane} model=${WORKER_MODEL} worktree=${job.worktree}`);
+  console.log(`${id} worker ${name} pane=${pane} model=${alias} worktree=${job.worktree}`);
 }
 
 function summaryOf(repo, job) {
@@ -535,6 +674,7 @@ function line(job) {
 }
 
 function cmdStatus(args) {
+  allowFlags(args, ["cwd"]);
   const id = args._[1];
   const repo = requireRepo(args.cwd || process.cwd());
   if (id) {
@@ -544,7 +684,8 @@ function cmdStatus(args) {
     console.log(`  branch: ${job.branch || `orca/${job.id}`}`);
     console.log(`  worktree: ${job.worktree || "(not created)"}`);
     console.log(`  layout: ${job.workerLayout || "shared-worktree"}`);
-    if (job.agent || job.pane) console.log(`  agent: ${job.agent || "-"} pane=${job.pane || "-"} workspace=${job.workspace || "-"} model=${job.model || "-"}`);
+    if (job.kind === "claude") console.log(`  models: orchestrator=${job.orchestratorModel || job.model || "-"} worker=${job.workerModel || "-"}`);
+    if (job.agent || job.pane) console.log(`  agent: ${job.agent || "-"} pane=${job.pane || "-"} workspace=${job.workspace || "-"} model=${job.orchestratorModel || job.model || "-"}`);
     for (const worker of job.workers || []) console.log(`  worker: ${worker.name} pane=${worker.pane} model=${worker.model}`);
     const summary = summaryOf(repo, job);
     if (summary) console.log(`  summary: ${summary}`);
@@ -561,6 +702,7 @@ function cmdStatus(args) {
 }
 
 function cmdSteer(args) {
+  allowFlags(args, ["cwd"]);
   const id = args._[1];
   const message = args._.slice(2).join(" ").trim();
   if (!id || !message) fail('need: orca steer <id> "message"');
@@ -582,6 +724,7 @@ function interrupt(name) {
 }
 
 function cmdStop(args) {
+  allowFlags(args, ["cwd"]);
   const id = args._[1];
   if (!id) fail("need id");
   const reason = args._.slice(2).join(" ").trim() || "stopped by request";
@@ -624,8 +767,10 @@ function help() {
 
   orca init [--cwd <repo>]
   orca new --title "..." --goal "..." [--cwd <repo>] [--kind claude|pi]
+           [--orchestrator-model <alias>] [--worker-model <alias>]
   orca run <id> [--dry-run] [--cwd <repo>]
-  orca worker --job <id> --name <agent> --task "..." [--dry-run]
+           [--orchestrator-model <alias>] [--worker-model <alias>]
+  orca worker --job <id> --name <agent> --task "..." [--model <alias>] [--dry-run]
   orca status [id] [--cwd <repo>]
   orca steer <id> "message"
   orca stop <id> [reason]
@@ -636,20 +781,26 @@ Worktree: <repo>/.orca/worktrees/<id> on branch orca/<id>
 Workers share that worktree. Sibling worktrees are not in v0.
 
 kind claude (default)
-  run starts an Opus orchestrator (claude --model ${ORCHESTRATOR_MODEL}) in a Herdr pane.
-  It does not implement the goal. It starts Sonnet workers with orca worker
-  (claude --model ${WORKER_MODEL}) in extra panes, same worktree.
+  Defaults: orchestrator ${DEFAULT_ORCHESTRATOR_MODEL} (Opus 5.5), worker ${DEFAULT_WORKER_MODEL} (Sonnet 5.5).
+  The job stores orchestratorModel and workerModel. new sets them. run may replace them.
+  orca worker --model overrides one worker; the job default stays workerModel.
+  Aliases are checked against claude --help. Unknown aliases fail. The error lists the aliases named there.
+  A full model name (claude-…) is accepted when help says so.
+  run starts the orchestrator (claude --model <orchestratorModel>) in a Herdr pane.
+  It does not implement the goal. It starts workers with orca worker
+  (claude --model <workerModel>) in extra panes, same worktree.
   Herdr has no --model flag. The alias is an agent argument.
 
 kind pi
-  One Pi worker in the worktree. No Opus or Sonnet.
+  One Pi worker in the worktree. No Opus or Sonnet. Model flags are refused.
 
 A prompt that is still idle after ~8s is sent once more.
 status reads the job file. It does not poll Herdr.
 stop closes the job workspace, or interrupts the lead if there is no workspace.
 Finish webhooks are not wired. Next: POST {job, status, branch} using <repo>/.orca/secrets/finish-webhook.env
 
-claude must be on PATH in the pane. This CLI does not install it.
+claude must be on PATH in the pane, and on PATH here so aliases can be checked.
+This CLI does not install it.
 `);
 }
 

@@ -8,7 +8,7 @@ Not a fork of [limen](https://github.com/overment/limen). Not the old `orch` scr
 
 Limen is a Pi coordinator you talk to. It plants tickets, a board, role prompts, reviewers, and advisors, and it can POST a finish webhook when a job ends.
 
-Orca is the CLI. You file a job and run it. There is no coordinator conversation, no ticket board, and no package hooks in the target repo. A Claude job starts an Opus orchestrator; that orchestrator may start Sonnet workers with `orca worker`. A Pi job is one worker. Finish webhooks are not wired.
+Orca is the CLI. You file a job and run it. There is no coordinator conversation, no ticket board, and no package hooks in the target repo. A Claude job starts an orchestrator (default `opus`, Opus 5.5); that orchestrator may start workers (default `sonnet`, Sonnet 5.5) with `orca worker`. Either alias can be overridden per job. A Pi job is one worker. Finish webhooks are not wired.
 
 A worktree separates the job from the primary checkout. It is not a sandbox. The agent runs as you.
 
@@ -44,9 +44,11 @@ Commands resolve the primary checkout from the current directory, including from
 
 ```bash
 orca init [--cwd <repo>]
-orca new --title "..." --goal "..." [--cwd <repo>] [--kind claude|pi]
-orca run <id> [--dry-run] [--cwd <repo>]
-orca worker --job <id> --name <agent> --task "..." [--dry-run]
+orca new --title "..." --goal "..." [--cwd <repo>] [--kind claude|pi] \
+  [--orchestrator-model <alias>] [--worker-model <alias>]
+orca run <id> [--dry-run] [--cwd <repo>] \
+  [--orchestrator-model <alias>] [--worker-model <alias>]
+orca worker --job <id> --name <agent> --task "..." [--model <alias>] [--dry-run]
 orca status [id] [--cwd <repo>]
 orca steer <id> "message"
 orca stop <id> [reason]
@@ -55,9 +57,13 @@ orca help
 
 `--kind` defaults to `claude`.
 
-`claude` jobs: `run` starts `claude --model opus` in a new Herdr workspace whose cwd is the worktree. The orchestrator is not the implementer. It starts workers with `orca worker`, which splits a pane in that same workspace and runs `claude --model sonnet`. Herdr has no `--model` flag; the alias is an agent argument.
+`claude` jobs store `orchestratorModel` and `workerModel` on the job file. Defaults are `opus` (Opus 5.5) and `sonnet` (Sonnet 5.5). Those are aliases from `claude --help`, not pinned ids, so they track the latest model of that family. `new` sets them. A real `run` writes any override back onto the job before it starts. `--dry-run` prints the override and does not write it. `orca worker --model` overrides one worker; the job default stays `workerModel`. The lead alias is also stored as `model`, the same value as `orchestratorModel`.
 
-`pi` jobs: one `pi` process in that worktree. No Opus, no Sonnet, no workers.
+`run` starts `claude --model <orchestratorModel>` in a new Herdr workspace whose cwd is the worktree. The orchestrator is not the implementer. It starts workers with `orca worker`, which splits a pane in that same workspace and runs `claude --model <workerModel>`. Herdr has no `--model` flag; the alias is an agent argument.
+
+An alias is checked against `claude --help` before the job is stored or started. An unknown alias fails and lists the aliases `claude --help` names, when it names any. A full model name (`claude-…`) is accepted when help says a full name is accepted. `opus-5-5` is not an alias.
+
+`pi` jobs: one `pi` process in that worktree. No Opus, no Sonnet, no workers, no model flags.
 
 If the lead (or a worker) is still `idle` about 8 seconds after the prompt, orca sends the prompt once more. That is the startup swallow retry, not a second task.
 
@@ -67,7 +73,7 @@ If the lead (or a worker) is still `idle` about 8 seconds after the prompt, orca
 
 `stop` closes the job's Herdr workspace (or interrupts the lead if there is no workspace) and sets `stopped`. It does not delete the worktree or the branch.
 
-`claude` must already be on `PATH` inside the pane. This CLI does not install it.
+`claude` must already be on `PATH` inside the pane, and on `PATH` here so aliases can be checked. This CLI does not install it.
 
 ## Trust
 
