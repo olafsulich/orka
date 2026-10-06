@@ -310,3 +310,41 @@ test("unknown acceptance is not retried unless forced", async () => {
     rmSync(box.repo, { recursive: true, force: true });
   }
 });
+
+async function piJob(args = []) {
+  const repo = mkdtempSync(join(tmpdir(), "orca-pi-"));
+  git(repo, ["init", "-q"]);
+  assert.equal((await orca(repo, ["init"])).status, 0);
+  const created = await orca(repo, ["new", "--kind", "pi", "--title", "pi", "--goal", "do the thing", ...args]);
+  assert.equal(created.status, 0, created.stderr);
+  return { repo, id: created.stdout.trim() };
+}
+
+test("pi run dry-run starts an orchestrator that spawns pi workers", async () => {
+  const { repo, id } = await piJob();
+  const out = await orca(repo, ["run", id, "--dry-run"]);
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(out.stdout, /role: orchestrator \(pi\)/);
+  assert.match(out.stdout, /worker: orca worker --job/);
+  assert.doesNotMatch(out.stdout, /single worker|--model/);
+});
+
+test("pi worker dry-run opens a pi pane and refuses --model", async () => {
+  const { repo, id } = await piJob();
+  const ok = await orca(repo, ["worker", "--job", id, "--name", "w1", "--task", "x", "--dry-run"]);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /kind=pi/);
+  assert.match(ok.stdout, /pane: pi$/m);
+  assert.doesNotMatch(ok.stdout, /claude --model/);
+  const bad = await orca(repo, ["worker", "--job", id, "--name", "w1", "--task", "x", "--model", "sonnet", "--dry-run"]);
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.stderr, /only for kind claude/);
+});
+
+test("pi still refuses orchestrator and worker model flags", async () => {
+  const { repo, id } = await piJob();
+  const run = await orca(repo, ["run", id, "--dry-run", "--worker-model", "sonnet"]);
+  assert.notEqual(run.status, 0);
+  const made = await orca(repo, ["new", "--kind", "pi", "--title", "t", "--goal", "g", "--orchestrator-model", "opus"]);
+  assert.notEqual(made.status, 0);
+});

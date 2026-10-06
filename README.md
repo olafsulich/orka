@@ -8,13 +8,13 @@ Not a fork of [limen](https://github.com/overment/limen). Not the old `orch` scr
 
 ![How orca works](docs/orca-how-it-works.png)
 
-You run `orca run`. The CLI checks out branch `orca/<id>` in a linked worktree and spawns a Herdr pane there. A Claude job starts an orchestrator (default `opus`) that can spawn workers (default `sonnet`); a Pi job is one worker. Optional `orca verify` drives `agent-browser` from `orca.verify.json`. When the CLI marks the job `done`, `failed`, or `stopped`, it can POST `{job, status, branch}` to Grok Bot (`orca-finish-wake`).
+You run `orca run`. The CLI checks out branch `orca/<id>` in a linked worktree and spawns a Herdr pane there. The pane runs an orchestrator that splits the goal and starts one worker per task, several in parallel when tasks are independent, all in the same worktree. A Claude job uses `opus` for the orchestrator and `sonnet` for workers; a Pi job uses Pi for both. Optional `orca verify` drives `agent-browser` from `orca.verify.json`. When the CLI marks the job `done`, `failed`, or `stopped`, it can POST `{job, status, branch}` to Grok Bot (`orca-finish-wake`).
 
 ## How this differs from limen
 
 Limen is a Pi coordinator you talk to. It plants tickets, a board, role prompts, reviewers, and advisors, and it can POST a finish webhook when a job ends.
 
-Orca is the CLI. You file a job and run it. There is no coordinator conversation, no ticket board, and no package hooks in the target repo. A Claude job starts an orchestrator (default `opus`, Opus 5.5); that orchestrator may start workers (default `sonnet`, Sonnet 5.5) with `orca worker`. Either alias can be overridden per job. A Pi job is one worker. When the CLI marks a job `done`, `failed`, or `stopped`, it can POST a finish wake. Agents do not send it.
+Orca is the CLI. You file a job and run it. There is no coordinator conversation, no ticket board, and no package hooks in the target repo. A Claude job starts an orchestrator (default `opus`, Opus 5.5); that orchestrator starts workers (default `sonnet`, Sonnet 5.5) with `orca worker`, in parallel when tasks are independent. Either alias can be overridden per job. A Pi job is a Pi orchestrator starting Pi workers. When the CLI marks a job `done`, `failed`, or `stopped`, it can POST a finish wake. Agents do not send it.
 
 ## How this differs from old orch
 
@@ -104,7 +104,9 @@ orca help
 
 An alias is checked against `claude --help` before the job is stored or started. An unknown alias fails and lists the aliases `claude --help` names, when it names any. A full model name (`claude-…`) is accepted when help says a full name is accepted. `opus-5-5` is not an alias.
 
-`pi` jobs: one `pi` process in that worktree. No Opus, no Sonnet, no workers, no model flags.
+`pi` jobs: `run` starts a Pi orchestrator (`pi`, role orchestrator) in that workspace. It is not the implementer. It starts Pi workers with `orca worker`, each in a split pane running `pi` in the same worktree. No Opus, no Sonnet. `--orchestrator-model`, `--worker-model` and `orca worker --model` are refused for `pi`.
+
+For both kinds the orchestrator splits the goal into tasks and starts one worker per task. Independent tasks start in parallel (several `orca worker` calls). Workers share one worktree, so no two workers get the same files.
 
 If the lead (or a worker) is still `idle` about 8 seconds after the prompt, orca sends the prompt once more. That is the startup swallow retry, not a second task.
 
@@ -155,7 +157,7 @@ Also: `click`, `fill` as `[selector, text]`, `press`, `wait`, `waitText`, `title
 
 A non-JSON checks file is a script. orca runs it in the worktree with `AGENT_BROWSER_SESSION` set to a session just for this job, plus `ORCA_JOB`, `ORCA_REPO`, `ORCA_WORKTREE`, and `ORCA_BRANCH`. It closes that session when the script exits. The script must exit non-zero when a check fails. Use this when the check has to boot a server. Prefer JSON when the app is already up. A script is stopped after 600s. A JSON step is stopped after 90s.
 
-orca does not watch workers. The orchestrator is told to run `orca verify <id>` after workers report and before the summary. A pi job is told to run it when the work is done. You can run it yourself any time the worktree exists. `status` prints `verify` once it has run, or `not run` when a checks file is present and verify has not.
+orca does not watch workers. The orchestrator is told to run `orca verify <id>` after workers report and before the summary.  You can run it yourself any time the worktree exists. `status` prints `verify` once it has run, or `not run` when a checks file is present and verify has not.
 
 ## Trust
 

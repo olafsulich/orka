@@ -582,7 +582,7 @@ function startArgs(name, pane, kind, alias) {
 }
 
 function paneCommand(alias) {
-  return `claude --model ${alias}`;
+  return alias ? `claude --model ${alias}` : "pi";
 }
 
 function agentStatus(name) {
@@ -626,7 +626,7 @@ function workerPrompt(job, name, task, alias) {
   const result = join(dir, "results", `${name}.json`);
   const note = join(dir, "notes", `${name}.txt`);
   return [
-    `You are a worker for orca job ${job.id} (claude --model ${alias}). Do this task and stop.`,
+    `You are a worker for orca job ${job.id} (${paneCommand(alias)}). Do this task and stop.`,
     `Work only in this shared checkout: ${job.worktree}`,
     `Branch: ${job.branch}`,
     `Other workers share this worktree. Do not revert their files. Do not create a branch, worktree, or push.`,
@@ -649,10 +649,13 @@ function workerPrompt(job, name, task, alias) {
 
 function orchestratorPrompt(job) {
   const dir = jobDir(job.repo, job.id);
+  const pi = job.kind === "pi";
   return [
     `You are the orchestrator for orca job ${job.id}, not the implementer.`,
     `Do not implement the goal yourself. Do not edit the repo to satisfy the goal.`,
     `Split the goal into the smallest set of worker tasks, then start one worker per task.`,
+    `When tasks are independent, start several workers in parallel (several orca worker calls, one per task) instead of one after another.`,
+    `Workers share one worktree, so never give two workers the same files. Split by file or area so edits cannot clash.`,
     ``,
     `Worktree (shared by every worker): ${job.worktree}`,
     `Branch: ${job.branch}`,
@@ -665,8 +668,12 @@ function orchestratorPrompt(job) {
     `  orca worker --job ${job.id} --name <worker> --task "<task>"`,
     `If orca is not on PATH, run ${ORCA} instead. The binary is the same file.`,
     `Worker names must match [a-z][a-z0-9_-]{0,31}.`,
-    `That uses this job's worker model (${job.workerModel}). Pass --model <alias> only to override one worker.`,
-    `Pane command: ${paneCommand(job.workerModel)}`,
+    ...(pi
+      ? [`Workers are Pi agents (kind pi). Do not pass --model; pi workers have no model flag.`, `Pane command: ${paneCommand("")}`]
+      : [
+          `That uses this job's worker model (${job.workerModel}). Pass --model <alias> only to override one worker.`,
+          `Pane command: ${paneCommand(job.workerModel)}`,
+        ]),
     ``,
     `Each worker writes ${dir}/results/<name>.json and a one-line note at ${dir}/notes/<name>.txt,`,
     `then prompts you with that note. Read those files. Do not trust a worker that skipped them.`,
@@ -686,25 +693,8 @@ function orchestratorPrompt(job) {
   ].join("\n");
 }
 
-function piPrompt(job) {
-  return [
-    `You are the worker for orca job ${job.id}.`,
-    `Work only in this checkout: ${job.worktree}`,
-    `Branch: ${job.branch}`,
-    `Do not push. Do not create another worktree or branch.`,
-    `Finish wake is automatic from the orca CLI when it marks the job done, failed, or stopped. That is not your job. Do not run herdr-finish-watch. Do not run orca stop or orca webhook.`,
-    ``,
-    `When the work is done, run \`orca verify ${job.id}\` (or ${ORCA} verify ${job.id}) before you stop.`,
-    `That drives agent-browser from ${VERIFY_FILE} in this checkout, or the "verify" path in ${join(job.repo, ".orca", "config.json")}.`,
-    `No checks file skips. A failed verify means the job is not done. Do not invent a URL.`,
-    `To add checks: {"steps":[["open","http://HOST:PORT/"],{"visible":"SELECTOR"},{"text":"SELECTOR","includes":"EXPECTED"}]}. Use this project's URL.`,
-    ``,
-    job.goal.trim(),
-  ].join("\n");
-}
-
 function leadPrompt(job) {
-  return job.kind === "claude" ? orchestratorPrompt(job) : piPrompt(job);
+  return orchestratorPrompt(job);
 }
 
 function printDryRun(repo, job) {
@@ -730,7 +720,11 @@ function printDryRun(repo, job) {
     console.log(`worker-pane: ${paneCommand(workerModel)}`);
     console.log(`worker-lead: herdr ${sh(startArgs("<worker>", "<pane>", "claude", workerModel))}`);
   } else {
-    console.log("workers: none (pi is a single worker)");
+    console.log("role: orchestrator (pi)");
+    console.log(`pane: ${paneCommand("")}`);
+    console.log(`worker: orca worker --job ${job.id} --name <worker> --task "<task>"`);
+    console.log(`worker-pane: ${paneCommand("")}`);
+    console.log(`worker-lead: herdr ${sh(startArgs("<worker>", "<pane>", "pi", ""))}`);
   }
   console.log("finish webhook: posts {job, status, branch} when the CLI marks done, failed, or stopped");
   console.log(`verify: orca verify ${job.id} (skips when the worktree has no checks file)`);
@@ -890,7 +884,7 @@ async function cmdRun(args) {
     }
     throw err;
   }
-  const extra = job.kind === "claude" ? ` role=orchestrator model=${job.orchestratorModel} worker=${job.workerModel}` : " role=worker";
+  const extra = job.kind === "claude" ? ` role=orchestrator model=${job.orchestratorModel} worker=${job.workerModel}` : " role=orchestrator kind=pi";
   console.log(`${id} running pane=${job.pane} agent=${job.agent} branch=${job.branch} worktree=${job.worktree}${extra}`);
 }
 
@@ -902,6 +896,10 @@ function splitPane(fromPane, cwd) {
 }
 
 function workerAlias(job, args) {
+  if (job.kind === "pi") {
+    if ("model" in args) fail("--model is only for kind claude; pi workers have no model flag");
+    return "";
+  }
   return assertClaudeModel(flagValue(args, "model") || job.workerModel || DEFAULT_WORKER_MODEL, "worker");
 }
 
@@ -917,15 +915,15 @@ function cmdWorker(args) {
   assertAgentName(String(name));
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, String(id));
-  if (job.kind !== "claude") fail("workers are only for kind claude");
   const alias = workerAlias(job, args);
+  const kind = job.kind === "pi" ? "pi" : "claude";
   if (args["dry-run"]) {
     const wt = job.worktree || worktreePath(repo, job.id);
-    console.log(`dry-run worker ${name} job=${job.id} model=${alias}`);
+    console.log(`dry-run worker ${name} job=${job.id} kind=${kind}${alias ? ` model=${alias}` : ""}`);
     console.log(`worktree: ${wt}`);
     console.log("layout: shared worktree");
     console.log(`split: herdr pane split --pane ${q(job.pane || "<orchestrator-pane>")} --direction right --cwd ${q(wt)} --no-focus`);
-    console.log(`spawn: herdr ${sh(startArgs(String(name), args.pane || "<pane>", "claude", alias))}`);
+    console.log(`spawn: herdr ${sh(startArgs(String(name), args.pane || "<pane>", kind, alias))}`);
     console.log(`pane: ${paneCommand(alias)}`);
     return;
   }
@@ -933,20 +931,21 @@ function cmdWorker(args) {
   if (job.status !== "running") fail(`job ${id} is ${job.status}, not running`);
   ensureJobDir(repo, job.id);
   const pane = args.pane ? String(args.pane) : splitPane(job.pane, job.worktree);
-  const started = herdr(startArgs(String(name), pane, "claude", alias), 90000);
+  const started = herdr(startArgs(String(name), pane, kind, alias), 90000);
   if (started.code !== 0 || started.json?.error) herdrFail(started, "worker start");
   promptWithRetry(String(name), workerPrompt(job, String(name), String(task), alias));
   job.workers = job.workers || [];
   job.workers.push({
     name: String(name),
     pane,
+    kind,
     model: alias,
     task: String(task),
     result: join(jobDir(repo, job.id), "results", `${name}.json`),
     note: join(jobDir(repo, job.id), "notes", `${name}.txt`),
   });
   save(repo, job);
-  console.log(`${id} worker ${name} pane=${pane} model=${alias} worktree=${job.worktree}`);
+  console.log(`${id} worker ${name} pane=${pane} kind=${kind}${alias ? ` model=${alias}` : ""} worktree=${job.worktree}`);
 }
 
 function summaryOf(repo, job) {
@@ -972,7 +971,7 @@ function cmdStatus(args) {
     console.log(`  layout: ${job.workerLayout || "shared-worktree"}`);
     if (job.kind === "claude") console.log(`  models: orchestrator=${job.orchestratorModel || job.model || "-"} worker=${job.workerModel || "-"}`);
     if (job.agent || job.pane) console.log(`  agent: ${job.agent || "-"} pane=${job.pane || "-"} workspace=${job.workspace || "-"} model=${job.orchestratorModel || job.model || "-"}`);
-    for (const worker of job.workers || []) console.log(`  worker: ${worker.name} pane=${worker.pane} model=${worker.model}`);
+    for (const worker of job.workers || []) console.log(`  worker: ${worker.name} pane=${worker.pane} ${worker.model ? `model=${worker.model}` : "kind=pi"}`);
     const summary = summaryOf(repo, job);
     if (summary) console.log(`  summary: ${summary}`);
     if (job.stopReason) console.log(`  stop: ${job.stopReason}`);
@@ -1586,6 +1585,7 @@ function help() {
   orca run <id> [--dry-run] [--cwd <repo>]
            [--orchestrator-model <alias>] [--worker-model <alias>]
   orca worker --job <id> --name <agent> --task "..." [--model <alias>] [--dry-run]
+           (--model is claude only; pi workers have no model flag)
   orca status [id] [--cwd <repo>]
   orca steer <id> "message"
   orca stop <id> [reason] [--dry-run]
@@ -1609,7 +1609,14 @@ kind claude (default)
   Herdr has no --model flag. The alias is an agent argument.
 
 kind pi
-  One Pi worker in the worktree. No Opus or Sonnet. Model flags are refused.
+  run starts a Pi orchestrator (pi) in a Herdr pane. It does not implement the goal.
+  It starts Pi workers with orca worker (pi, no model flag) in extra panes, same worktree.
+  No Opus or Sonnet. --orchestrator-model, --worker-model and worker --model are refused.
+
+Multi-worker (both kinds)
+  The orchestrator splits the goal and starts one worker per task. Independent tasks
+  start in parallel (several orca worker calls). All workers share one worktree, so no
+  two workers get the same files.
 
 A prompt that is still idle after ~8s is sent once more.
 status reads the job file. It does not poll Herdr. One job also prints the finish-wake record and verify.
