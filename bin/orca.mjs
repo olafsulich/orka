@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 // orca v0 — job file in <repo>/.orca/jobs, linked worktree at
 // <repo>/.orca/worktrees/<id> on branch orca/<id>. Workers share that worktree.
+// Finish wake: when the CLI marks done|failed|stopped, POST {job, status, branch}
+// if <repo>/.orca/secrets/finish-webhook.env exists. Never a home path.
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseEnv } from "node:util";
 
 const ORCA = fileURLToPath(import.meta.url);
 // Defaults only. A claude job stores the aliases it will actually run.
@@ -27,7 +30,9 @@ const VALUE_FLAGS = new Set([
   "worker-model",
   "model",
 ]);
-const BOOL_FLAGS = new Set(["dry-run", "help"]);
+const BOOL_FLAGS = new Set(["dry-run", "help", "force"]);
+const FINISH_STATUSES = new Set(["done", "failed", "stopped"]);
+const FINISH_TIMEOUT_MS = 8000;
 
 function fail(msg) {
   const err = new Error(msg);
@@ -270,6 +275,248 @@ function save(repo, job) {
   renameSync(tmp, path);
 }
 
+function finishEnvPath(repo) {
+  return join(repo, ".orca", "secrets", "finish-webhook.env");
+}
+
+function finishRecordPath(repo, id) {
+  return join(jobsDir(repo), `${id}.finish.json`);
+}
+
+function insideOrca(repo, path) {
+  try {
+    const primary = realpathSync(repo);
+    const root = realpathSync(join(repo, ".orca"));
+    const real = realpathSync(path);
+    const orcaRoot = join(primary, ".orca");
+    if (root !== orcaRoot && !root.startsWith(orcaRoot + sep)) return false;
+    return real === root || real.startsWith(root + sep);
+  } catch {
+    return false;
+  }
+}
+
+function readFinishConfig(repo) {
+  const path = finishEnvPath(repo);
+  if (!existsSync(path)) return { off: true, path };
+  if (!insideOrca(repo, path)) return { error: "finish-webhook.env must stay inside .orca (no home path, no escaped symlink)" };
+  let st;
+  try {
+    st = statSync(path);
+  } catch {
+    return { error: "cannot stat finish-webhook.env" };
+  }
+  if (!st.isFile()) return { error: "finish-webhook.env is not a file" };
+  if ((st.mode & 0o077) !== 0) return { error: "finish-webhook.env must be mode 600" };
+  let env;
+  try {
+    env = parseEnv(readFileSync(path, "utf8"));
+  } catch {
+    return { error: "cannot read finish-webhook.env" };
+  }
+  const urlText = env.WEBHOOK_URL ?? "";
+  const key = env.WEBHOOK_KEY ?? "";
+  if (!urlText || !key) return { error: "finish-webhook.env needs WEBHOOK_URL and WEBHOOK_KEY" };
+  if (key !== key.trim() || /[\r\n]/.test(key)) return { error: "WEBHOOK_KEY is empty or invalid" };
+  let url;
+  try {
+    url = new URL(urlText);
+  } catch {
+    return { error: "WEBHOOK_URL is not a URL" };
+  }
+  if (url.protocol !== "https:" || url.username || url.password || url.hash) {
+    return { error: "WEBHOOK_URL must be https with no userinfo or fragment" };
+  }
+  return { url: url.href, origin: url.origin, key, path };
+}
+
+function readFinishRecord(repo, id) {
+  const path = finishRecordPath(repo, id);
+  if (!existsSync(path)) return null;
+  try {
+    const data = JSON.parse(readFileSync(path, "utf8"));
+    if (!data || data.v !== 1 || !Array.isArray(data.attempts)) return { corrupt: true };
+    return data;
+  } catch {
+    return { corrupt: true };
+  }
+}
+
+function lastAttempt(record) {
+  if (!record || record.corrupt || !record.attempts?.length) return null;
+  return record.attempts[record.attempts.length - 1];
+}
+
+function writeFinishRecord(repo, record) {
+  const path = finishRecordPath(repo, record.job);
+  mkdirSync(jobsDir(repo), { recursive: true });
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, JSON.stringify(record, null, 2) + "\n", { mode: 0o600 });
+  chmodSync(tmp, 0o600);
+  renameSync(tmp, path);
+}
+
+function appendAttempt(repo, job, payload, attempt, prior) {
+  const record = prior
+    ? { ...prior, status: payload.status, branch: payload.branch, attempts: [...prior.attempts, attempt] }
+    : { v: 1, job: job.id, status: payload.status, branch: payload.branch, attempts: [attempt] };
+  if (!prior) {
+    const path = finishRecordPath(repo, job.id);
+    mkdirSync(jobsDir(repo), { recursive: true });
+    let fd;
+    try {
+      fd = openSync(path, "wx", 0o600);
+    } catch (err) {
+      if (err.code === "EEXIST") return null;
+      throw err;
+    }
+    writeFileSync(fd, JSON.stringify(record, null, 2) + "\n");
+    closeSync(fd);
+    chmodSync(path, 0o600);
+    return record;
+  }
+  writeFinishRecord(repo, record);
+  return record;
+}
+
+function settleAttempt(repo, id, sent) {
+  const record = readFinishRecord(repo, id);
+  if (!record || record.corrupt || !record.attempts.length) return record;
+  const attempts = record.attempts.slice();
+  const last = { ...attempts[attempts.length - 1], outcome: sent.outcome, http: sent.http, detail: sent.detail, settled: new Date().toISOString() };
+  attempts[attempts.length - 1] = last;
+  const next = { ...record, attempts };
+  writeFinishRecord(repo, next);
+  return next;
+}
+
+function payloadOf(job, status = job.status) {
+  return { job: job.id, status, branch: job.branch || `orca/${job.id}` };
+}
+
+function dryRunPlan(repo, job, status) {
+  const payload = payloadOf(job, status);
+  const config = readFinishConfig(repo);
+  const record = readFinishRecord(repo, job.id);
+  const last = lastAttempt(record);
+  let send = "would POST";
+  if (!FINISH_STATUSES.has(status)) send = "no (not terminal)";
+  else if (config.off) send = "no (off)";
+  else if (config.error) send = "no (invalid config)";
+  else if (record?.corrupt) send = "no (corrupt record)";
+  else if (last && last.outcome !== "failed") send = `no (last attempt ${last.outcome})`;
+  const configLine = config.off ? "off" : config.error ? `invalid: ${config.error}` : config.origin;
+  return {
+    payload,
+    lines: [`payload: ${JSON.stringify(payload)}`, `config: ${configLine}`, `send: ${send}`],
+  };
+}
+
+async function postFinish(config, payload) {
+  let response;
+  try {
+    response = await fetch(config.url, {
+      method: "POST",
+      redirect: "error",
+      signal: AbortSignal.timeout(FINISH_TIMEOUT_MS),
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.key}`,
+        "X-Automation-Key": config.key,
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch (err) {
+    const name = err?.name || "";
+    if (name === "TimeoutError" || name === "AbortError") return { outcome: "unknown", http: null, detail: "timed out; acceptance unknown" };
+    return { outcome: "unknown", http: null, detail: "request failed; acceptance unknown" };
+  }
+  const http = response.status;
+  try {
+    await response.body?.cancel();
+  } catch {
+    // never read or print a response body
+  }
+  if (http >= 200 && http < 300) return { outcome: "accepted", http, detail: `accepted (HTTP ${http})` };
+  return { outcome: "failed", http, detail: `HTTP ${http}` };
+}
+
+async function deliverFinish(repo, job, opts = {}) {
+  const manual = !!opts.manual;
+  const force = !!opts.force;
+  const status = opts.status || job.status;
+  const payload = payloadOf(job, status);
+  if (opts.dryRun) return { action: "dry-run", ...dryRunPlan(repo, job, status) };
+  if (!FINISH_STATUSES.has(status)) fail(`job ${job.id} is ${status}; finish webhook sends only for done, failed, or stopped`);
+  const config = readFinishConfig(repo);
+  if (config.off) {
+    if (manual) fail(`no finish webhook configured\nmissing ${config.path}`);
+    return { action: "off" };
+  }
+  const record = readFinishRecord(repo, job.id);
+  if (record?.corrupt) return { action: "failed", detail: "finish record is corrupt; not sent" };
+  if (config.error) {
+    if (!manual && record) return { action: "already", detail: lastAttempt(record)?.detail || "already recorded" };
+    const attempt = { at: new Date().toISOString(), outcome: "failed", http: null, detail: config.error, settled: new Date().toISOString() };
+    if (!appendAttempt(repo, job, payload, attempt, record)) return { action: "already", detail: "attempt already recorded" };
+    return { action: "failed", detail: config.error };
+  }
+  const last = lastAttempt(record);
+  if (!manual && last) return { action: "already", detail: `${last.outcome}${last.detail ? `: ${last.detail}` : ""}` };
+  if (manual && last && last.outcome !== "failed" && !force) {
+    const extra = last.outcome === "accepted" ? "" : "; pass --force to record another attempt";
+    return { action: "refuse", detail: `last attempt is ${last.outcome}${extra}` };
+  }
+  const claimed = appendAttempt(repo, job, payload, { at: new Date().toISOString(), outcome: "attempting", http: null, detail: "acceptance unknown" }, record);
+  if (!claimed) return { action: "already", detail: "attempt already recorded" };
+  const sent = await postFinish(config, payload);
+  try {
+    settleAttempt(repo, job.id, sent);
+  } catch {
+    return { action: sent.outcome, detail: `${sent.detail}; could not record result`, http: sent.http };
+  }
+  return { action: sent.outcome, detail: sent.detail, http: sent.http };
+}
+
+function finishLine(result) {
+  if (!result) return "";
+  if (result.action === "off") return "finish webhook: off";
+  if (result.action === "dry-run") return result.lines.map((line) => `finish webhook: ${line}`).join("\n");
+  if (result.action === "accepted") return `finish webhook: ${result.detail}`;
+  if (result.action === "already") return `finish webhook: already recorded (${result.detail}); not sent again`;
+  if (result.action === "refuse") return `finish webhook: ${result.detail}`;
+  if (result.action === "failed" || result.action === "unknown") return `finish webhook: ${result.action}: ${result.detail}`;
+  return `finish webhook: ${result.action}${result.detail ? `: ${result.detail}` : ""}`;
+}
+
+function finishStatusLine(repo, job) {
+  const record = readFinishRecord(repo, job.id);
+  if (record?.corrupt) return "finish webhook: record corrupt";
+  const last = lastAttempt(record);
+  if (last) {
+    const http = last.http ? ` HTTP ${last.http}` : "";
+    return `finish webhook: ${last.outcome}${http} attempt ${record.attempts.length} (${last.detail})`;
+  }
+  const config = readFinishConfig(repo);
+  if (config.off) return "finish webhook: off";
+  if (config.error) return `finish webhook: ${config.error}`;
+  return "finish webhook: configured, not sent";
+}
+
+// Saves the terminal status first. A sender failure cannot flip it back.
+async function markTerminal(repo, job, status, reason) {
+  if (!FINISH_STATUSES.has(status)) fail(`not a terminal status: ${status}`);
+  job.status = status;
+  job.finished = new Date().toISOString();
+  if (reason) job.stopReason = reason;
+  save(repo, job);
+  try {
+    return await deliverFinish(repo, job);
+  } catch (err) {
+    return { action: "failed", detail: err?.orca ? err.message : "sender error" };
+  }
+}
+
 function herdr(args, timeoutMs = 30000) {
   const r = spawnSync("herdr", args, {
     encoding: "utf8",
@@ -374,7 +621,7 @@ function workerPrompt(job, name, task, alias) {
     `herdr agent prompt ${job.agent} "<the one-line note>"`,
     `If that prompt is rejected because the orchestrator is busy, the files are enough.`,
     ``,
-    `Do not POST a finish webhook. Do not run herdr-finish-watch. Do not start another agent.`,
+    `Finish wake is automatic from the orca CLI when it marks the job done, failed, or stopped. That is not your job. Do not run herdr-finish-watch. Do not run orca stop or orca webhook. Do not start another agent.`,
   ].join("\n");
 }
 
@@ -401,11 +648,11 @@ function orchestratorPrompt(job) {
     ``,
     `Each worker writes ${dir}/results/<name>.json and a one-line note at ${dir}/notes/<name>.txt,`,
     `then prompts you with that note. Read those files. Do not trust a worker that skipped them.`,
-    `Do not POST a finish webhook. Finish wake is not wired. Do not run herdr-finish-watch.`,
+    `Finish wake is automatic from the orca CLI when it marks the job done, failed, or stopped. That is not your job. Do not run herdr-finish-watch. Do not run orca stop or orca webhook.`,
     ``,
     `When every worker has reported, write a short summary to ${dir}/summary.txt`,
     `and set the "summary" field of ${jobPath(job.repo, job.id)} to that same text. Keep every other field.`,
-    `Then stop.`,
+    `Then stop working.`,
   ].join("\n");
 }
 
@@ -415,7 +662,7 @@ function piPrompt(job) {
     `Work only in this checkout: ${job.worktree}`,
     `Branch: ${job.branch}`,
     `Do not push. Do not create another worktree or branch.`,
-    `Do not POST a finish webhook. Do not run herdr-finish-watch.`,
+    `Finish wake is automatic from the orca CLI when it marks the job done, failed, or stopped. That is not your job. Do not run herdr-finish-watch. Do not run orca stop or orca webhook.`,
     ``,
     job.goal.trim(),
   ].join("\n");
@@ -450,6 +697,7 @@ function printDryRun(repo, job) {
   } else {
     console.log("workers: none (pi is a single worker)");
   }
+  console.log("finish webhook: posts {job, status, branch} when the CLI marks done, failed, or stopped");
 }
 
 function assignClaudeModels(job, args) {
@@ -567,7 +815,7 @@ function startLead(job) {
   herdrFail(last, "agent start");
 }
 
-function cmdRun(args) {
+async function cmdRun(args) {
   if ("model" in args) fail("use --orchestrator-model and --worker-model on orca run, not --model");
   allowFlags(args, ["cwd", "dry-run", "orchestrator-model", "worker-model"]);
   const id = args._[1];
@@ -597,10 +845,12 @@ function cmdRun(args) {
     save(repo, job);
   } catch (err) {
     if (job.worktree || job.pane || job.agent) {
-      job.status = "failed";
-      job.finished = new Date().toISOString();
-      job.stopReason = err.message;
-      save(repo, job);
+      try {
+        const wake = await markTerminal(repo, job, "failed", err.message);
+        console.error(finishLine(wake));
+      } catch (markErr) {
+        console.error(markErr?.message || markErr);
+      }
     }
     throw err;
   }
@@ -690,6 +940,7 @@ function cmdStatus(args) {
     const summary = summaryOf(repo, job);
     if (summary) console.log(`  summary: ${summary}`);
     if (job.stopReason) console.log(`  stop: ${job.stopReason}`);
+    console.log(`  ${finishStatusLine(repo, job)}`);
     return;
   }
   mkdirSync(jobsDir(repo), { recursive: true });
@@ -723,13 +974,24 @@ function interrupt(name) {
   return first.code === 0 && second.code === 0 && !first.json?.error && !second.json?.error;
 }
 
-function cmdStop(args) {
-  allowFlags(args, ["cwd"]);
+async function cmdStop(args) {
+  allowFlags(args, ["cwd", "dry-run"]);
   const id = args._[1];
   if (!id) fail("need id");
   const reason = args._.slice(2).join(" ").trim() || "stopped by request";
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, id);
+  if (args["dry-run"]) {
+    if (job.status !== "running" && job.status !== "queued") {
+      console.log(`dry-run stop ${id}: already ${job.status}; no status change; no finish webhook`);
+      return;
+    }
+    console.log(`dry-run stop ${id}: ${job.status} -> stopped`);
+    console.log(`reason: ${reason}`);
+    const preview = await deliverFinish(repo, { ...job, status: "stopped" }, { dryRun: true });
+    for (const line of preview.lines) console.log(`finish webhook: ${line}`);
+    return;
+  }
   if (job.status !== "running" && job.status !== "queued") {
     console.log(`${id} is already ${job.status}`);
     return;
@@ -755,11 +1017,32 @@ function cmdStop(args) {
   } else {
     how = "was queued";
   }
-  job.status = "stopped";
-  job.finished = new Date().toISOString();
-  job.stopReason = reason;
-  save(repo, job);
+  const wake = await markTerminal(repo, job, "stopped", reason);
   console.log(`stopped ${id} (${how}): ${reason}`);
+  console.log(finishLine(wake));
+}
+
+function webhookExit(result) {
+  if (result.action === "accepted" || result.action === "dry-run" || result.action === "already") return 0;
+  if (result.action === "refuse" && result.detail.includes("accepted")) return 0;
+  return 1;
+}
+
+async function cmdWebhook(args) {
+  allowFlags(args, ["cwd", "dry-run", "force"]);
+  const id = args._[1];
+  if (!id) fail("need id");
+  const repo = requireRepo(args.cwd || process.cwd());
+  const job = load(repo, id);
+  if (args["dry-run"]) {
+    console.log(`dry-run webhook ${job.id}`);
+    const preview = await deliverFinish(repo, job, { dryRun: true });
+    for (const line of preview.lines) console.log(line);
+    return;
+  }
+  const result = await deliverFinish(repo, job, { manual: true, force: !!args.force });
+  console.log(finishLine(result));
+  if (webhookExit(result) !== 0) process.exitCode = 1;
 }
 
 function help() {
@@ -773,7 +1056,8 @@ function help() {
   orca worker --job <id> --name <agent> --task "..." [--model <alias>] [--dry-run]
   orca status [id] [--cwd <repo>]
   orca steer <id> "message"
-  orca stop <id> [reason]
+  orca stop <id> [reason] [--dry-run]
+  orca webhook <id> [--dry-run] [--force]
   orca help
 
 Jobs: <repo>/.orca/jobs/<id>.json
@@ -796,15 +1080,23 @@ kind pi
 
 A prompt that is still idle after ~8s is sent once more.
 status reads the job file. It does not poll Herdr.
-stop closes the job workspace, or interrupts the lead if there is no workspace.
-Finish webhooks are not wired. Next: POST {job, status, branch} using <repo>/.orca/secrets/finish-webhook.env
+stop closes the job workspace, or interrupts the lead if there is no workspace, then marks stopped.
+A failed run marks failed after the worktree or pane exists. Idle is not terminal.
+
+Finish wake is automatic from this CLI when it marks a job done, failed, or stopped.
+It POSTs {"job","status","branch"} once, using <repo>/.orca/secrets/finish-webhook.env (mode 600).
+Keys are WEBHOOK_URL and WEBHOOK_KEY, the same pair as herdr-finish-wake.env. Off if that file is missing.
+This CLI does not read a home path and does not run herdr-finish-watch. Agents must not either.
+A failed POST does not change job status. The attempt is <repo>/.orca/jobs/<id>.finish.json.
+orca webhook retries a failed attempt and records it. --dry-run prints the payload and does not send.
+Example (not a secret): examples/finish-webhook.env
 
 claude must be on PATH in the pane, and on PATH here so aliases can be checked.
 This CLI does not install it.
 `);
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2));
   const cmd = args._[0] || "help";
   if (args.help || cmd === "help") {
@@ -813,16 +1105,17 @@ function main() {
   }
   if (cmd === "init") cmdInit(args);
   else if (cmd === "new") cmdNew(args);
-  else if (cmd === "run") cmdRun(args);
+  else if (cmd === "run") await cmdRun(args);
   else if (cmd === "worker") cmdWorker(args);
   else if (cmd === "status") cmdStatus(args);
   else if (cmd === "steer") cmdSteer(args);
-  else if (cmd === "stop") cmdStop(args);
+  else if (cmd === "stop") await cmdStop(args);
+  else if (cmd === "webhook") await cmdWebhook(args);
   else fail(`unknown command ${cmd}\nrun: orca help`);
 }
 
 try {
-  main();
+  await main();
 } catch (err) {
   console.error(err && err.orca ? err.message : err?.message || err);
   process.exit(1);

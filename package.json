@@ -7,6 +7,9 @@
   "bin": {
     "orca": "./bin/orca.mjs"
   },
+  "scripts": {
+    "test": "node --test"
+  },
   "engines": {
     "node": ">=22"
   },
