@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "Local job CLI: one linked worktree, an orchestrator pane, workers on request.",
+  "description": "Local job CLI: one linked worktree, an orchestrator pane, workers on request, optional agent-browser checks.",
   "bin": {
     "orca": "./bin/orca.mjs"
   },

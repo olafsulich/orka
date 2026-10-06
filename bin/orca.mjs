@@ -4,9 +4,9 @@
 // Finish wake: when the CLI marks done|failed|stopped, POST {job, status, branch}
 // if <repo>/.orca/secrets/finish-webhook.env exists. Never a home path.
 import { spawnSync } from "node:child_process";
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
 
@@ -17,6 +17,25 @@ const ORCA = fileURLToPath(import.meta.url);
 const DEFAULT_ORCHESTRATOR_MODEL = "opus";
 const DEFAULT_WORKER_MODEL = "sonnet";
 const IDLE_RETRY_MS = 8000;
+const VERIFY_STEP_TIMEOUT_MS = 90000;
+const VERIFY_SCRIPT_TIMEOUT_MS = 600000;
+const VERIFY_FILE = "orca.verify.json";
+const STEP_ACTIONS = new Set([
+  "open",
+  "click",
+  "fill",
+  "press",
+  "wait",
+  "waitText",
+  "visible",
+  "text",
+  "title",
+  "titleIncludes",
+  "urlIncludes",
+  "count",
+  "get",
+]);
+const GET_FIELDS = { text: "text", title: "title", url: "url", count: "count", value: "value", attr: "value" };
 const VALUE_FLAGS = new Set([
   "title",
   "goal",
@@ -611,6 +630,9 @@ function workerPrompt(job, name, task, alias) {
     `Work only in this shared checkout: ${job.worktree}`,
     `Branch: ${job.branch}`,
     `Other workers share this worktree. Do not revert their files. Do not create a branch, worktree, or push.`,
+    `Browser checks, if this task needs them, go in ${VERIFY_FILE} at the worktree root, or the path in ${join(job.repo, ".orca", "config.json")} "verify".`,
+    `Shape: {"steps":[["open","http://HOST:PORT/"],{"visible":"SELECTOR"},{"text":"SELECTOR","includes":"EXPECTED"}]}`,
+    `Use this project's URL. Do not copy a host or port from another repo. Do not run orca verify unless the task says so.`,
     ``,
     String(task).trim(),
     ``,
@@ -650,9 +672,17 @@ function orchestratorPrompt(job) {
     `then prompts you with that note. Read those files. Do not trust a worker that skipped them.`,
     `Finish wake is automatic from the orca CLI when it marks the job done, failed, or stopped. That is not your job. Do not run herdr-finish-watch. Do not run orca stop or orca webhook.`,
     ``,
-    `When every worker has reported, write a short summary to ${dir}/summary.txt`,
-    `and set the "summary" field of ${jobPath(job.repo, job.id)} to that same text. Keep every other field.`,
-    `Then stop working.`,
+    `When every worker has reported, run project checks before the summary:`,
+    `  orca verify ${job.id}`,
+    `If orca is not on PATH, run ${ORCA} verify ${job.id}.`,
+    `That drives agent-browser from checks in this worktree. It does not assume a host, port, or app.`,
+    `Default file: ${VERIFY_FILE} here. Or "verify" in ${join(job.repo, ".orca", "config.json")} (relative to this worktree, or false to disable).`,
+    `No checks file skips and exits 0. That is not a failure. If verify fails, the goal is not done: say so in the summary and stop.`,
+    `Do not invent a URL or a checks file unless the goal asked for checks.`,
+    ``,
+    `Then read ${jobPath(job.repo, job.id)} again, write a short summary to ${dir}/summary.txt`,
+    `and set the "summary" field to that same text. Keep every other field, including verify.`,
+    `Do not change verify; orca verify writes that. Then stop working.`,
   ].join("\n");
 }
 
@@ -663,6 +693,11 @@ function piPrompt(job) {
     `Branch: ${job.branch}`,
     `Do not push. Do not create another worktree or branch.`,
     `Finish wake is automatic from the orca CLI when it marks the job done, failed, or stopped. That is not your job. Do not run herdr-finish-watch. Do not run orca stop or orca webhook.`,
+    ``,
+    `When the work is done, run \`orca verify ${job.id}\` (or ${ORCA} verify ${job.id}) before you stop.`,
+    `That drives agent-browser from ${VERIFY_FILE} in this checkout, or the "verify" path in ${join(job.repo, ".orca", "config.json")}.`,
+    `No checks file skips. A failed verify means the job is not done. Do not invent a URL.`,
+    `To add checks: {"steps":[["open","http://HOST:PORT/"],{"visible":"SELECTOR"},{"text":"SELECTOR","includes":"EXPECTED"}]}. Use this project's URL.`,
     ``,
     job.goal.trim(),
   ].join("\n");
@@ -698,6 +733,7 @@ function printDryRun(repo, job) {
     console.log("workers: none (pi is a single worker)");
   }
   console.log("finish webhook: posts {job, status, branch} when the CLI marks done, failed, or stopped");
+  console.log(`verify: orca verify ${job.id} (skips when the worktree has no checks file)`);
 }
 
 function assignClaudeModels(job, args) {
@@ -941,6 +977,7 @@ function cmdStatus(args) {
     if (summary) console.log(`  summary: ${summary}`);
     if (job.stopReason) console.log(`  stop: ${job.stopReason}`);
     console.log(`  ${finishStatusLine(repo, job)}`);
+    printVerifyStatus(repo, job);
     return;
   }
   mkdirSync(jobsDir(repo), { recursive: true });
@@ -1045,6 +1082,501 @@ async function cmdWebhook(args) {
   if (webhookExit(result) !== 0) process.exitCode = 1;
 }
 
+function readConfig(repo) {
+  const path = configPath(repo);
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    fail(`corrupt config ${path}`);
+  }
+}
+
+function assertChecksFile(path) {
+  let st;
+  try {
+    st = statSync(path);
+  } catch {
+    fail(`checks file not found: ${path}`);
+  }
+  if (!st.isFile()) fail(`checks path is not a file: ${path}`);
+}
+
+function resolveChecks(repo, worktree) {
+  const cfg = readConfig(repo);
+  if (cfg.verify === false) return { skip: true, reason: "disabled in .orca/config.json" };
+  if (cfg.verify != null && cfg.verify !== "") {
+    if (typeof cfg.verify !== "string") fail('config "verify" must be a path or false');
+    const path = resolve(worktree, cfg.verify);
+    if (!existsSync(path)) fail(`checks file not found: ${path}\nconfig verify is ${cfg.verify}`);
+    assertChecksFile(path);
+    return { path };
+  }
+  const path = join(worktree, VERIFY_FILE);
+  if (!existsSync(path)) return { skip: true, reason: `no ${VERIFY_FILE}` };
+  assertChecksFile(path);
+  return { path };
+}
+
+function relTo(root, path) {
+  const rel = relative(root, path);
+  if (!rel || rel.startsWith("..")) return path;
+  return rel;
+}
+
+function verifySession(id) {
+  const clean = String(id).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+  return `orca-verify-${clean || "job"}`;
+}
+
+function classifyChecks(path) {
+  if (path.endsWith(".json")) return "json";
+  const head = readFileSync(path, "utf8").replace(/^\uFEFF/, "").slice(0, 200).trimStart();
+  if (!head) fail(`checks file is empty: ${path}`);
+  if (head.startsWith("{") || head.startsWith("[")) return "json";
+  return "script";
+}
+
+function loadSteps(path) {
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""));
+  } catch (err) {
+    fail(`checks file is not JSON: ${path}\n${err.message}`);
+  }
+  let steps;
+  if (Array.isArray(parsed)) steps = parsed;
+  else if (parsed && typeof parsed === "object") {
+    const extra = Object.keys(parsed).filter((key) => key !== "steps" && key !== "note");
+    if (extra.length) fail(`unknown checks field: ${extra.join(", ")}`);
+    if (!Array.isArray(parsed.steps)) fail("checks file needs a steps array");
+    steps = parsed.steps;
+  } else {
+    fail("checks file must be a steps array or { steps: [...] }");
+  }
+  if (!steps.length) fail("checks file has no steps");
+  if (steps.length > 100) fail("checks file has more than 100 steps");
+  return steps;
+}
+
+function needString(value, label) {
+  if (typeof value !== "string" || value.trim() === "") fail(`${label} needs a non-empty string`);
+  return value;
+}
+
+function rejectAssert(step, action) {
+  if ("equals" in step || "includes" in step) fail(`${action} does not take equals or includes`);
+}
+
+function stepAction(step) {
+  const actions = Object.keys(step).filter((key) => STEP_ACTIONS.has(key));
+  if (actions.length !== 1) fail(`step needs one action (${[...STEP_ACTIONS].join(", ")}), got ${actions.join(", ") || "none"}`);
+  const unknown = Object.keys(step).filter((key) => key !== actions[0] && key !== "equals" && key !== "includes");
+  if (unknown.length) fail(`unknown step field ${unknown.join(", ")}`);
+  return actions[0];
+}
+
+function assertSpec(label, step, mode) {
+  const hasEq = "equals" in step;
+  const hasIn = "includes" in step;
+  if (mode === "equals") {
+    if (!hasEq || hasIn) fail(`${label} needs equals`);
+    return { equals: step.equals };
+  }
+  if (hasEq === hasIn) fail(`${label} needs exactly one of equals or includes`);
+  if (hasEq) return { equals: step.equals };
+  return { includes: step.includes };
+}
+
+function fillPair(value) {
+  if (!Array.isArray(value) || value.length !== 2 || typeof value[0] !== "string" || !value[0].trim() || typeof value[1] !== "string") {
+    fail("fill needs [selector, text]");
+  }
+  return value;
+}
+
+function planArgv(args) {
+  if (!args.length || args.some((item) => typeof item !== "string" || item.trim() === "")) fail("argv step needs non-empty strings");
+  if (args.some((item) => item === "--session" || item.startsWith("--session=") || item === "--json")) {
+    fail("argv step must not set --session or --json; orca sets those");
+  }
+  const plan = { argv: args };
+  if (args[0] === "is" && (args[1] === "visible" || args[1] === "enabled" || args[1] === "checked")) {
+    if (!args[2]) fail(`is ${args[1]} needs a selector`);
+    plan.assert = { flag: args[1] };
+  }
+  return plan;
+}
+
+function planStep(step) {
+  if (Array.isArray(step)) return planArgv(step);
+  if (!step || typeof step !== "object") fail("step must be an array or object");
+  const action = stepAction(step);
+  if (action === "open") {
+    rejectAssert(step, action);
+    return { argv: ["open", needString(step.open, "open")] };
+  }
+  if (action === "click") {
+    rejectAssert(step, action);
+    return { argv: ["click", needString(step.click, "click")] };
+  }
+  if (action === "press") {
+    rejectAssert(step, action);
+    return { argv: ["press", needString(step.press, "press")] };
+  }
+  if (action === "fill") {
+    rejectAssert(step, action);
+    const [sel, text] = fillPair(step.fill);
+    return { argv: ["fill", sel, text] };
+  }
+  if (action === "waitText") {
+    rejectAssert(step, action);
+    return { argv: ["wait", "--text", needString(step.waitText, "waitText")] };
+  }
+  if (action === "wait") {
+    rejectAssert(step, action);
+    if (typeof step.wait === "number") {
+      if (!Number.isFinite(step.wait) || step.wait < 0 || step.wait > 60000) fail("wait milliseconds must be between 0 and 60000");
+      return { argv: ["wait", String(Math.trunc(step.wait))] };
+    }
+    return { argv: ["wait", needString(step.wait, "wait")] };
+  }
+  if (action === "visible") {
+    rejectAssert(step, action);
+    return { argv: ["is", "visible", needString(step.visible, "visible")], assert: { flag: "visible" } };
+  }
+  if (action === "title") {
+    rejectAssert(step, action);
+    return { argv: ["get", "title"], assert: { field: "title", equals: needString(step.title, "title") } };
+  }
+  if (action === "titleIncludes") {
+    rejectAssert(step, action);
+    return { argv: ["get", "title"], assert: { field: "title", includes: needString(step.titleIncludes, "titleIncludes") } };
+  }
+  if (action === "urlIncludes") {
+    rejectAssert(step, action);
+    return { argv: ["get", "url"], assert: { field: "url", includes: needString(step.urlIncludes, "urlIncludes") } };
+  }
+  if (action === "text") {
+    const sel = needString(step.text, "text");
+    return { argv: ["get", "text", sel], assert: { field: "text", ...assertSpec(`text ${sel}`, step, "either") } };
+  }
+  if (action === "count") {
+    const sel = needString(step.count, "count");
+    if ("includes" in step) fail("count needs equals, not includes");
+    const spec = assertSpec(`count ${sel}`, step, "equals");
+    if (typeof spec.equals !== "number") fail("count equals needs a number");
+    return { argv: ["get", "count", sel], assert: { field: "count", ...spec } };
+  }
+  if (action === "get") {
+    if (!Array.isArray(step.get) || !step.get.length || step.get.some((item) => typeof item !== "string" || !item.trim())) {
+      fail("get needs a non-empty string array");
+    }
+    const field = GET_FIELDS[step.get[0]];
+    if (!field) fail(`get ${step.get[0]} is not an assertion; use an argv step`);
+    const spec = assertSpec(`get ${step.get.join(" ")}`, step, "either");
+    if (field === "count" && ("includes" in spec || typeof spec.equals !== "number")) fail("count equals needs a number");
+    return { argv: ["get", ...step.get], assert: { field, ...spec } };
+  }
+  fail(`unknown action ${action}`);
+}
+
+function isAssertion(plan) {
+  if (plan.assert) return true;
+  return plan.argv[0] === "wait" && plan.argv.some((arg) => arg === "--text" || arg === "--url" || arg === "--fn");
+}
+
+function loadPlans(path) {
+  const steps = loadSteps(path);
+  const plans = steps.map((step, index) => {
+    try {
+      return planStep(step);
+    } catch (err) {
+      fail(`step ${index + 1}: ${err?.orca ? err.message : err?.message || err}`);
+    }
+  });
+  if (!plans.some(isAssertion)) fail("checks file does not assert anything (need visible, text, title, url, count, get, is, or wait --text)");
+  return plans;
+}
+
+function describePlan(plan) {
+  const base = plan.argv.join(" ");
+  const assert = plan.assert;
+  if (!assert) return base;
+  if (assert.flag) return `${base} == true`;
+  if ("equals" in assert) return `${base} equals ${JSON.stringify(assert.equals)}`;
+  return `${base} includes ${JSON.stringify(assert.includes)}`;
+}
+
+function browser(session, args, cwd) {
+  const r = spawnSync("agent-browser", ["--session", session, "--json", ...args], {
+    cwd,
+    encoding: "utf8",
+    timeout: VERIFY_STEP_TIMEOUT_MS,
+    env: { ...process.env, PATH: pathPrefix(), AGENT_BROWSER_SESSION: session },
+  });
+  if (r.error && r.error.code === "ENOENT") fail("agent-browser is not on PATH");
+  if (r.error && r.error.code === "ETIMEDOUT") fail(`timed out after ${VERIFY_STEP_TIMEOUT_MS}ms: agent-browser ${args.join(" ")}`);
+  const stdout = (r.stdout || "").trim();
+  let json = null;
+  if (stdout) {
+    try {
+      json = JSON.parse(stdout);
+    } catch {
+      json = null;
+    }
+  }
+  return {
+    code: r.status ?? 1,
+    json,
+    text: `${stdout}\n${r.stderr || ""}`.trim().slice(0, 2000),
+    error: r.error,
+  };
+}
+
+function requireOk(got, label) {
+  if (got.code === 0 && got.json?.success === true && !got.json.error) return got.json.data || {};
+  const detail = got.json?.error || got.text || got.error?.message || "agent-browser failed";
+  fail(`${label}: ${String(detail).slice(0, 400)}`);
+}
+
+function compare(label, value, spec) {
+  if (value === undefined) fail(`${label}: agent-browser returned no value`);
+  if ("includes" in spec) {
+    const expected = spec.includes;
+    if (typeof expected !== "string" && typeof expected !== "number") fail(`${label}: includes needs a string`);
+    if (value === null || (typeof value !== "string" && typeof value !== "number")) fail(`${label}: cannot search ${JSON.stringify(value)}`);
+    if (!String(value).includes(String(expected))) fail(`${label}: ${JSON.stringify(value)} does not include ${JSON.stringify(expected)}`);
+    return;
+  }
+  const expected = spec.equals;
+  if (typeof expected === "number" || typeof value === "number") {
+    if (typeof expected !== "number" || typeof value !== "number" || value !== expected) {
+      fail(`${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(value)}`);
+    }
+    return;
+  }
+  if (typeof expected === "string" || typeof value === "string") {
+    const got = typeof value === "string" ? value.trim() : value;
+    const want = typeof expected === "string" ? expected.trim() : expected;
+    if (got !== want) fail(`${label}: expected ${JSON.stringify(want)}, got ${JSON.stringify(got)}`);
+    return;
+  }
+  if (value !== expected) fail(`${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(value)}`);
+}
+
+function execPlan(session, plan, cwd) {
+  const data = requireOk(browser(session, plan.argv, cwd), plan.argv.join(" "));
+  const assert = plan.assert;
+  if (!assert) return;
+  if (assert.flag) {
+    if (!data || data[assert.flag] !== true) fail(`${assert.flag} is not true`);
+    return;
+  }
+  if (!data || !(assert.field in data)) fail(`response has no ${assert.field}`);
+  compare(plan.argv.join(" "), data[assert.field], assert);
+}
+
+function runPlans(session, plans, cwd, logPath) {
+  plans.forEach((plan, index) => {
+    const label = `${index + 1}/${plans.length} ${describePlan(plan)}`;
+    appendFileSync(logPath, `step ${label}\n`);
+    try {
+      execPlan(session, plan, cwd);
+      appendFileSync(logPath, `ok ${label}\n`);
+    } catch (err) {
+      const msg = err?.orca ? err.message : err?.message || String(err);
+      appendFileSync(logPath, `fail ${label}: ${msg}\n`);
+      fail(`step ${index + 1}/${plans.length} (${describePlan(plan)}): ${msg}`);
+    }
+  });
+}
+
+function closeSession(session, cwd) {
+  try {
+    spawnSync("agent-browser", ["--session", session, "close"], {
+      cwd,
+      encoding: "utf8",
+      timeout: 20000,
+      env: { ...process.env, PATH: pathPrefix(), AGENT_BROWSER_SESSION: session },
+    });
+  } catch {
+    // a missing browser should not hide the verify result
+  }
+}
+
+function runScript(path, cwd, session, logPath, job) {
+  const text = readFileSync(path, "utf8");
+  const executable = (statSync(path).mode & 0o111) !== 0;
+  let cmd;
+  let args;
+  if (executable) {
+    cmd = path;
+    args = [];
+  } else {
+    const shebang = text.match(/^#!\s*(\S+)(?:\s+(\S+))?/);
+    if (shebang && shebang[1] === "/usr/bin/env" && shebang[2]) {
+      cmd = shebang[2];
+      args = [path];
+    } else if (shebang) {
+      cmd = shebang[1];
+      args = [path];
+    } else {
+      cmd = "bash";
+      args = [path];
+    }
+  }
+  const r = spawnSync(cmd, args, {
+    cwd,
+    encoding: "utf8",
+    timeout: VERIFY_SCRIPT_TIMEOUT_MS,
+    env: {
+      ...process.env,
+      PATH: pathPrefix(),
+      AGENT_BROWSER_SESSION: session,
+      ORCA_JOB: job.id,
+      ORCA_REPO: job.repo,
+      ORCA_WORKTREE: job.worktree,
+      ORCA_BRANCH: job.branch || "",
+    },
+  });
+  const out = `${r.stdout || ""}${r.stderr || ""}`.trim().slice(-4000);
+  if (out) appendFileSync(logPath, `${out}\n`);
+  if (r.error && r.error.code === "ETIMEDOUT") fail("checks script timed out after 600s");
+  if (r.error && r.error.code === "ENOENT") fail(`cannot run checks script: ${cmd} is not on PATH`);
+  if ((r.status ?? 1) !== 0) fail(`checks script exited ${r.status ?? 1}${out ? `\n${out.slice(-800)}` : ""}`);
+}
+
+function recordFailed(repo, job, err, file) {
+  const msg = err?.orca ? err.message : err?.message || String(err);
+  try {
+    recordVerify(repo, job, { status: "failed", summary: msg, file: file || "" });
+  } catch {
+    // keep the verify error
+  }
+}
+
+function recordVerify(repo, job, result) {
+  job.verify = {
+    status: result.status,
+    at: new Date().toISOString(),
+    file: result.file || "",
+    summary: String(result.summary || "").slice(0, 500),
+  };
+  if (result.log) job.verify.log = result.log;
+  if (result.steps != null) job.verify.steps = result.steps;
+  save(repo, job);
+}
+
+function printVerifyStatus(repo, job) {
+  if (job.verify?.status) {
+    const file = job.verify.file ? ` ${job.verify.file}` : "";
+    const summary = String(job.verify.summary || "").replace(/\s+/g, " ").slice(0, 240);
+    console.log(`  verify: ${job.verify.status}${file}${summary ? ` - ${summary}` : ""}`);
+    if (job.verify.log && job.verify.status === "failed") console.log(`  verify-log: ${job.verify.log}`);
+    return;
+  }
+  if (!job.worktree || !existsSync(job.worktree)) return;
+  let checks;
+  try {
+    checks = resolveChecks(repo, job.worktree);
+  } catch {
+    return;
+  }
+  if (checks.skip) return;
+  console.log(`  verify: not run (${relTo(job.worktree, checks.path)})`);
+}
+
+function printVerifyDryRun(id, job, path, kind) {
+  console.log(`dry-run verify ${id}`);
+  console.log(`worktree: ${job.worktree}`);
+  console.log(`checks: ${path}`);
+  console.log(`kind: ${kind}`);
+  console.log(`session: ${verifySession(id)}`);
+  if (kind === "script") {
+    console.log("would run the script with AGENT_BROWSER_SESSION set, then close that session");
+    return;
+  }
+  const plans = loadPlans(path);
+  console.log(`steps: ${plans.length}`);
+  plans.forEach((plan, index) => console.log(`  ${index + 1}. ${describePlan(plan)}`));
+}
+
+function cmdVerify(args) {
+  allowFlags(args, ["cwd", "dry-run"]);
+  const id = args._[1];
+  if (!id) fail("need id");
+  if (args._.length > 2) fail("verify takes one job id");
+  const repo = requireRepo(args.cwd || process.cwd());
+  const job = load(repo, id);
+  if (!job.worktree) fail(`job ${id} has no worktree; run it before verify`);
+  if (!existsSync(job.worktree)) fail(`worktree missing: ${job.worktree}`);
+  let checks;
+  try {
+    checks = resolveChecks(repo, job.worktree);
+  } catch (err) {
+    if (!args["dry-run"]) recordFailed(repo, job, err, "");
+    throw err;
+  }
+  if (checks.skip) {
+    if (!args["dry-run"]) recordVerify(repo, job, { status: "skipped", summary: checks.reason, file: "" });
+    console.log(`verify skipped ${id}: ${checks.reason}`);
+    return;
+  }
+  let kind;
+  try {
+    kind = classifyChecks(checks.path);
+  } catch (err) {
+    if (!args["dry-run"]) recordFailed(repo, job, err, relTo(job.worktree, checks.path));
+    throw err;
+  }
+  if (args["dry-run"]) {
+    printVerifyDryRun(id, job, checks.path, kind);
+    return;
+  }
+  const session = verifySession(id);
+  const logPath = join(ensureJobDir(repo, id), "verify.log");
+  const file = relTo(job.worktree, checks.path);
+  writeFileSync(logPath, `verify ${id}\nat ${new Date().toISOString()}\nfile ${checks.path}\nsession ${session}\nkind ${kind}\n`);
+  let started = false;
+  try {
+    if (kind === "json") {
+      const plans = loadPlans(checks.path);
+      started = true;
+      closeSession(session, job.worktree);
+      runPlans(session, plans, job.worktree, logPath);
+      recordVerify(repo, job, {
+        status: "passed",
+        summary: `passed ${plans.length} steps`,
+        file,
+        steps: plans.length,
+        log: logPath,
+      });
+      console.log(`verify passed ${id} (${plans.length} steps) ${file}`);
+      return;
+    }
+    started = true;
+    closeSession(session, job.worktree);
+    runScript(checks.path, job.worktree, session, logPath, job);
+    recordVerify(repo, job, { status: "passed", summary: "script passed", file, log: logPath });
+    console.log(`verify passed ${id} (script) ${file}`);
+  } catch (err) {
+    const msg = err?.orca ? err.message : err?.message || String(err);
+    try {
+      recordVerify(repo, job, { status: "failed", summary: msg, file, log: logPath });
+    } catch {
+      // keep the verify error
+    }
+    const withLog = msg.includes(logPath) ? msg : `${msg}\nlog: ${logPath}`;
+    if (err?.orca) {
+      err.message = `verify failed ${id}: ${withLog}`;
+      throw err;
+    }
+    fail(`verify failed ${id}: ${withLog}`);
+  } finally {
+    if (started) closeSession(session, job.worktree);
+  }
+}
+
 function help() {
   console.log(`orca — one job in a linked worktree
 
@@ -1057,7 +1589,8 @@ function help() {
   orca status [id] [--cwd <repo>]
   orca steer <id> "message"
   orca stop <id> [reason] [--dry-run]
-  orca webhook <id> [--dry-run] [--force]
+  orca webhook <id> [--dry-run] [--force] [--cwd <repo>]
+  orca verify <id> [--dry-run] [--cwd <repo>]
   orca help
 
 Jobs: <repo>/.orca/jobs/<id>.json
@@ -1079,7 +1612,7 @@ kind pi
   One Pi worker in the worktree. No Opus or Sonnet. Model flags are refused.
 
 A prompt that is still idle after ~8s is sent once more.
-status reads the job file. It does not poll Herdr.
+status reads the job file. It does not poll Herdr. One job also prints the finish-wake record and verify.
 stop closes the job workspace, or interrupts the lead if there is no workspace, then marks stopped.
 A failed run marks failed after the worktree or pane exists. Idle is not terminal.
 
@@ -1090,6 +1623,17 @@ This CLI does not read a home path and does not run herdr-finish-watch. Agents m
 A failed POST does not change job status. The attempt is <repo>/.orca/jobs/<id>.finish.json.
 orca webhook retries a failed attempt and records it. --dry-run prints the payload and does not send.
 Example (not a secret): examples/finish-webhook.env
+
+verify
+  Runs project checks in the job worktree through agent-browser.
+  Default file: orca.verify.json at the worktree root. Commit it. It is not under .orca/.
+  Override: "verify" in <repo>/.orca/config.json, a path relative to the worktree, or false to disable.
+  No checks file skips (exit 0, verify.status skipped). That is not a pass.
+  Invalid or failing checks fail closed (exit 1, verify.status failed).
+  The checks file names the URL. This command does not assume a host, port, or app.
+  agent-browser must be on PATH. This CLI does not install it.
+  Example: {"steps":[["open","http://127.0.0.1:3000/"],{"visible":"h1"},{"text":"h1","includes":"Ready"}]}
+  See README. examples/orca.verify.json is an example only; orca does not run it.
 
 claude must be on PATH in the pane, and on PATH here so aliases can be checked.
 This CLI does not install it.
@@ -1111,6 +1655,7 @@ async function main() {
   else if (cmd === "steer") cmdSteer(args);
   else if (cmd === "stop") await cmdStop(args);
   else if (cmd === "webhook") await cmdWebhook(args);
+  else if (cmd === "verify") cmdVerify(args);
   else fail(`unknown command ${cmd}\nrun: orca help`);
 }
 

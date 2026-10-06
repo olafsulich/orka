@@ -63,8 +63,9 @@ Workers share the job worktree. They do not get sibling checkouts. Concurrent ed
 <repo>/.orca/config.json             local mark (gitignored)
 <repo>/.orca/jobs/<id>.json          job record
 <repo>/.orca/jobs/<id>.finish.json   finish-wake attempts (no secrets)
-<repo>/.orca/jobs/<id>/              results/, notes/, summary.txt
+<repo>/.orca/jobs/<id>/              results/, notes/, summary.txt, verify.log
 <repo>/.orca/worktrees/<id>/         linked worktree, branch orca/<id>
+<worktree>/orca.verify.json          optional browser checks (commit this; not under .orca/)
 <repo>/.orca/secrets/finish-webhook.env
 ```
 
@@ -85,6 +86,7 @@ orca status [id] [--cwd <repo>]
 orca steer <id> "message"
 orca stop <id> [reason] [--dry-run]
 orca webhook <id> [--dry-run] [--force] [--cwd <repo>]
+orca verify <id> [--dry-run] [--cwd <repo>]
 orca help
 ```
 
@@ -100,7 +102,7 @@ An alias is checked against `claude --help` before the job is stored or started.
 
 If the lead (or a worker) is still `idle` about 8 seconds after the prompt, orca sends the prompt once more. That is the startup swallow retry, not a second task.
 
-`status` reads the job file. It does not poll Herdr. For one job it also prints the finish-wake record.
+`status` reads the job file. It does not poll Herdr. For one job it also prints the finish-wake record, and verify once it has run or a checks file is present.
 
 `steer` prompts the lead agent and records the message on the job.
 
@@ -108,7 +110,46 @@ If the lead (or a worker) is still `idle` about 8 seconds after the prompt, orca
 
 `webhook` previews or retries that POST. It does not change job status.
 
-`claude` must already be on `PATH` inside the pane, and on `PATH` here so aliases can be checked. This CLI does not install it.
+`verify` runs project browser checks in the job worktree. See Verify. It does not set the job to `done`.
+
+`claude` must already be on `PATH` inside the pane, and on `PATH` here so aliases can be checked. This CLI does not install it. `agent-browser` must be on `PATH` for `verify`. This CLI does not install that either.
+
+## Verify
+
+`orca verify <id>` drives `agent-browser` from checks the project supplies. It does not know your app's URL, host, or port. Nothing in orca is tied to one repo's dev server.
+
+Checks are read from the job worktree, so the branch under test is what runs. Default file: `orca.verify.json` at that root. Commit it if later jobs should run it. Do not put it under `.orca/`. `init` gitignores `.orca/`, and a gitignored file is not in a new worktree.
+
+To put the file somewhere else, set `verify` in the primary checkout's `.orca/config.json` to a path relative to the worktree:
+
+```json
+{ "verify": "scripts/check.json" }
+```
+
+`"verify": false` disables checks even if a file exists. An explicit path that is missing fails and records `failed`. A missing default file skips.
+
+Skip is not a pass and not a failure. Exit 0. The job records `verify.status` `skipped`. A JSON checks file must assert something. Empty, invalid, or failing checks fail closed: exit 1, `verify.status` `failed`. The log is `<repo>/.orca/jobs/<id>/verify.log`.
+
+Nothing is assumed to be serving. The file names the URL. Start the app first, or point `verify` at a script that starts it and then calls `agent-browser`.
+
+JSON is the shape an agent should write. An array step is an `agent-browser` command. `is visible` exits 0 when the element is hidden, so orca requires that state to be true. Object steps cover the asserts exit codes get wrong:
+
+```json
+{
+  "steps": [
+    ["open", "http://127.0.0.1:3000/"],
+    ["wait", "--text", "Ready"],
+    { "visible": "h1" },
+    { "text": "h1", "includes": "Ready" }
+  ]
+}
+```
+
+Also: `click`, `fill` as `[selector, text]`, `press`, `wait`, `waitText`, `title`, `titleIncludes`, `urlIncludes`, `count` plus `equals` (a number), and `get` plus `equals` or `includes` for `text`, `title`, `url`, `count`, `value`, `attr`. A top-level `note` is ignored. Any other field fails. `examples/orca.verify.json` is an example only. orca does not run it.
+
+A non-JSON checks file is a script. orca runs it in the worktree with `AGENT_BROWSER_SESSION` set to a session just for this job, plus `ORCA_JOB`, `ORCA_REPO`, `ORCA_WORKTREE`, and `ORCA_BRANCH`. It closes that session when the script exits. The script must exit non-zero when a check fails. Use this when the check has to boot a server. Prefer JSON when the app is already up. A script is stopped after 600s. A JSON step is stopped after 90s.
+
+orca does not watch workers. The orchestrator is told to run `orca verify <id>` after workers report and before the summary. A pi job is told to run it when the work is done. You can run it yourself any time the worktree exists. `status` prints `verify` once it has run, or `not run` when a checks file is present and verify has not.
 
 ## Trust
 
