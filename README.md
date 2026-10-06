@@ -36,7 +36,7 @@ When the CLI marks a job `done`, `failed`, or `stopped`, it POSTs once:
 
 `job` is the id. `status` is the status just saved. `branch` is the job branch. Those three fields are the whole body. It is not the old `herdr-finish-watch` body.
 
-Today the CLI writes `stopped` from `orca stop`, and `failed` when `orca run` fails after the worktree or pane exists. Both call the same sender after the status is saved. Idle is not terminal. A summary file does not send the wake. You still `stop` a job you are done watching. `orca webhook` can also POST a job that is already `done`.
+Today the CLI writes `done` from `orca done`, `stopped` from `orca stop`, and `failed` when `orca run` fails after the worktree or pane exists. All call the same sender after the status is saved. Idle is not terminal. A summary file does not send the wake. The success path is the orchestrator running `orca done <id>` after verify and the summary; that marks the job `done` and fires the wake once. `orca webhook` can also POST a job that is already `done`.
 
 Off unless `<repo>/.orca/secrets/finish-webhook.env` exists. A missing file does not send and does not error. orca does not read `~/.config`, `~/bin/herdr-finish-watch`, the process environment, or any other home path for a destination. Do not symlink the file out of `.orca`. An escaped symlink is refused.
 
@@ -49,17 +49,18 @@ WEBHOOK_KEY=REPLACE_ME
 
 `WEBHOOK_KEY` is the raw token, not a `Bearer ` prefix. orca sends `Authorization: Bearer <key>` and `X-Automation-Key: <key>`. The URL must be `https`, with no userinfo and no fragment. Copy `examples/finish-webhook.env`, replace the placeholders, and `chmod 600` the copy. The POST waits about 8 seconds. HTTP acceptance is not proof the bot woke.
 
-A bad file or a failed POST is recorded at `<repo>/.orca/jobs/<id>.finish.json`. That record holds no secrets. Sender failure does not change the job status. One automatic attempt. `orca stop` on an already terminal job does not send again. If the env file was missing at stop, nothing is recorded; add the file and run `orca webhook <id>`.
+A bad file or a failed POST is recorded at `<repo>/.orca/jobs/<id>.finish.json`. That record holds no secrets. Sender failure does not change the job status. One automatic attempt. `orca stop` or `orca done` on an already terminal job does not send again. If the env file was missing at stop, nothing is recorded; add the file and run `orca webhook <id>`.
 
 `orca webhook <id>` retries a failed attempt and appends the result, so a retry is not a silent duplicate. If the last attempt was accepted, or is still `attempting` or `unknown` (the POST may have landed), it does not send unless you pass `--force`. `--force` records another attempt. `--dry-run` prints the payload and the URL origin, not the key or the URL path, and does not send.
 
 ```bash
 orca webhook <id> --dry-run
 orca stop <id> --dry-run
+orca done <id> --dry-run
 node --test test/finish-webhook.test.mjs
 ```
 
-Agents must not run `herdr-finish-watch`, `orca webhook`, or `orca stop`. The CLI sends the wake after it has saved the terminal status.
+Agents must not run `herdr-finish-watch`, `orca webhook`, or `orca stop`. Only the orchestrator runs `orca done`, once, at the end. The CLI sends the wake after it has saved the terminal status.
 
 ## Layout
 
@@ -91,6 +92,7 @@ orca worker --job <id> --name <agent> --task "..." [--model <alias>] [--dry-run]
 orca status [id] [--cwd <repo>]
 orca steer <id> "message"
 orca stop <id> [reason] [--dry-run]
+orca done <id> [reason] [--dry-run] [--cwd <repo>]
 orca webhook <id> [--dry-run] [--force] [--cwd <repo>]
 orca verify <id> [--dry-run] [--cwd <repo>]
 orca help
@@ -116,9 +118,11 @@ If the lead (or a worker) is still `idle` about 8 seconds after the prompt, orca
 
 `stop` closes the job's Herdr workspace (or interrupts the lead if there is no workspace) and sets `stopped`. It does not delete the worktree or the branch. The finish wake, if configured, is sent after that status is saved. `--dry-run` prints the plan and does not stop or send.
 
+`done` marks a running job `done` (reason defaults to `completed`) and sends the finish wake once. It does not close the Herdr workspace or interrupt anything. A queued job is refused with exit 1, since nothing ran. An already `done`, `failed`, or `stopped` job prints that status, exits 0, and sends nothing. `--dry-run` prints the plan and the finish payload, and does not change status or send.
+
 `webhook` previews or retries that POST. It does not change job status.
 
-`verify` runs project browser checks in the job worktree. See Verify. It does not set the job to `done`.
+`verify` runs project browser checks in the job worktree. See Verify. It does not set the job to `done`; `orca done` does.
 
 `claude` must already be on `PATH` inside the pane, and on `PATH` here so aliases can be checked. This CLI does not install it. `agent-browser` must be on `PATH` for `verify`. This CLI does not install that either.
 
@@ -161,4 +165,4 @@ orca does not watch workers. The orchestrator is told to run `orca verify <id>` 
 
 ## Trust
 
-orca does not mark a job `done` when the agent goes idle. The summary file is the completion note; `status` stays `running` until you `stop` it. A failed `run` leaves the worktree in place and marks the job `failed`. Both of those marks can POST the finish wake. Look at the branch before you merge. The worktree is not a sandbox.
+orca does not mark a job `done` when the agent goes idle. The summary file is the completion note; `status` stays `running` until the orchestrator runs `orca done <id>` (or you `stop` it). A failed `run` leaves the worktree in place and marks the job `failed`. Done, failed, and stopped marks can all POST the finish wake. Look at the branch before you merge. The worktree is not a sandbox.

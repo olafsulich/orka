@@ -677,7 +677,7 @@ function orchestratorPrompt(job) {
     ``,
     `Each worker writes ${dir}/results/<name>.json and a one-line note at ${dir}/notes/<name>.txt,`,
     `then prompts you with that note. Read those files. Do not trust a worker that skipped them.`,
-    `Finish wake is automatic from the orca CLI when it marks the job done, failed, or stopped. That is not your job. Do not run herdr-finish-watch. Do not run orca stop or orca webhook.`,
+    `The finish wake is sent by the orca CLI when orca done marks the job done (or when the job goes failed or stopped). Do not run herdr-finish-watch. Do not run orca stop or orca webhook.`,
     ``,
     `When every worker has reported, run project checks before the summary:`,
     `  orca verify ${job.id}`,
@@ -689,7 +689,11 @@ function orchestratorPrompt(job) {
     ``,
     `Then read ${jobPath(job.repo, job.id)} again, write a short summary to ${dir}/summary.txt`,
     `and set the "summary" field to that same text. Keep every other field, including verify.`,
-    `Do not change verify; orca verify writes that. Then stop working.`,
+    `Do not change verify; orca verify writes that.`,
+    `Then mark the job done, which sends the finish wake:`,
+    `  orca done ${job.id}`,
+    `If orca is not on PATH, run ${ORCA} done ${job.id}.`,
+    `Then stop working.`,
   ].join("\n");
 }
 
@@ -1055,6 +1059,35 @@ async function cmdStop(args) {
   }
   const wake = await markTerminal(repo, job, "stopped", reason);
   console.log(`stopped ${id} (${how}): ${reason}`);
+  console.log(finishLine(wake));
+}
+
+async function cmdDone(args) {
+  allowFlags(args, ["cwd", "dry-run"]);
+  const id = args._[1];
+  if (!id) fail("need id");
+  const reason = args._.slice(2).join(" ").trim() || "completed";
+  const repo = requireRepo(args.cwd || process.cwd());
+  const job = load(repo, id);
+  if (job.status === "queued") fail(`orca done: ${id} is queued, not running; nothing finished`);
+  const terminal = job.status !== "running";
+  if (args["dry-run"]) {
+    if (terminal) {
+      console.log(`dry-run done ${id}: already ${job.status}; no status change; no finish webhook`);
+      return;
+    }
+    console.log(`dry-run done ${id}: running -> done`);
+    console.log(`reason: ${reason}`);
+    const preview = await deliverFinish(repo, { ...job, status: "done" }, { dryRun: true });
+    for (const line of preview.lines) console.log(`finish webhook: ${line}`);
+    return;
+  }
+  if (terminal) {
+    console.log(`${id} is already ${job.status}`);
+    return;
+  }
+  const wake = await markTerminal(repo, job, "done", reason);
+  console.log(`done ${id}: ${reason}`);
   console.log(finishLine(wake));
 }
 
@@ -1589,6 +1622,7 @@ function help() {
   orca status [id] [--cwd <repo>]
   orca steer <id> "message"
   orca stop <id> [reason] [--dry-run]
+  orca done <id> [reason] [--dry-run] [--cwd <repo>]
   orca webhook <id> [--dry-run] [--force] [--cwd <repo>]
   orca verify <id> [--dry-run] [--cwd <repo>]
   orca help
@@ -1621,6 +1655,7 @@ Multi-worker (both kinds)
 A prompt that is still idle after ~8s is sent once more.
 status reads the job file. It does not poll Herdr. One job also prints the finish-wake record and verify.
 stop closes the job workspace, or interrupts the lead if there is no workspace, then marks stopped.
+done marks a running job done (default reason "completed") and sends the finish wake. It refuses a queued job and leaves a finished one alone.
 A failed run marks failed after the worktree or pane exists. Idle is not terminal.
 
 Finish wake is automatic from this CLI when it marks a job done, failed, or stopped.
@@ -1661,6 +1696,7 @@ async function main() {
   else if (cmd === "status") cmdStatus(args);
   else if (cmd === "steer") cmdSteer(args);
   else if (cmd === "stop") await cmdStop(args);
+  else if (cmd === "done") await cmdDone(args);
   else if (cmd === "webhook") await cmdWebhook(args);
   else if (cmd === "verify") cmdVerify(args);
   else fail(`unknown command ${cmd}\nrun: orca help`);

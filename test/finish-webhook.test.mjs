@@ -348,3 +348,90 @@ test("pi still refuses orchestrator and worker model flags", async () => {
   const made = await orca(repo, ["new", "--kind", "pi", "--title", "t", "--goal", "g", "--orchestrator-model", "opus"]);
   assert.notEqual(made.status, 0);
 });
+
+function setStatus(box, status) {
+  const current = job(box.jobPath);
+  current.status = status;
+  writeFileSync(box.jobPath, JSON.stringify(current, null, 2) + "\n");
+}
+
+test("done on a running job marks done and posts once", async () => {
+  const hits = [];
+  const receiver = await listen(hits);
+  const box = await scratch();
+  const tls = { NODE_TLS_REJECT_UNAUTHORIZED: "0" };
+  try {
+    setStatus(box, "running");
+    writeEnv(box.repo, `https://127.0.0.1:${receiver.port}/done`);
+    const out = await orca(box.repo, ["done", box.id], tls);
+    assert.equal(out.status, 0, out.stderr);
+    assert.match(out.stdout, new RegExp(`done ${box.id}: completed`));
+    assert.equal(job(box.jobPath).status, "done");
+    assert.equal(existsSync(box.recordPath), true);
+    assert.equal(hits.length, 1);
+    assert.deepEqual(JSON.parse(hits[0].body), { job: box.id, status: "done", branch: `orca/${box.id}` });
+  } finally {
+    receiver.close();
+    rmSync(box.repo, { recursive: true, force: true });
+  }
+});
+
+test("done on a queued job refuses and does not post", async () => {
+  const hits = [];
+  const receiver = await listen(hits);
+  const box = await scratch();
+  const tls = { NODE_TLS_REJECT_UNAUTHORIZED: "0" };
+  try {
+    writeEnv(box.repo, `https://127.0.0.1:${receiver.port}/done`);
+    const out = await orca(box.repo, ["done", box.id], tls);
+    assert.notEqual(out.status, 0);
+    assert.match(out.stderr, /is queued, not running; nothing finished/);
+    assert.equal(job(box.jobPath).status, "queued");
+    assert.equal(existsSync(box.recordPath), false);
+    assert.equal(hits.length, 0);
+  } finally {
+    receiver.close();
+    rmSync(box.repo, { recursive: true, force: true });
+  }
+});
+
+test("done --dry-run on a running job changes nothing", async () => {
+  const hits = [];
+  const receiver = await listen(hits);
+  const box = await scratch();
+  const tls = { NODE_TLS_REJECT_UNAUTHORIZED: "0" };
+  try {
+    setStatus(box, "running");
+    writeEnv(box.repo, `https://127.0.0.1:${receiver.port}/done`);
+    const out = await orca(box.repo, ["done", box.id, "--dry-run"], tls);
+    assert.equal(out.status, 0, out.stderr);
+    assert.match(out.stdout, /running -> done/);
+    assert.equal(job(box.jobPath).status, "running");
+    assert.equal(existsSync(box.recordPath), false);
+    assert.equal(hits.length, 0);
+  } finally {
+    receiver.close();
+    rmSync(box.repo, { recursive: true, force: true });
+  }
+});
+
+test("a second done on a done job is a no-op", async () => {
+  const hits = [];
+  const receiver = await listen(hits);
+  const box = await scratch();
+  const tls = { NODE_TLS_REJECT_UNAUTHORIZED: "0" };
+  try {
+    setStatus(box, "running");
+    writeEnv(box.repo, `https://127.0.0.1:${receiver.port}/done`);
+    const first = await orca(box.repo, ["done", box.id], tls);
+    assert.equal(first.status, 0, first.stderr);
+    assert.equal(hits.length, 1);
+    const again = await orca(box.repo, ["done", box.id], tls);
+    assert.equal(again.status, 0, again.stderr);
+    assert.match(again.stdout, /already done/);
+    assert.equal(hits.length, 1);
+  } finally {
+    receiver.close();
+    rmSync(box.repo, { recursive: true, force: true });
+  }
+});
