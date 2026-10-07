@@ -534,6 +534,12 @@ function noteSession(repo, job, session) {
   save(repo, job);
 }
 
+// Old verify sessions were orca-verify-<slug of the job id>.
+function legacyVerifySession(job) {
+  const clean = String(job.id).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+  return `orca-verify-${clean || "job"}`;
+}
+
 function browserList() {
   const r = spawnSync("agent-browser", ["session", "list", "--json"], {
     encoding: "utf8",
@@ -598,13 +604,13 @@ function closeBrowser(session) {
 
 // Browsers first, then the workspace. Closing the workspace kills the calling
 // orchestrator pane, so every line is printed before it. Only job.workspace is closed.
-function cleanupJob(job, opts = {}) {
+function cleanupJob(repo, job, opts = {}) {
   if (opts.keep || job.keep) {
     console.log(`cleanup: kept ${job.id} (--keep)`);
     return;
   }
   const sessions = jobSessions(job);
-  const workspace = opts.skipWorkspace ? "" : job.workspace;
+  const workspace = opts.skipWorkspace || job.workspaceClosed ? "" : job.workspace;
   for (const s of sessions) {
     if (opts.dryRun) console.log(`cleanup: would close browser ${s}`);
     else console.log(closeBrowser(s) ? `cleanup: closed browser ${s}` : `cleanup: browser ${s} not closed`);
@@ -615,6 +621,8 @@ function cleanupJob(job, opts = {}) {
     return;
   }
   console.log(`cleanup: closed workspace ${workspace}`);
+  job.workspaceClosed = new Date().toISOString();
+  save(repo, job);
   herdr(["workspace", "close", workspace]);
 }
 
@@ -982,7 +990,7 @@ async function cmdRun(args) {
       try {
         const wake = await markTerminal(repo, job, "failed", err.message);
         console.error(finishLine(wake));
-        cleanupJob(job);
+        cleanupJob(repo, job);
       } catch (markErr) {
         console.error(markErr?.message || markErr);
       }
@@ -1132,7 +1140,7 @@ async function cmdStop(args) {
     console.log(`reason: ${reason}`);
     const preview = await deliverFinish(repo, { ...job, status: "stopped" }, { dryRun: true });
     for (const line of preview.lines) console.log(`finish webhook: ${line}`);
-    cleanupJob(job, { dryRun: true, keep: args.keep });
+    cleanupJob(repo, job, { dryRun: true, keep: args.keep });
     return;
   }
   if (job.status !== "running" && job.status !== "queued") {
@@ -1155,6 +1163,7 @@ async function cmdStop(args) {
       const closed = herdr(["workspace", "close", job.workspace]);
       ok = closed.code === 0 && !closed.json?.error;
       closedWs = ok;
+      if (ok) job.workspaceClosed = new Date().toISOString();
       how = ok ? "workspace closed" : "workspace close failed";
     }
     if (!ok && (job.workspace || job.agent)) fail(`could not stop ${id}; job left running (${how})`);
@@ -1165,7 +1174,7 @@ async function cmdStop(args) {
   const wake = await markTerminal(repo, job, "stopped", reason);
   console.log(`stopped ${id} (${how}): ${reason}`);
   console.log(finishLine(wake));
-  cleanupJob(job, { keep: args.keep, skipWorkspace: closedWs });
+  cleanupJob(repo, job, { keep: args.keep, skipWorkspace: closedWs });
 }
 
 async function cmdDone(args) {
@@ -1186,7 +1195,7 @@ async function cmdDone(args) {
     console.log(`reason: ${reason}`);
     const preview = await deliverFinish(repo, { ...job, status: "done" }, { dryRun: true });
     for (const line of preview.lines) console.log(`finish webhook: ${line}`);
-    cleanupJob(job, { dryRun: true, keep: args.keep });
+    cleanupJob(repo, job, { dryRun: true, keep: args.keep });
     return;
   }
   if (terminal) {
@@ -1196,7 +1205,7 @@ async function cmdDone(args) {
   const wake = await markTerminal(repo, job, "done", reason);
   console.log(`done ${id}: ${reason}`);
   console.log(finishLine(wake));
-  cleanupJob(job, { keep: args.keep });
+  cleanupJob(repo, job, { keep: args.keep });
 }
 
 function webhookExit(result) {
@@ -1725,7 +1734,7 @@ function cmdCleanup(args) {
   const jobs = existsSync(jobsDir(repo))
     ? readdirSync(jobsDir(repo)).filter((f) => f.endsWith(".json") && !f.endsWith(".finish.json")).map((f) => load(repo, f.slice(0, -5)))
     : [];
-  const live = jobs.map((j) => j.status === "running" && browserPrefix(j));
+  const live = jobs.filter((j) => j.status === "running");
   let count = 0;
   const closeBrowsers = (names) => {
     for (const s of names) {
@@ -1737,22 +1746,27 @@ function cmdCleanup(args) {
   };
   const workspaces = [];
   for (const job of jobs) {
-    if (!FINISH_STATUSES.has(job.status) || job.keep || !job.workspace) continue;
-    workspaces.push(job.workspace);
+    if (!FINISH_STATUSES.has(job.status) || job.keep || !job.workspace || job.workspaceClosed) continue;
+    workspaces.push(job);
   }
   const names = new Set();
   for (const s of [...browserList(), ...jobs.flatMap((j) => j.browserSessions || [])]) {
-    const owner = jobs.find((j) => s.startsWith(`${browserPrefix(j)}-`));
-    if (owner && !live.includes(browserPrefix(owner)) && !owner.keep) names.add(s);
+    const owner = jobs.find((j) => s.startsWith(`${browserPrefix(j)}-`) || s === legacyVerifySession(j));
+    if (owner && !live.includes(owner) && !owner.keep) names.add(s);
   }
   for (const s of orphanSessions()) names.add(s);
   closeBrowsers([...names]);
-  for (const w of workspaces) {
-    console.log(`cleanup: ${verb} workspace ${w}`);
+  for (const j of workspaces) {
+    console.log(`cleanup: ${verb} workspace ${j.workspace}`);
     count++;
   }
   if (!count) console.log("cleanup: nothing to close");
-  if (!dry) for (const w of workspaces) herdr(["workspace", "close", w]);
+  if (dry) return;
+  for (const j of workspaces) {
+    j.workspaceClosed = new Date().toISOString();
+    save(repo, j);
+    herdr(["workspace", "close", j.workspace]);
+  }
 }
 
 function help() {

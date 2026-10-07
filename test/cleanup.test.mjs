@@ -97,3 +97,28 @@ test("worker prompt names one reused browser session", () => {
   assert.match(src, /Use exactly one agent-browser session/);
   assert.match(src, /Never spawn a fresh session per check/);
 });
+
+test("a closed workspace is recorded and a second cleanup leaves it alone", () => {
+  const t = scratch();
+  const j = makeJob(t, "stopped");
+  assert.match(t.orca(["cleanup"]).stdout, /closed workspace w-1/);
+  assert.ok(JSON.parse(readFileSync(j.path, "utf8")).workspaceClosed);
+  const before = t.calls().length;
+  const again = t.orca(["cleanup"]);
+  assert.doesNotMatch(again.stdout, /workspace/);
+  assert.ok(!t.calls().slice(before).some((c) => c.startsWith("herdr workspace close")));
+});
+
+test("done records workspaceClosed", () => {
+  const t = scratch();
+  const j = makeJob(t, "running");
+  t.orca(["done", j.id]);
+  assert.ok(JSON.parse(readFileSync(j.path, "utf8")).workspaceClosed);
+});
+
+test("cleanup closes a legacy orca-verify session of a finished job", () => {
+  const t = scratch();
+  const j = makeJob(t, "done");
+  writeFileSync(join(t.bin, "agent-browser"), `#!/bin/sh\necho "agent-browser $*" >> "${t.log}"\ncase "$*" in *"session list"*) echo '{"success":true,"data":{"sessions":["orca-verify-${j.id}"]}}';; esac\n`);
+  assert.match(t.orca(["cleanup"]).stdout, new RegExp(`closed browser orca-verify-${j.id}`));
+});
