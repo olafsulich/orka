@@ -49,9 +49,12 @@ const VALUE_FLAGS = new Set([
   "orchestrator-model",
   "worker-model",
   "model",
+  "role",
 ]);
 const BOOL_FLAGS = new Set(["dry-run", "help", "force", "keep"]);
 const FINISH_STATUSES = new Set(["done", "failed", "stopped"]);
+const VERIFIER_NAME = "verifier";
+const VERIFIER_MAX_ROUNDS = 3;
 const FINISH_TIMEOUT_MS = 8000;
 
 function fail(msg) {
@@ -752,6 +755,100 @@ function workerPrompt(job, name, task, alias) {
   ].join("\n");
 }
 
+function verifierState(job) {
+  const v = job.verifier || {};
+  return { rounds: Number(v.rounds) || 0, verdict: v.verdict ?? null, history: Array.isArray(v.history) ? v.history : [] };
+}
+
+function verifierLine(job) {
+  const v = job.verifier;
+  if (!v || !v.verdict) return "";
+  const round = Number(v.rounds) || 0;
+  return v.verdict === "pass" ? `verified by verifier: pass, round ${round}` : `verifier: ${v.verdict}, round ${round}`;
+}
+
+function parseRole(args) {
+  if (!("role" in args)) return "builder";
+  const role = flagValue(args, "role");
+  if (role !== "builder" && role !== "verifier") fail(`--role must be builder or verifier, got ${role}`);
+  return role;
+}
+
+function checkRole(role, name, job) {
+  if (role === "verifier" && name !== VERIFIER_NAME) fail(`a verifier worker must be named "${VERIFIER_NAME}", got "${name}"`);
+  if (role === "builder" && name === VERIFIER_NAME) fail(`the name "${VERIFIER_NAME}" is reserved; start it with --role verifier`);
+  if (role === "verifier" && verifierState(job).rounds >= VERIFIER_MAX_ROUNDS) {
+    fail(`verifier already ran ${VERIFIER_MAX_ROUNDS} rounds for job ${job.id}; refusing a round ${VERIFIER_MAX_ROUNDS + 1}`);
+  }
+}
+
+function readVerifierResult(repo, id) {
+  const path = join(jobDir(repo, id), "results", `${VERIFIER_NAME}.json`);
+  if (!existsSync(path)) return null;
+  try {
+    const data = JSON.parse(readFileSync(path, "utf8"));
+    if (data?.verdict !== "pass" && data?.verdict !== "fail") return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+// Records the latest verifier verdict on the job. Returns the verifier state, or null if none ran.
+function recordVerifier(repo, job) {
+  const state = verifierState(job);
+  if (!state.rounds) return null;
+  const result = readVerifierResult(repo, job.id);
+  if (!result) return null;
+  const round = state.rounds;
+  if (result.round !== undefined && Number(result.round) !== round) return null;
+  const history = state.history.filter((h) => h.round !== round);
+  history.push({ round, verdict: result.verdict, at: new Date().toISOString() });
+  job.verifier = { rounds: round, verdict: result.verdict, history };
+  save(repo, job);
+  return job.verifier;
+}
+
+function verifierPrompt(job, name, task, alias, round) {
+  const dir = jobDir(job.repo, job.id);
+  const result = join(dir, "results", `${name}.json`);
+  const note = join(dir, "notes", `${name}.txt`);
+  const session = `${browserPrefix(job)}-${name}`;
+  return [
+    `You are the verifier for orca job ${job.id} (${paneCommand(alias)}), round ${round} of ${VERIFIER_MAX_ROUNDS}. Do this task and stop.`,
+    `You start with fresh context. You did not build this. Judge it against the goal, not against what the builders say.`,
+    `Work only in this shared checkout: ${job.worktree}`,
+    `Branch: ${job.branch}`,
+    `Do not edit product code. Do not revert anyone's files. Do not create a branch, worktree, or push.`,
+    ``,
+    `Goal:`,
+    job.goal.trim(),
+    ``,
+    `What was built and the acceptance criteria:`,
+    String(task).trim(),
+    ``,
+    `Run these checks:`,
+    `1. orca verify ${job.id} (if orca is not on PATH, run ${ORCA} verify ${job.id}).`,
+    `2. The project's own checks: npm test and npm run check, each only when package.json has that script.`,
+    `3. Targeted agent-browser checks against the acceptance criteria above, when the goal has a UI.`,
+    `You may author or extend ${VERIFY_FILE} (at the worktree root, or the path in ${join(job.repo, ".orca", "config.json")} "verify") only to cover the acceptance criteria.`,
+    `Never weaken, loosen or delete a check to make it pass. Never skip a failing check.`,
+    `Shape: {"steps":[["open","http://HOST:PORT/"],{"visible":"SELECTOR"},{"text":"SELECTOR","includes":"EXPECTED"}]}`,
+    `Use this project's URL. Do not copy a host or port from another repo.`,
+    `Use exactly one agent-browser session, named ${session} (agent-browser --session ${session}). Reuse it for every check. Never spawn a fresh session per check. When done, close it: agent-browser --session ${session} close`,
+    ``,
+    `When finished, write ${result} as JSON:`,
+    `{"name":"${name}","role":"verifier","round":${round},"verdict":"pass"|"fail","checks":[{"name":"...","outcome":"pass"|"fail"|"skipped","notes":"..."}],"failures":["concrete failure note"],"summary":"..."}`,
+    `verdict is "pass" only if every check passed or was honestly skipped. Each failure must be concrete: what failed, where, how to reproduce.`,
+    `Also write one line at ${note}.`,
+    `Then send that line to the orchestrator:`,
+    `herdr agent prompt ${job.agent} "<the one-line note>"`,
+    `If that prompt is rejected because the orchestrator is busy, the files are enough.`,
+    ``,
+    `Finish wake is automatic from the orca CLI when it marks the job done, failed, or stopped. That is not your job. Do not run herdr-finish-watch. Do not run orca stop, orca done or orca webhook. Do not start another agent.`,
+  ].join("\n");
+}
+
 function orchestratorPrompt(job) {
   const dir = jobDir(job.repo, job.id);
   const pi = job.kind === "pi";
@@ -784,18 +881,19 @@ function orchestratorPrompt(job) {
     `then prompts you with that note. Read those files. Do not trust a worker that skipped them.`,
     `The finish wake is sent by the orca CLI when orca done marks the job done (or when the job goes failed or stopped). Do not run herdr-finish-watch. Do not run orca stop or orca webhook.`,
     ``,
-    `When every worker has reported, run project checks before the summary:`,
-    `  orca verify ${job.id}`,
-    `If orca is not on PATH, run ${ORCA} verify ${job.id}.`,
-    `That drives agent-browser from checks in this worktree. It does not assume a host, port, or app.`,
-    `Default file: ${VERIFY_FILE} here. Or "verify" in ${join(job.repo, ".orca", "config.json")} (relative to this worktree, or false to disable).`,
-    `No checks file skips and exits 0. That is not a failure. If verify fails, the goal is not done: say so in the summary and stop.`,
+    `When every builder has reported, start ONE verifier. It has fresh context and checks the work against the goal:`,
+    `  orca worker --job ${job.id} --name ${VERIFIER_NAME} --role verifier --task "<what was built and the acceptance criteria>"`,
+    `The verifier runs orca verify, the project's own checks and targeted agent-browser checks, and may extend ${VERIFY_FILE} only to cover the acceptance criteria.`,
+    `It writes ${dir}/results/${VERIFIER_NAME}.json with "verdict" pass or fail and a "failures" list.`,
+    `If the verdict is fail, route each failure to the builder that owns those files (a new or resumed builder worker), wait for their reports, then start the verifier again.`,
+    `Run at most ${VERIFIER_MAX_ROUNDS} verifier rounds. orca refuses a ${VERIFIER_MAX_ROUNDS + 1}th. After a third fail, say so in the summary and run orca done anyway; it marks the job failed.`,
+    `You never run orca verify yourself and never edit ${VERIFY_FILE} or any check. You may only run trivial read-only commands to read results.`,
     `Do not invent a URL or a checks file unless the goal asked for checks.`,
     ``,
     `Then read ${jobPath(job.repo, job.id)} again, write a short summary to ${dir}/summary.txt`,
     `and set the "summary" field to that same text. Keep every other field, including verify.`,
-    `Do not change verify; orca verify writes that.`,
-    `Then mark the job done, which sends the finish wake:`,
+    `Do not change verify or verifier; the verifier and orca done write those.`,
+    `Then mark the job done, which sends the finish wake and records the verifier verdict:`,
     `  orca done ${job.id}`,
     `If orca is not on PATH, run ${ORCA} done ${job.id}.`,
     `Then stop working.`,
@@ -1020,19 +1118,22 @@ function cmdWorker(args) {
   if ("orchestrator-model" in args || "worker-model" in args) {
     fail("use --model to override a worker; the job default is workerModel");
   }
-  allowFlags(args, ["cwd", "dry-run", "job", "name", "task", "pane", "model"]);
+  allowFlags(args, ["cwd", "dry-run", "job", "name", "task", "pane", "model", "role"]);
   const id = args.job;
   const name = args.name;
   const task = args.task || args._.slice(1).join(" ");
   if (!id || !name || !task) fail("need --job --name --task");
   assertAgentName(String(name));
+  const role = parseRole(args);
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, String(id));
+  checkRole(role, String(name), job);
+  const round = verifierState(job).rounds + 1;
   const alias = workerAlias(job, args);
   const kind = job.kind === "pi" ? "pi" : "claude";
   if (args["dry-run"]) {
     const wt = job.worktree || worktreePath(repo, job.id);
-    console.log(`dry-run worker ${name} job=${job.id} kind=${kind}${alias ? ` model=${alias}` : ""}`);
+    console.log(`dry-run worker ${name} job=${job.id} kind=${kind}${alias ? ` model=${alias}` : ""} role=${role}${role === "verifier" ? ` round=${round}` : ""}`);
     console.log(`worktree: ${wt}`);
     console.log("layout: shared worktree");
     console.log(`split: herdr pane split --pane ${q(job.pane || "<orchestrator-pane>")} --direction right --cwd ${q(wt)} --no-focus`);
@@ -1046,7 +1147,7 @@ function cmdWorker(args) {
   const pane = args.pane ? String(args.pane) : splitPane(job.pane, job.worktree);
   const started = herdr(startArgs(String(name), pane, kind, alias), 90000);
   if (started.code !== 0 || started.json?.error) herdrFail(started, "worker start");
-  promptWithRetry(String(name), workerPrompt(job, String(name), String(task), alias));
+  promptWithRetry(String(name), role === "verifier" ? verifierPrompt(job, String(name), String(task), alias, round) : workerPrompt(job, String(name), String(task), alias));
   noteSession(repo, job, `${browserPrefix(job)}-${name}`);
   job.workers = job.workers || [];
   job.workers.push({
@@ -1054,12 +1155,17 @@ function cmdWorker(args) {
     pane,
     kind,
     model: alias,
+    role,
     task: String(task),
     result: join(jobDir(repo, job.id), "results", `${name}.json`),
     note: join(jobDir(repo, job.id), "notes", `${name}.txt`),
   });
+  if (role === "verifier") {
+    const state = verifierState(job);
+    job.verifier = { rounds: round, verdict: null, history: state.history };
+  }
   save(repo, job);
-  console.log(`${id} worker ${name} pane=${pane} kind=${kind}${alias ? ` model=${alias}` : ""} worktree=${job.worktree}`);
+  console.log(`${id} worker ${name} pane=${pane} kind=${kind}${alias ? ` model=${alias}` : ""}${role === "verifier" ? ` role=verifier round=${round}` : ""} worktree=${job.worktree}`);
 }
 
 function summaryOf(repo, job) {
@@ -1085,12 +1191,13 @@ function cmdStatus(args) {
     console.log(`  layout: ${job.workerLayout || "shared-worktree"}`);
     if (job.kind === "claude") console.log(`  models: orchestrator=${job.orchestratorModel || job.model || "-"} worker=${job.workerModel || "-"}`);
     if (job.agent || job.pane) console.log(`  agent: ${job.agent || "-"} pane=${job.pane || "-"} workspace=${job.workspace || "-"} model=${job.orchestratorModel || job.model || "-"}`);
-    for (const worker of job.workers || []) console.log(`  worker: ${worker.name} pane=${worker.pane} ${worker.model ? `model=${worker.model}` : "kind=pi"}`);
+    for (const worker of job.workers || []) console.log(`  worker: ${worker.name} pane=${worker.pane} ${worker.model ? `model=${worker.model}` : "kind=pi"}${worker.role === "verifier" ? " role=verifier" : ""}`);
     const summary = summaryOf(repo, job);
     if (summary) console.log(`  summary: ${summary}`);
     if (job.stopReason) console.log(`  stop: ${job.stopReason}`);
     console.log(`  ${finishStatusLine(repo, job)}`);
     printVerifyStatus(repo, job);
+    if (verifierLine(job)) console.log(`  ${verifierLine(job)}`);
     return;
   }
   mkdirSync(jobsDir(repo), { recursive: true });
@@ -1177,6 +1284,10 @@ async function cmdStop(args) {
   cleanupJob(repo, job, { keep: args.keep, skipWorkspace: closedWs });
 }
 
+function verifierFailReason(rounds) {
+  return `verifier failed after ${rounds} round${rounds === 1 ? "" : "s"}`;
+}
+
 async function cmdDone(args) {
   allowFlags(args, ["cwd", "dry-run", "keep"]);
   const id = args._[1];
@@ -1191,9 +1302,12 @@ async function cmdDone(args) {
       console.log(`dry-run done ${id}: already ${job.status}; no status change; no finish webhook`);
       return;
     }
-    console.log(`dry-run done ${id}: running -> done`);
-    console.log(`reason: ${reason}`);
-    const preview = await deliverFinish(repo, { ...job, status: "done" }, { dryRun: true });
+    const seen = readVerifierResult(repo, id);
+    const failing = seen?.verdict === "fail" && verifierState(job).rounds > 0;
+    console.log(`dry-run done ${id}: running -> ${failing ? "failed" : "done"}`);
+    console.log(`reason: ${failing ? verifierFailReason(verifierState(job).rounds) : reason}`);
+    if (seen && verifierState(job).rounds) console.log(`verifier: ${seen.verdict}, round ${verifierState(job).rounds}`);
+    const preview = await deliverFinish(repo, { ...job, status: failing ? "failed" : "done" }, { dryRun: true });
     for (const line of preview.lines) console.log(`finish webhook: ${line}`);
     cleanupJob(repo, job, { dryRun: true, keep: args.keep });
     return;
@@ -1202,8 +1316,12 @@ async function cmdDone(args) {
     console.log(`${id} is already ${job.status}`);
     return;
   }
-  const wake = await markTerminal(repo, job, "done", reason);
-  console.log(`done ${id}: ${reason}`);
+  const verifier = recordVerifier(repo, job);
+  const failed = verifier?.verdict === "fail";
+  const why = failed ? verifierFailReason(verifier.rounds) : reason;
+  const wake = await markTerminal(repo, job, failed ? "failed" : "done", why);
+  console.log(`${failed ? "failed" : "done"} ${id}: ${why}`);
+  if (verifierLine(job)) console.log(verifierLine(job));
   console.log(finishLine(wake));
   cleanupJob(repo, job, { keep: args.keep });
 }
@@ -1777,8 +1895,9 @@ function help() {
            [--orchestrator-model <alias>] [--worker-model <alias>]
   orca run <id> [--dry-run] [--cwd <repo>] [--keep]
            [--orchestrator-model <alias>] [--worker-model <alias>]
-  orca worker --job <id> --name <agent> --task "..." [--model <alias>] [--dry-run]
+  orca worker --job <id> --name <agent> --task "..." [--model <alias>] [--role builder|verifier] [--dry-run]
            (--model is claude only; pi workers have no model flag)
+           (--role verifier needs --name verifier; at most 3 rounds per job)
   orca status [id] [--cwd <repo>]
   orca steer <id> "message"
   orca stop <id> [reason] [--dry-run] [--keep]
@@ -1812,6 +1931,19 @@ Multi-worker (both kinds)
   The orchestrator splits the goal and starts one worker per task. Independent tasks
   start in parallel (several orca worker calls). All workers share one worktree, so no
   two workers get the same files.
+
+Verifier (both kinds)
+  After every builder reports, the orchestrator starts ONE verifier:
+    orca worker --job <id> --name verifier --role verifier --task "<what was built + acceptance criteria>"
+  Fresh context, same worktree, the job's worker model. It runs orca verify, npm test / npm run check when
+  package.json has them, and targeted agent-browser checks in one session (<prefix>-verifier). It does not
+  edit product code. It may extend orca.verify.json only to cover the acceptance criteria, never weaken a check.
+  It writes results/verifier.json {"verdict":"pass"|"fail","failures":[...],...} and notes/verifier.txt.
+  On fail the orchestrator routes the failures to builders and starts the verifier again. Max 3 rounds;
+  a 4th is refused. The orchestrator never runs orca verify or edits checks.
+  orca done reads results/verifier.json, records job.verifier {rounds,verdict,history}, and marks the job
+  failed ("verifier failed after N rounds") on a final fail. done and status print
+  "verified by verifier: pass, round N" (or "verifier: fail, round N"). No verifier run: nothing changes.
 
 A prompt that is still idle after ~8s is sent once more.
 status reads the job file. It does not poll Herdr. One job also prints the finish-wake record and verify.
