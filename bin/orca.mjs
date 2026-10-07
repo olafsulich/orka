@@ -4,6 +4,7 @@
 // Finish wake: when the CLI marks done|failed|stopped, POST {job, status, branch}
 // if <repo>/.orca/secrets/finish-webhook.env exists. Never a home path.
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -49,7 +50,7 @@ const VALUE_FLAGS = new Set([
   "worker-model",
   "model",
 ]);
-const BOOL_FLAGS = new Set(["dry-run", "help", "force"]);
+const BOOL_FLAGS = new Set(["dry-run", "help", "force", "keep"]);
 const FINISH_STATUSES = new Set(["done", "failed", "stopped"]);
 const FINISH_TIMEOUT_MS = 8000;
 
@@ -522,6 +523,101 @@ function finishStatusLine(repo, job) {
   return "finish webhook: configured, not sent";
 }
 
+function browserPrefix(job) {
+  return `orca-${createHash("sha1").update(String(job.id)).digest("hex").slice(0, 8)}`;
+}
+
+function noteSession(repo, job, session) {
+  job.browserSessions = job.browserSessions || [];
+  if (job.browserSessions.includes(session)) return;
+  job.browserSessions.push(session);
+  save(repo, job);
+}
+
+function browserList() {
+  const r = spawnSync("agent-browser", ["session", "list", "--json"], {
+    encoding: "utf8",
+    timeout: 20000,
+    env: { ...process.env, PATH: pathPrefix() },
+  });
+  try {
+    const names = JSON.parse((r.stdout || "").trim())?.data?.sessions;
+    return Array.isArray(names) ? names.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+// Sessions agent-browser still lists, plus the ones this job recorded.
+function jobSessions(job) {
+  const prefix = `${browserPrefix(job)}-`;
+  const names = new Set((job.browserSessions || []).filter((n) => n.startsWith(prefix)));
+  for (const name of browserList()) if (name.startsWith(prefix)) names.add(name);
+  return [...names];
+}
+
+function browserStateDir() {
+  if (process.env.AGENT_BROWSER_SOCKET_DIR) return process.env.AGENT_BROWSER_SOCKET_DIR;
+  if (process.env.XDG_RUNTIME_DIR) return join(process.env.XDG_RUNTIME_DIR, "agent-browser");
+  return join(homedir(), ".agent-browser");
+}
+
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM";
+  }
+}
+
+// Sessions whose <name>.pid names a dead process. Empty if the dir is unreadable.
+function orphanSessions() {
+  let files;
+  try {
+    files = readdirSync(browserStateDir()).filter((f) => f.endsWith(".pid"));
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const f of files) {
+    const pid = Number.parseInt(readFileSync(join(browserStateDir(), f), "utf8"), 10);
+    if (Number.isInteger(pid) && pid > 0 && !pidAlive(pid)) out.push(f.slice(0, -4));
+  }
+  return out;
+}
+
+function closeBrowser(session) {
+  const r = spawnSync("agent-browser", ["--session", session, "close"], {
+    encoding: "utf8",
+    timeout: 20000,
+    env: { ...process.env, PATH: pathPrefix(), AGENT_BROWSER_SESSION: session },
+  });
+  return !r.error && (r.status ?? 1) === 0;
+}
+
+// Browsers first, then the workspace. Closing the workspace kills the calling
+// orchestrator pane, so every line is printed before it. Only job.workspace is closed.
+function cleanupJob(job, opts = {}) {
+  if (opts.keep || job.keep) {
+    console.log(`cleanup: kept ${job.id} (--keep)`);
+    return;
+  }
+  const sessions = jobSessions(job);
+  const workspace = opts.skipWorkspace ? "" : job.workspace;
+  for (const s of sessions) {
+    if (opts.dryRun) console.log(`cleanup: would close browser ${s}`);
+    else console.log(closeBrowser(s) ? `cleanup: closed browser ${s}` : `cleanup: browser ${s} not closed`);
+  }
+  if (!workspace) return;
+  if (opts.dryRun) {
+    console.log(`cleanup: would close workspace ${workspace}`);
+    return;
+  }
+  console.log(`cleanup: closed workspace ${workspace}`);
+  herdr(["workspace", "close", workspace]);
+}
+
 // Saves the terminal status first. A sender failure cannot flip it back.
 async function markTerminal(repo, job, status, reason) {
   if (!FINISH_STATUSES.has(status)) fail(`not a terminal status: ${status}`);
@@ -633,6 +729,7 @@ function workerPrompt(job, name, task, alias) {
     `Browser checks, if this task needs them, go in ${VERIFY_FILE} at the worktree root, or the path in ${join(job.repo, ".orca", "config.json")} "verify".`,
     `Shape: {"steps":[["open","http://HOST:PORT/"],{"visible":"SELECTOR"},{"text":"SELECTOR","includes":"EXPECTED"}]}`,
     `Use this project's URL. Do not copy a host or port from another repo. Do not run orca verify unless the task says so.`,
+    `Use exactly one agent-browser session, named ${browserPrefix(job)}-${name} (agent-browser --session ${browserPrefix(job)}-${name}). Reuse it for every check. Never spawn a fresh session per check. When the task is done, close it: agent-browser --session ${browserPrefix(job)}-${name} close`,
     ``,
     String(task).trim(),
     ``,
@@ -747,7 +844,7 @@ function assignClaudeModels(job, args) {
 
 function cmdNew(args) {
   if ("model" in args) fail("use --worker-model on orca new, not --model");
-  allowFlags(args, ["cwd", "title", "goal", "kind", "orchestrator-model", "worker-model"]);
+  allowFlags(args, ["cwd", "title", "goal", "kind", "orchestrator-model", "worker-model", "keep"]);
   const title = args.title;
   const goal = args.goal;
   const kind = args.kind || "claude";
@@ -783,6 +880,8 @@ function cmdNew(args) {
     orchestratorModel,
     workerModel,
     workers: [],
+    browserSessions: [],
+    keep: Boolean(args.keep),
     steers: [],
     started: null,
     finished: null,
@@ -851,13 +950,14 @@ function startLead(job) {
 
 async function cmdRun(args) {
   if ("model" in args) fail("use --orchestrator-model and --worker-model on orca run, not --model");
-  allowFlags(args, ["cwd", "dry-run", "orchestrator-model", "worker-model"]);
+  allowFlags(args, ["cwd", "dry-run", "orchestrator-model", "worker-model", "keep"]);
   const id = args._[1];
   if (!id) fail("need id");
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, id);
   if (job.status !== "queued") fail(`job ${id} is ${job.status}, not queued`);
   assignClaudeModels(job, args);
+  if (args.keep) job.keep = true;
   if (args["dry-run"]) {
     printDryRun(repo, job);
     return;
@@ -882,6 +982,7 @@ async function cmdRun(args) {
       try {
         const wake = await markTerminal(repo, job, "failed", err.message);
         console.error(finishLine(wake));
+        cleanupJob(job);
       } catch (markErr) {
         console.error(markErr?.message || markErr);
       }
@@ -938,6 +1039,7 @@ function cmdWorker(args) {
   const started = herdr(startArgs(String(name), pane, kind, alias), 90000);
   if (started.code !== 0 || started.json?.error) herdrFail(started, "worker start");
   promptWithRetry(String(name), workerPrompt(job, String(name), String(task), alias));
+  noteSession(repo, job, `${browserPrefix(job)}-${name}`);
   job.workers = job.workers || [];
   job.workers.push({
     name: String(name),
@@ -1015,7 +1117,7 @@ function interrupt(name) {
 }
 
 async function cmdStop(args) {
-  allowFlags(args, ["cwd", "dry-run"]);
+  allowFlags(args, ["cwd", "dry-run", "keep"]);
   const id = args._[1];
   if (!id) fail("need id");
   const reason = args._.slice(2).join(" ").trim() || "stopped by request";
@@ -1030,6 +1132,7 @@ async function cmdStop(args) {
     console.log(`reason: ${reason}`);
     const preview = await deliverFinish(repo, { ...job, status: "stopped" }, { dryRun: true });
     for (const line of preview.lines) console.log(`finish webhook: ${line}`);
+    cleanupJob(job, { dryRun: true, keep: args.keep });
     return;
   }
   if (job.status !== "running" && job.status !== "queued") {
@@ -1037,20 +1140,22 @@ async function cmdStop(args) {
     return;
   }
   let how = "recorded";
+  let closedWs = false;
   if (job.status === "running") {
     let ok = false;
-    if (job.workspace) {
-      const closed = herdr(["workspace", "close", job.workspace]);
-      ok = closed.code === 0 && !closed.json?.error;
-      how = ok ? "workspace closed" : "workspace close failed";
-    }
-    if (!ok && job.agent) {
+    if (job.agent) {
       const lead = interrupt(job.agent);
       for (const worker of job.workers || []) interrupt(worker.name);
       if (lead) {
         ok = true;
-        how = job.workspace ? "interrupted; workspace still open" : "interrupted";
+        how = job.workspace ? "interrupted; cleanup closes the workspace" : "interrupted";
       }
+    }
+    if (!ok && job.workspace && !args.keep && !job.keep) {
+      const closed = herdr(["workspace", "close", job.workspace]);
+      ok = closed.code === 0 && !closed.json?.error;
+      closedWs = ok;
+      how = ok ? "workspace closed" : "workspace close failed";
     }
     if (!ok && (job.workspace || job.agent)) fail(`could not stop ${id}; job left running (${how})`);
     if (!job.workspace && !job.agent) how = "no pane recorded";
@@ -1060,10 +1165,11 @@ async function cmdStop(args) {
   const wake = await markTerminal(repo, job, "stopped", reason);
   console.log(`stopped ${id} (${how}): ${reason}`);
   console.log(finishLine(wake));
+  cleanupJob(job, { keep: args.keep, skipWorkspace: closedWs });
 }
 
 async function cmdDone(args) {
-  allowFlags(args, ["cwd", "dry-run"]);
+  allowFlags(args, ["cwd", "dry-run", "keep"]);
   const id = args._[1];
   if (!id) fail("need id");
   const reason = args._.slice(2).join(" ").trim() || "completed";
@@ -1080,6 +1186,7 @@ async function cmdDone(args) {
     console.log(`reason: ${reason}`);
     const preview = await deliverFinish(repo, { ...job, status: "done" }, { dryRun: true });
     for (const line of preview.lines) console.log(`finish webhook: ${line}`);
+    cleanupJob(job, { dryRun: true, keep: args.keep });
     return;
   }
   if (terminal) {
@@ -1089,6 +1196,7 @@ async function cmdDone(args) {
   const wake = await markTerminal(repo, job, "done", reason);
   console.log(`done ${id}: ${reason}`);
   console.log(finishLine(wake));
+  cleanupJob(job, { keep: args.keep });
 }
 
 function webhookExit(result) {
@@ -1155,9 +1263,8 @@ function relTo(root, path) {
   return rel;
 }
 
-function verifySession(id) {
-  const clean = String(id).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
-  return `orca-verify-${clean || "job"}`;
+function verifySession(job) {
+  return `${browserPrefix(job)}-verify`;
 }
 
 function classifyChecks(path) {
@@ -1523,7 +1630,7 @@ function printVerifyDryRun(id, job, path, kind) {
   console.log(`worktree: ${job.worktree}`);
   console.log(`checks: ${path}`);
   console.log(`kind: ${kind}`);
-  console.log(`session: ${verifySession(id)}`);
+  console.log(`session: ${verifySession(job)}`);
   if (kind === "script") {
     console.log("would run the script with AGENT_BROWSER_SESSION set, then close that session");
     return;
@@ -1565,7 +1672,8 @@ function cmdVerify(args) {
     printVerifyDryRun(id, job, checks.path, kind);
     return;
   }
-  const session = verifySession(id);
+  const session = verifySession(job);
+  noteSession(repo, job, session);
   const logPath = join(ensureJobDir(repo, id), "verify.log");
   const file = relTo(job.worktree, checks.path);
   writeFileSync(logPath, `verify ${id}\nat ${new Date().toISOString()}\nfile ${checks.path}\nsession ${session}\nkind ${kind}\n`);
@@ -1609,20 +1717,59 @@ function cmdVerify(args) {
   }
 }
 
+function cmdCleanup(args) {
+  allowFlags(args, ["cwd", "dry-run"]);
+  const repo = requireRepo(args.cwd || process.cwd());
+  const dry = Boolean(args["dry-run"]);
+  const verb = dry ? "would close" : "closed";
+  const jobs = existsSync(jobsDir(repo))
+    ? readdirSync(jobsDir(repo)).filter((f) => f.endsWith(".json") && !f.endsWith(".finish.json")).map((f) => load(repo, f.slice(0, -5)))
+    : [];
+  const live = jobs.map((j) => j.status === "running" && browserPrefix(j));
+  let count = 0;
+  const closeBrowsers = (names) => {
+    for (const s of names) {
+      if (dry || closeBrowser(s)) {
+        console.log(`cleanup: ${verb} browser ${s}`);
+        count++;
+      }
+    }
+  };
+  const workspaces = [];
+  for (const job of jobs) {
+    if (!FINISH_STATUSES.has(job.status) || job.keep || !job.workspace) continue;
+    workspaces.push(job.workspace);
+  }
+  const names = new Set();
+  for (const s of [...browserList(), ...jobs.flatMap((j) => j.browserSessions || [])]) {
+    const owner = jobs.find((j) => s.startsWith(`${browserPrefix(j)}-`));
+    if (owner && !live.includes(browserPrefix(owner)) && !owner.keep) names.add(s);
+  }
+  for (const s of orphanSessions()) names.add(s);
+  closeBrowsers([...names]);
+  for (const w of workspaces) {
+    console.log(`cleanup: ${verb} workspace ${w}`);
+    count++;
+  }
+  if (!count) console.log("cleanup: nothing to close");
+  if (!dry) for (const w of workspaces) herdr(["workspace", "close", w]);
+}
+
 function help() {
   console.log(`orca — one job in a linked worktree
 
   orca init [--cwd <repo>]
-  orca new --title "..." --goal "..." [--cwd <repo>] [--kind claude|pi]
+  orca new --title "..." --goal "..." [--cwd <repo>] [--kind claude|pi] [--keep]
            [--orchestrator-model <alias>] [--worker-model <alias>]
-  orca run <id> [--dry-run] [--cwd <repo>]
+  orca run <id> [--dry-run] [--cwd <repo>] [--keep]
            [--orchestrator-model <alias>] [--worker-model <alias>]
   orca worker --job <id> --name <agent> --task "..." [--model <alias>] [--dry-run]
            (--model is claude only; pi workers have no model flag)
   orca status [id] [--cwd <repo>]
   orca steer <id> "message"
-  orca stop <id> [reason] [--dry-run]
-  orca done <id> [reason] [--dry-run] [--cwd <repo>]
+  orca stop <id> [reason] [--dry-run] [--keep]
+  orca done <id> [reason] [--dry-run] [--keep] [--cwd <repo>]
+  orca cleanup [--dry-run] [--cwd <repo>]
   orca webhook <id> [--dry-run] [--force] [--cwd <repo>]
   orca verify <id> [--dry-run] [--cwd <repo>]
   orca help
@@ -1677,6 +1824,16 @@ verify
   Example: {"steps":[["open","http://127.0.0.1:3000/"],{"visible":"h1"},{"text":"h1","includes":"Ready"}]}
   See README. examples/orca.verify.json is an example only; orca does not run it.
 
+cleanup
+  After done, stop, or a failed run, orca closes the job's agent-browser sessions
+  (names start with orca-<8 hex of sha1(id)>; workers use <prefix>-<worker>, verify <prefix>-verify)
+  and then the job Herdr workspace recorded on the job. The job record, worktree and branch stay.
+  Output is printed before the workspace closes, because that kills the calling pane.
+  --keep on new, run, done or stop skips cleanup. --dry-run on done or stop lists what it would close.
+  orca cleanup is a one-shot sweep of this repo's jobs: workspaces of done, stopped or failed jobs,
+  orca- browser sessions whose job is not running, and agent-browser sessions whose pid file names a dead process.
+  No cron, no polling. --dry-run prints "would close" lines.
+
 claude must be on PATH in the pane, and on PATH here so aliases can be checked.
 This CLI does not install it.
 `);
@@ -1699,6 +1856,7 @@ async function main() {
   else if (cmd === "done") await cmdDone(args);
   else if (cmd === "webhook") await cmdWebhook(args);
   else if (cmd === "verify") cmdVerify(args);
+  else if (cmd === "cleanup") cmdCleanup(args);
   else fail(`unknown command ${cmd}\nrun: orca help`);
 }
 
