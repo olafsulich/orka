@@ -8,7 +8,7 @@ Not a fork of [limen](https://github.com/overment/limen). Not the old `orch` scr
 
 ![How orca works](docs/orca-how-it-works.png)
 
-You run `orca run`. The CLI checks out branch `orca/<id>` in a linked worktree and spawns a Herdr pane there. The pane runs an orchestrator that splits the goal and starts one worker per task, several in parallel when tasks are independent, all in the same worktree. A Claude job uses `opus` for the orchestrator and `sonnet` for workers; a Pi job uses Pi for both. After the builders report, the orchestrator starts one dedicated verifier worker (`orca worker --role verifier`). It runs `orca verify`, the project's own checks, and targeted `agent-browser` checks against the goal's acceptance criteria, and writes a pass/fail verdict. On fail the orchestrator routes the failures back to builders and starts the verifier again, up to 3 rounds. The orchestrator itself never runs `orca verify`. When the CLI marks the job `done`, `failed`, or `stopped`, it can POST `{job, status, branch}` to Grok Bot (`orca-finish-wake`).
+You run `orca run`. The CLI checks out branch `orca/<id>` in a linked worktree and spawns a Herdr pane there. The pane runs an orchestrator that splits the goal and starts one worker per task, several in parallel when tasks are independent, all in the same worktree. A Claude job uses `opus` for the orchestrator and `sonnet` for workers; a Pi job uses Pi for both. After the builders report, the orchestrator starts one dedicated verifier worker (`orca worker --role verifier`). It runs `orca verify`, the project's own checks, and targeted `agent-browser` checks against the goal's acceptance criteria, and writes a pass/fail verdict. On fail the orchestrator routes the failures back to builders and starts the verifier again, up to 3 rounds. The orchestrator itself never runs `orca verify`. When the CLI marks the job `done`, `failed`, or `stopped`, it can POST `{job, status, branch}` (plus `verifier` when a verifier ran) to Grok Bot (`orca-finish-wake`).
 
 ## How this differs from limen
 
@@ -34,7 +34,13 @@ When the CLI marks a job `done`, `failed`, or `stopped`, it POSTs once:
 {"job":"<id>","status":"stopped","branch":"orca/<id>"}
 ```
 
-`job` is the id. `status` is the status just saved. `branch` is the job branch. Those three fields are the whole body. It is not the old `herdr-finish-watch` body.
+When a verifier gave a verdict, the body also carries `verifier`:
+
+```json
+{"job":"<id>","status":"done","branch":"orca/<id>","verifier":"verified by verifier: pass, round 2"}
+```
+
+`job` is the id. `status` is the status just saved. `branch` is the job branch. `verifier` is sent only when `job.verifier` has a verdict: `verified by verifier: pass, round 2` or `verifier: fail, round 3`. Without a verifier the body is exactly those three fields. It is not the old `herdr-finish-watch` body.
 
 Today the CLI writes `done` from `orca done`, `stopped` from `orca stop`, and `failed` when `orca run` fails after the worktree or pane exists. All call the same sender after the status is saved. Idle is not terminal. A summary file does not send the wake. The success path is the orchestrator running `orca done <id>` after verify and the summary; that marks the job `done` and fires the wake once. `orca webhook` can also POST a job that is already `done`.
 
@@ -201,7 +207,7 @@ The job record carries the outcome:
 {"verifier":{"rounds":2,"verdict":"pass","history":[{"round":1,"verdict":"fail","at":"<iso>"},{"round":2,"verdict":"pass","at":"<iso>"}]}}
 ```
 
-`orca done` records the verdict and history for the latest round. A final `fail` marks the job `failed` (`verifier failed after 3 rounds`); otherwise `done`. With no verifier run, behaviour is unchanged. The finish wake line and `orca status` report `verified by verifier: pass, round 2` (or `verifier: fail, round 3`), and nothing when no verifier ran.
+`orca done` records the verdict and history for the latest round. A final `fail` marks the job `failed` (`verifier failed after 3 rounds`); otherwise `done`. With no verifier run, behaviour is unchanged. The finish wake line and `orca status` report `verified by verifier: pass, round 2` (or `verifier: fail, round 3`), and nothing when no verifier ran. The same text is the `verifier` field of the finish wake payload.
 
 ## Cleanup
 
