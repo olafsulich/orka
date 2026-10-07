@@ -147,3 +147,34 @@ test("help documents --role and the verifier", () => {
   assert.match(out, /--role builder\|verifier/);
   assert.match(out, /verified by verifier: pass, round N/);
 });
+
+function payloadOf(out) {
+  return JSON.parse(out.match(/payload: (\{.*\})/)[1]);
+}
+
+test("finish payload adds verifier only when a verifier has a verdict", () => {
+  const t = scratch();
+  const none = makeJob(t);
+  const plain = t.orca(["done", none.id, "--dry-run", "--keep"]).stdout;
+  assert.deepEqual(payloadOf(plain), { job: none.id, status: "done", branch: `orca/${none.id}` });
+
+  const pass = makeJob(t, { verifier: { rounds: 2, verdict: null, history: [] } });
+  writeFileSync(join(pass.results, "verifier.json"), verdict(2, "pass"));
+  assert.deepEqual(payloadOf(t.orca(["done", pass.id, "--dry-run", "--keep"]).stdout), {
+    job: pass.id,
+    status: "done",
+    branch: `orca/${pass.id}`,
+    verifier: "verified by verifier: pass, round 2",
+  });
+
+  const bad = makeJob(t, { verifier: { rounds: 3, verdict: null, history: [] } });
+  writeFileSync(join(bad.results, "verifier.json"), verdict(3, "fail"));
+  const payload = payloadOf(t.orca(["done", bad.id, "--dry-run", "--keep"]).stdout);
+  assert.equal(payload.status, "failed");
+  assert.equal(payload.verifier, "verifier: fail, round 3");
+});
+
+test("help documents the verifier payload field", () => {
+  const out = spawnSync(process.execPath, [ORCA, "help"], { encoding: "utf8" }).stdout;
+  assert.match(out, /"verifier": "verified by verifier: pass, round N"/);
+});

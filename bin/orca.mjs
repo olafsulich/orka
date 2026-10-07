@@ -414,7 +414,10 @@ function settleAttempt(repo, id, sent) {
 }
 
 function payloadOf(job, status = job.status) {
-  return { job: job.id, status, branch: job.branch || `orca/${job.id}` };
+  const payload = { job: job.id, status, branch: job.branch || `orca/${job.id}` };
+  const verifier = verifierLine(job);
+  if (verifier) payload.verifier = verifier;
+  return payload;
 }
 
 function dryRunPlan(repo, job, status) {
@@ -1307,7 +1310,7 @@ async function cmdDone(args) {
     console.log(`dry-run done ${id}: running -> ${failing ? "failed" : "done"}`);
     console.log(`reason: ${failing ? verifierFailReason(verifierState(job).rounds) : reason}`);
     if (seen && verifierState(job).rounds) console.log(`verifier: ${seen.verdict}, round ${verifierState(job).rounds}`);
-    const preview = await deliverFinish(repo, { ...job, status: failing ? "failed" : "done" }, { dryRun: true });
+    const preview = await deliverFinish(repo, { ...job, status: failing ? "failed" : "done", verifier: seen && verifierState(job).rounds ? { rounds: verifierState(job).rounds, verdict: seen.verdict } : job.verifier }, { dryRun: true });
     for (const line of preview.lines) console.log(`finish webhook: ${line}`);
     cleanupJob(repo, job, { dryRun: true, keep: args.keep });
     return;
@@ -1952,7 +1955,7 @@ done marks a running job done (default reason "completed") and sends the finish 
 A failed run marks failed after the worktree or pane exists. Idle is not terminal.
 
 Finish wake is automatic from this CLI when it marks a job done, failed, or stopped.
-It POSTs {"job","status","branch"} once, using <repo>/.orca/secrets/finish-webhook.env (mode 600).
+It POSTs {"job","status","branch"} once (plus "verifier": "verified by verifier: pass, round N" when a verifier ran), using <repo>/.orca/secrets/finish-webhook.env (mode 600).
 Keys are WEBHOOK_URL and WEBHOOK_KEY, the same pair as herdr-finish-wake.env. Off if that file is missing.
 This CLI does not read a home path and does not run herdr-finish-watch. Agents must not either.
 A failed POST does not change job status. The attempt is <repo>/.orca/jobs/<id>.finish.json.
