@@ -174,3 +174,23 @@ test("HOUSEKEEPING_POPUPS entries have name, match and keys", () => {
     assert.ok(p.name && p.match instanceof RegExp && p.keys.length > 0);
   }
 });
+
+test("loose update/tip phrases in real questions are not housekeeping", () => {
+  assert.equal(matchHousekeeping("Found update available for dependency react. Should I upgrade it?\n 1. Yes\n 2. No"), null);
+  assert.equal(matchHousekeeping("I fixed the bug. A new version is available of the API; proceed?"), null);
+  assert.equal(matchHousekeeping("Tip: use X\nWhich option? Not now"), null);
+});
+
+test("popup title scrolled far above the bottom is not matched", () => {
+  const filler = Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n");
+  assert.equal(matchHousekeeping(`Teach auto mode about your environment?\n${filler}`), null);
+});
+
+test("real question mentioning update available alerts and sends no keys", async () => {
+  const q = "Found update available for dependency react. Should I upgrade it?\n 1. Yes\n 2. No";
+  const h = housekeepingHarness(q);
+  await run(h);
+  assert.equal(h.sent.length, 0);
+  assert.equal(h.posts.length, 1);
+  assert.ok(h.posts[0].question.includes("update available"));
+});
