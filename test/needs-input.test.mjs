@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { episodeKey, extractQuestion, needsInputPayload, watchJob } from "../lib/watch.mjs";
+import { HOUSEKEEPING_POPUPS, episodeKey, extractQuestion, matchHousekeeping, needsInputPayload, watchJob } from "../lib/watch.mjs";
 
 const PANE = [
   "\x1b[2m● Bash(lsof -i :5199)\x1b[0m",
@@ -97,4 +97,80 @@ test("never posts for a terminal job", async () => {
   const r = await run(h);
   assert.equal(r.exit, "terminal");
   assert.equal(h.posts.length, 0);
+});
+
+const TEACH_POPUP = [
+  "\x1b[2m● Bash(npm test)\x1b[0m",
+  "",
+  "╭──────────────────────────────────────────────────╮",
+  "│ \x1b[1mTeach auto mode about your environment?\x1b[0m        │",
+  "│                                                  │",
+  "│ \x1b[36m❯ 1. Yes\x1b[0m                                       │",
+  "│   2. Not now                                     │",
+  "│   3. Don't show again                            │",
+  "╰──────────────────────────────────────────────────╯",
+].join("\n");
+
+const SURVEY_POPUP = [
+  "● Done. Tests pass.",
+  "",
+  "● How is Claude doing this session? (optional)",
+  "  1: Bad    2: Fine   3: Good   0: Dismiss",
+].join("\n");
+
+const TASK_QUESTION = [
+  "╭──────────────────────────────────────────────────╮",
+  "│ Which database should we use?                    │",
+  "│                                                  │",
+  "│ ❯ 1. Postgres                                    │",
+  "│   2. SQLite                                      │",
+  "│   3. Other                                       │",
+  "╰──────────────────────────────────────────────────╯",
+].join("\n");
+
+function housekeepingHarness(pane, statuses = ["blocked", "working", "unknown", "unknown", "unknown"]) {
+  const h = harness({ statuses, panes: [pane], jobs: [running] });
+  const sent = [];
+  const logs = [];
+  h.deps.sendKeys = async (agent, keys) => void sent.push({ agent, keys });
+  h.deps.log = (l) => logs.push(l);
+  return { ...h, sent, logs };
+}
+
+test("Teach auto mode popup is dismissed with Don't show again, no alert", async () => {
+  const h = housekeepingHarness(TEACH_POPUP);
+  await run(h);
+  assert.deepEqual(h.sent, [{ agent: "a", keys: ["down", "down", "enter"] }]);
+  assert.deepEqual(h.logs, ["housekeeping-dismissed j1 teach-auto-mode"]);
+  assert.equal(h.posts.length, 0);
+});
+
+test("feedback survey popup is dismissed, no alert", async () => {
+  const h = housekeepingHarness(SURVEY_POPUP, ["idle", "idle", "working", "unknown", "unknown", "unknown"]);
+  await run(h);
+  assert.deepEqual(h.sent, [{ agent: "a", keys: ["0"] }]);
+  assert.deepEqual(h.logs, ["housekeeping-dismissed j1 session-feedback"]);
+  assert.equal(h.posts.length, 0);
+});
+
+test("real task question alerts and sends no keys", async () => {
+  const h = housekeepingHarness(TASK_QUESTION, ["blocked", "working", "unknown", "unknown", "unknown"]);
+  await run(h);
+  assert.equal(h.sent.length, 0);
+  assert.equal(h.posts.length, 1);
+  assert.ok(h.posts[0].question.includes("Which database should we use?"));
+  assert.equal(matchHousekeeping(TASK_QUESTION), null);
+});
+
+test("a popup that will not go away alerts after repeated dismissals", async () => {
+  const h = housekeepingHarness(TEACH_POPUP, ["blocked", "blocked", "blocked", "blocked", "unknown", "unknown", "unknown"]);
+  await run(h);
+  assert.equal(h.sent.length, 3);
+  assert.equal(h.posts.length, 1);
+});
+
+test("HOUSEKEEPING_POPUPS entries have name, match and keys", () => {
+  for (const p of HOUSEKEEPING_POPUPS) {
+    assert.ok(p.name && p.match instanceof RegExp && p.keys.length > 0);
+  }
 });

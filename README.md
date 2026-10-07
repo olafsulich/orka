@@ -292,7 +292,7 @@ A job must never sit silently waiting for an answer. `orca run` starts a detache
 {"kind":"needs-input","job":"<id>","title":"<title>","status":"blocked","question":"<text of the question on the pane>","pane":"<orchestrator pane>"}
 ```
 
-`status` is `blocked` or `idle`. Each waiting episode is posted once. The watcher exits when the job is `done`, `failed` or `stopped` (`markTerminal` also stops it), when the agent is gone, or on its own `SIGTERM`. With no webhook configured it logs and skips. `orca watch <id> --dry-run` prints what it would do. A follow-up `steer` on a finished job starts a new watcher. Workers never post; only `orca done`, `stop` and a failed `run` send the finish wake.
+`status` is `blocked` or `idle`. Each waiting episode is posted once. The watcher exits when the job is `done`, `failed` or `stopped` (`markTerminal` also stops it), when the agent is gone, or on its own `SIGTERM`. With no webhook configured it logs and skips. `orca watch <id> --dry-run` prints what it would do. Claude Code's own housekeeping popups ("Teach auto mode about your environment?", session feedback survey, update notices) are not questions: the watcher dismisses them itself with `herdr agent send-keys`, logs `housekeeping-dismissed <id> <name>`, and sends no alert. The known popups live in `HOUSEKEEPING_POPUPS` in `lib/watch.mjs` (name, matcher regex, dismiss keys); add an entry there to teach it another. A follow-up `steer` on a finished job starts a new watcher. Workers never post; only `orca done`, `stop` and a failed `run` send the finish wake.
 
 ## Trust
 
