@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -65,16 +65,44 @@ test("a verifier must be named verifier, and builders cannot take that name", ()
   assert.match(b.stderr, /reserved/);
 });
 
-test("a 4th verifier round is refused", () => {
+const workerArgs = (id) => ["worker", "--job", id, "--name", "verifier", "--role", "verifier", "--task", "t", "--dry-run"];
+
+test("there is no round cap by default: a 4th and 10th verifier round are allowed", () => {
   const t = scratch();
   const j = makeJob(t, { verifier: { rounds: 3, verdict: "fail", history: [] } });
-  const r = t.orca(["worker", "--job", j.id, "--name", "verifier", "--role", "verifier", "--task", "t", "--dry-run"]);
+  const r = t.orca(workerArgs(j.id));
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /round=4/);
+  const ten = makeJob(t, { verifier: { rounds: 9, verdict: "fail", history: [] } });
+  assert.match(t.orca(workerArgs(ten.id)).stdout, /round=10/);
+});
+
+test("--max-rounds is an opt-in ceiling that refuses a round beyond it", () => {
+  const t = scratch();
+  const id = t.orca(["new", "--kind", "pi", "--title", "cap", "--goal", "g", "--max-rounds", "2"]).stdout.trim();
+  const path = join(t.repo, ".orca", "jobs", `${id}.json`);
+  const job = JSON.parse(readFileSync(path, "utf8"));
+  assert.equal(job.maxRounds, 2);
+  Object.assign(job, { status: "running", pane: "p-1", agent: "orch", worktree: join(t.repo, "wt"), verifier: { rounds: 1, verdict: "fail", history: [] } });
+  writeFileSync(path, JSON.stringify(job));
+  assert.match(t.orca(workerArgs(id)).stdout, /round=2/);
+  job.verifier.rounds = 2;
+  writeFileSync(path, JSON.stringify(job));
+  const r = t.orca(workerArgs(id));
   assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /already ran 3 rounds/);
-  const two = makeJob(t, { verifier: { rounds: 2, verdict: "fail", history: [] } });
-  const ok = t.orca(["worker", "--job", two.id, "--name", "verifier", "--role", "verifier", "--task", "t", "--dry-run"]);
-  assert.equal(ok.status, 0, ok.stderr);
-  assert.match(ok.stdout, /round=3/);
+  assert.match(r.stderr, /--max-rounds 2 reached, refusing round 3/);
+});
+
+test("--max-rounds needs a positive integer and is accepted by run", () => {
+  const t = scratch();
+  for (const bad of ["0", "-1", "x", "1.5"]) {
+    const r = t.orca(["new", "--kind", "pi", "--title", "bad", "--goal", "g", "--max-rounds", bad]);
+    assert.notEqual(r.status, 0, bad);
+    assert.match(r.stderr, /--max-rounds needs a positive integer/);
+  }
+  const id = t.orca(["new", "--kind", "pi", "--title", "r", "--goal", "g"]).stdout.trim();
+  assert.equal(JSON.parse(readFileSync(join(t.repo, ".orca", "jobs", `${id}.json`), "utf8")).maxRounds, undefined);
+  assert.equal(t.orca(["run", id, "--dry-run", "--max-rounds", "5"]).status, 0);
 });
 
 test("done records a passing verdict and history, job is done", () => {
@@ -97,11 +125,11 @@ test("done marks the job failed on a final verifier fail", () => {
   writeFileSync(join(j.results, "verifier.json"), verdict(3, "fail"));
   const r = t.orca(["done", j.id, "--keep"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /verifier failed after 3 rounds/);
+  assert.match(r.stdout, /verifier failed after 3 rounds: x/);
   assert.match(r.stdout, /verifier: fail, round 3/);
   const job = j.read();
   assert.equal(job.status, "failed");
-  assert.equal(job.stopReason, "verifier failed after 3 rounds");
+  assert.equal(job.stopReason, "verifier failed after 3 rounds: x");
   assert.equal(job.verifier.verdict, "fail");
 });
 
@@ -165,6 +193,7 @@ test("finish payload adds verifier only when a verifier has a verdict", () => {
     status: "done",
     branch: `orca/${pass.id}`,
     verifier: "verified by verifier: pass, round 2",
+    verification: { verdict: "pass", rounds: 2, strategyChanges: [], blocking: [], warnings: [] },
   });
 
   const bad = makeJob(t, { verifier: { rounds: 3, verdict: null, history: [] } });
@@ -177,4 +206,168 @@ test("finish payload adds verifier only when a verifier has a verdict", () => {
 test("help documents the verifier payload field", () => {
   const out = spawnSync(process.execPath, [ORCA, "help"], { encoding: "utf8" }).stdout;
   assert.match(out, /"verifier": "verified by verifier: pass, round N"/);
+});
+
+const result = (round, failures, warnings = []) =>
+  JSON.stringify({ name: "verifier", role: "verifier", round, verdict: failures.length ? "fail" : "pass", failures, warnings, checks: [], summary: "s" });
+
+test("stall detection: the same failing check in two consecutive rounds is recorded and shown", () => {
+  const t = scratch();
+  const j = makeJob(t, { verifier: { rounds: 1, verdict: null, history: [] } });
+  writeFileSync(join(j.results, "verifier.json"), result(1, [{ check: "scrub", evidence: "missing #scrub" }, { check: "lint", evidence: "e" }]));
+  // starting round 2 records round 1 first
+  assert.equal(t.orca(["worker", "--job", j.id, "--name", "verifier", "--role", "verifier", "--task", "t", "--dry-run"]).status, 0);
+  t.orca(["status", j.id]);
+  let v = j.read().verifier;
+  assert.deepEqual(v.history.map((h) => [h.round, h.verdict, h.failing]), [[1, "fail", ["scrub", "lint"]]]);
+  assert.equal(v.stall, null);
+
+  // round 2 starts for real state: simulate by bumping rounds
+  const job = j.read();
+  job.verifier.rounds = 2;
+  writeFileSync(j.path, JSON.stringify(job));
+  writeFileSync(join(j.results, "verifier.json"), result(2, [{ check: "scrub", evidence: "still missing" }]));
+  const out = t.orca(["status", j.id]).stdout;
+  v = j.read().verifier;
+  assert.deepEqual(v.stall, { checks: ["scrub"], rounds: [1, 2] });
+  assert.match(out, /stall: scrub failed in rounds 1 and 2/);
+  assert.match(out, /last failing: scrub/);
+  assert.match(out, /verifier rounds: 2/);
+
+  // a different failing set clears the stall
+  const third = j.read();
+  third.verifier.rounds = 3;
+  writeFileSync(j.path, JSON.stringify(third));
+  writeFileSync(join(j.results, "verifier.json"), result(3, [{ check: "other", evidence: "x" }]));
+  t.orca(["status", j.id]);
+  assert.equal(j.read().verifier.stall, null);
+});
+
+test("orca strategy appends to strategyChanges and status lists them", () => {
+  const t = scratch();
+  const j = makeJob(t, { verifier: { rounds: 2, verdict: "fail", history: [] } });
+  const r = t.orca(["strategy", j.id, "split", "the", "work", "differently"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /strategy change 1 recorded/);
+  assert.match(t.orca(["strategy", j.id, "fresh worker"]).stdout, /strategy change 2 recorded/);
+  const v = j.read().verifier;
+  assert.deepEqual(v.strategyChanges.map((c) => [c.round, c.change]), [[2, "split the work differently"], [2, "fresh worker"]]);
+  assert.equal(v.rounds, 2);
+  assert.match(t.orca(["status", j.id]).stdout, /strategy change \(round 2\): fresh worker/);
+  assert.notEqual(t.orca(["strategy", j.id]).status, 0);
+});
+
+test("warnings never block a pass; only failures do", () => {
+  const t = scratch();
+  const j = makeJob(t, { verifier: { rounds: 1, verdict: null, history: [] } });
+  const warning = { check: "editor-scrub", evidence: "#scrub missing on /clips/flowchart/", base: "abc", proof: "fails on base via orca verify --base" };
+  writeFileSync(join(j.results, "verifier.json"), result(1, [], [warning]));
+  const r = t.orca(["done", j.id, "--keep"]);
+  assert.equal(r.status, 0, r.stderr);
+  const job = j.read();
+  assert.equal(job.status, "done");
+  assert.equal(job.verifier.verdict, "pass");
+  assert.deepEqual(job.verifier.history[0].warnings, ["editor-scrub"]);
+  assert.deepEqual(job.verifier.history[0].failing, []);
+
+  // a verdict "fail" with only warnings in the failures-shaped result is a pass too
+  const k = makeJob(t, { verifier: { rounds: 1, verdict: null, history: [] } });
+  writeFileSync(join(k.results, "verifier.json"), JSON.stringify({ round: 1, verdict: "fail", failures: [], warnings: [warning] }));
+  t.orca(["done", k.id, "--keep"]);
+  assert.equal(k.read().status, "done");
+});
+
+test("plain string failures stay accepted and are normalised to check+evidence", () => {
+  const t = scratch();
+  const j = makeJob(t, { verifier: { rounds: 1, verdict: null, history: [] } });
+  writeFileSync(join(j.results, "verifier.json"), JSON.stringify({ round: 1, verdict: "fail", failures: ["npm test red"] }));
+  const payload = payloadOf(t.orca(["done", j.id, "--dry-run", "--keep"]).stdout);
+  assert.deepEqual(payload.verification.blocking, [{ check: "npm test red", evidence: "npm test red" }]);
+});
+
+test("finish payload verification carries verdict, rounds, strategy changes, blocking, warnings", () => {
+  const t = scratch();
+  const strategyChanges = [{ round: 1, change: "fresh worker", at: "2026-01-01T00:00:00.000Z" }];
+  const j = makeJob(t, { verifier: { rounds: 2, verdict: null, history: [], strategyChanges } });
+  const warning = { check: "editor-scrub", evidence: "w-ev", base: "abc", proof: "p" };
+  writeFileSync(join(j.results, "verifier.json"), result(2, [{ check: "api", evidence: "500 on /x" }], [warning]));
+  const payload = payloadOf(t.orca(["done", j.id, "--dry-run", "--keep"]).stdout);
+  assert.equal(payload.status, "failed");
+  assert.equal(payload.verifier, "verifier: fail, round 2");
+  assert.deepEqual(payload.verification, {
+    verdict: "fail",
+    rounds: 2,
+    strategyChanges: ["fresh worker"],
+    blocking: [{ check: "api", evidence: "500 on /x" }],
+    warnings: [{ check: "editor-scrub", evidence: "w-ev" }],
+  });
+  const done = t.orca(["done", j.id, "--keep"]);
+  assert.match(done.stdout, /verifier failed after 2 rounds: api/);
+  assert.equal(j.read().stopReason, "verifier failed after 2 rounds: api");
+});
+
+test("done --give-up fails the job, stores stopReason and puts it in the payload", () => {
+  const t = scratch();
+  const j = makeJob(t, { verifier: { rounds: 4, verdict: null, history: [] } });
+  writeFileSync(join(j.results, "verifier.json"), result(4, [{ check: "api", evidence: "e" }]));
+  const dry = payloadOf(t.orca(["done", j.id, "--give-up", "needs an API key", "--dry-run", "--keep"]).stdout);
+  assert.equal(dry.status, "failed");
+  assert.equal(dry.verification.stopReason, "needs an API key");
+  const r = t.orca(["done", j.id, "--give-up", "needs an API key", "--keep"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /failed .*: needs an API key/);
+  const job = j.read();
+  assert.equal(job.status, "failed");
+  assert.equal(job.stopReason, "needs an API key");
+  assert.equal(job.verifier.stopReason, "needs an API key");
+  assert.notEqual(t.orca(["done", makeJob(t).id, "--give-up"]).status, 0);
+});
+
+test("job.baseCommit is recorded at run time and verify --base needs a checks file", () => {
+  const t = scratch();
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-qm", "init"], { cwd: t.repo });
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: t.repo, encoding: "utf8" }).trim();
+  const id = t.orca(["new", "--kind", "pi", "--title", "b", "--goal", "g"]).stdout.trim();
+  assert.equal(JSON.parse(readFileSync(join(t.repo, ".orca", "jobs", `${id}.json`), "utf8")).baseCommit, head);
+  const wt = join(t.repo, "wt");
+  mkdirSync(wt, { recursive: true });
+  const path = join(t.repo, ".orca", "jobs", `${id}.json`);
+  const job = JSON.parse(readFileSync(path, "utf8"));
+  job.worktree = wt;
+  writeFileSync(path, JSON.stringify(job));
+  const r = t.orca(["verify", id, "--base"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /verify --base needs a checks file/);
+  writeFileSync(join(wt, "orca.verify.json"), JSON.stringify({ steps: [["open", "http://127.0.0.1:1/"], { visible: "h1" }] }));
+  const dry = t.orca(["verify", id, "--base", "--dry-run"]);
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.match(dry.stdout, new RegExp(`base: ${head}`));
+});
+
+test("verify --base runs the checks on a temporary base worktree and writes verify-base.json", () => {
+  const t = scratch();
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-qm", "init"], { cwd: t.repo });
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: t.repo, encoding: "utf8" }).trim();
+  const j = makeJob(t, { baseCommit: head });
+  const wt = join(t.repo, "wt");
+  mkdirSync(wt, { recursive: true });
+  writeFileSync(join(wt, "orca.verify.json"), JSON.stringify({ steps: [["open", "http://127.0.0.1:1/"], { visible: "h1" }] }));
+  const r = t.orca(["verify", j.id, "--base"]);
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(readFileSync(join(j.results, "verify-base.json"), "utf8"));
+  assert.equal(out.base, head);
+  assert.deepEqual(out.steps.map((s) => [s.index, s.outcome]), [[1, "fail"], [2, "fail"]]); // the agent-browser stub never reports success
+  assert.equal(out.failed, 2);
+  assert.equal(existsSync(join(t.repo, ".orca", "worktrees")) ? readdirSync(join(t.repo, ".orca", "worktrees")).length : 0, 0);
+  assert.equal(j.read().verify, undefined);
+});
+
+test("help drops the 3-round cap and documents max-rounds, strategy, give-up and --base", () => {
+  const out = spawnSync(process.execPath, [ORCA, "help"], { encoding: "utf8" }).stdout;
+  assert.doesNotMatch(out, /Max 3 rounds|at most 3 rounds/);
+  assert.match(out, /--max-rounds/);
+  assert.match(out, /orca strategy <id>/);
+  assert.match(out, /--give-up/);
+  assert.match(out, /verify <id> \[--base\]/);
+  assert.match(out, /"verification"/);
 });
