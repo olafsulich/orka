@@ -10,6 +10,9 @@ import { homedir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
+import * as lifecycle from "../lib/lifecycle.mjs";
+import * as ports from "../lib/ports.mjs";
+import * as watch from "../lib/watch.mjs";
 
 const ORCA = fileURLToPath(import.meta.url);
 // Defaults only. A claude job stores the aliases it will actually run.
@@ -52,6 +55,7 @@ const VALUE_FLAGS = new Set([
   "role",
   "max-rounds",
   "give-up",
+  "older-than",
 ]);
 const BOOL_FLAGS = new Set(["dry-run", "help", "force", "keep", "base"]);
 const FINISH_STATUSES = new Set(["done", "failed", "stopped"]);
@@ -291,6 +295,19 @@ function load(repo, id) {
   }
 }
 
+function loadAllJobs(repo) {
+  if (!existsSync(jobsDir(repo))) return [];
+  const out = [];
+  for (const f of readdirSync(jobsDir(repo)).filter((f) => f.endsWith(".json") && !f.endsWith(".finish.json")).sort()) {
+    try {
+      out.push(JSON.parse(readFileSync(join(jobsDir(repo), f), "utf8")));
+    } catch {
+      // a corrupt record is not ours to sweep
+    }
+  }
+  return out;
+}
+
 function save(repo, job) {
   mkdirSync(jobsDir(repo), { recursive: true });
   const path = jobPath(repo, job.id);
@@ -366,9 +383,17 @@ function readFinishRecord(repo, id) {
   }
 }
 
-function lastAttempt(record) {
+function roundOf(job) {
+  const n = Number(job?.round);
+  return Number.isInteger(n) && n > 1 ? n : 1;
+}
+
+// The last attempt, or with a round the last attempt of that round (attempts
+// written before follow-up rounds existed have no round and count as round 1).
+function lastAttempt(record, round) {
   if (!record || record.corrupt || !record.attempts?.length) return null;
-  return record.attempts[record.attempts.length - 1];
+  const list = round ? record.attempts.filter((a) => (a.round || 1) === round) : record.attempts;
+  return list.length ? list[list.length - 1] : null;
 }
 
 function writeFinishRecord(repo, record) {
@@ -381,9 +406,18 @@ function writeFinishRecord(repo, record) {
 }
 
 function appendAttempt(repo, job, payload, attempt, prior) {
+  const round = roundOf(job);
+  attempt = { ...attempt, round };
+  const entry = { round, status: payload.status, at: attempt.at, followUp: round > 1 };
   const record = prior
-    ? { ...prior, status: payload.status, branch: payload.branch, attempts: [...prior.attempts, attempt] }
-    : { v: 1, job: job.id, status: payload.status, branch: payload.branch, attempts: [attempt] };
+    ? {
+        ...prior,
+        status: payload.status,
+        branch: payload.branch,
+        rounds: [...(prior.rounds || []).filter((r) => r.round !== round), entry],
+        attempts: [...prior.attempts, attempt],
+      }
+    : { v: 1, job: job.id, status: payload.status, branch: payload.branch, rounds: [entry], attempts: [attempt] };
   if (!prior) {
     const path = finishRecordPath(repo, job.id);
     mkdirSync(jobsDir(repo), { recursive: true });
@@ -416,6 +450,10 @@ function settleAttempt(repo, id, sent) {
 
 function payloadOf(job, status = job.status) {
   const payload = { job: job.id, status, branch: job.branch || `orca/${job.id}` };
+  if (roundOf(job) > 1) {
+    payload.round = roundOf(job);
+    payload.followUp = true;
+  }
   const verifier = verifierLine(job);
   if (verifier) payload.verifier = verifier;
   const verification = verificationOf(job.repo, job);
@@ -427,7 +465,7 @@ function dryRunPlan(repo, job, status) {
   const payload = payloadOf(job, status);
   const config = readFinishConfig(repo);
   const record = readFinishRecord(repo, job.id);
-  const last = lastAttempt(record);
+  const last = lastAttempt(record, roundOf(job));
   let send = "would POST";
   if (!FINISH_STATUSES.has(status)) send = "no (not terminal)";
   else if (config.off) send = "no (off)";
@@ -485,12 +523,12 @@ async function deliverFinish(repo, job, opts = {}) {
   const record = readFinishRecord(repo, job.id);
   if (record?.corrupt) return { action: "failed", detail: "finish record is corrupt; not sent" };
   if (config.error) {
-    if (!manual && record) return { action: "already", detail: lastAttempt(record)?.detail || "already recorded" };
+    if (!manual && lastAttempt(record, roundOf(job))) return { action: "already", detail: lastAttempt(record, roundOf(job)).detail || "already recorded" };
     const attempt = { at: new Date().toISOString(), outcome: "failed", http: null, detail: config.error, settled: new Date().toISOString() };
     if (!appendAttempt(repo, job, payload, attempt, record)) return { action: "already", detail: "attempt already recorded" };
     return { action: "failed", detail: config.error };
   }
-  const last = lastAttempt(record);
+  const last = lastAttempt(record, roundOf(job));
   if (!manual && last) return { action: "already", detail: `${last.outcome}${last.detail ? `: ${last.detail}` : ""}` };
   if (manual && last && last.outcome !== "failed" && !force) {
     const extra = last.outcome === "accepted" ? "" : "; pass --force to record another attempt";
@@ -611,28 +649,69 @@ function closeBrowser(session) {
   return !r.error && (r.status ?? 1) === 0;
 }
 
-// Browsers first, then the workspace. Closing the workspace kills the calling
-// orchestrator pane, so every line is printed before it. Only job.workspace is closed.
-function cleanupJob(repo, job, opts = {}) {
+// Frees what a finished job no longer needs, right away: its agent-browser
+// sessions, dev/preview servers running inside its worktree, and the panes of
+// its finished workers and verifier. The orchestrator pane and the Herdr
+// workspace stay open so Olaf can still steer; orca cleanup closes the
+// workspace once the job has been idle long enough.
+function releaseJob(repo, job, opts = {}) {
   if (opts.keep || job.keep) {
     console.log(`cleanup: kept ${job.id} (--keep)`);
     return;
   }
-  const sessions = jobSessions(job);
-  const workspace = opts.skipWorkspace || job.workspaceClosed ? "" : job.workspace;
-  for (const s of sessions) {
-    if (opts.dryRun) console.log(`cleanup: would close browser ${s}`);
-    else console.log(closeBrowser(s) ? `cleanup: closed browser ${s}` : `cleanup: browser ${s} not closed`);
+  const dry = Boolean(opts.dryRun);
+  const closed = { at: new Date().toISOString(), round: roundOf(job), browsers: [], servers: [], panes: [] };
+  for (const s of jobSessions(job)) {
+    if (dry) console.log(`cleanup: would close browser ${s}`);
+    else if (closeBrowser(s)) {
+      console.log(`cleanup: closed browser ${s}`);
+      closed.browsers.push(s);
+    } else console.log(`cleanup: browser ${s} not closed`);
   }
-  if (!workspace) return;
-  if (opts.dryRun) {
-    console.log(`cleanup: would close workspace ${workspace}`);
-    return;
+  if (job.worktree && existsSync(job.worktree)) {
+    const servers = lifecycle.findWorktreeServers(job.worktree);
+    for (const p of servers) {
+      const what = `server pid ${p.pid} (${String(p.cmdline).slice(0, 80)})`;
+      console.log(`cleanup: ${dry ? "would stop" : "stopped"} ${what}`);
+    }
+    if (!dry && servers.length) {
+      try {
+        lifecycle.killProcesses(servers.map((p) => p.pid), { graceMs: 2000 });
+      } catch (err) {
+        console.log(`cleanup: could not stop a server: ${err.message}`);
+      }
+      closed.servers = servers.map((p) => ({ pid: p.pid, cmdline: String(p.cmdline).slice(0, 200) }));
+    }
   }
-  console.log(`cleanup: closed workspace ${workspace}`);
-  job.workspaceClosed = new Date().toISOString();
+  for (const w of job.workers || []) {
+    if (!w.pane || w.closed || w.pane === job.pane) continue;
+    if (dry) {
+      console.log(`cleanup: would close worker pane ${w.pane} (${w.name})`);
+      continue;
+    }
+    const got = herdr(["pane", "close", w.pane]);
+    if (got.code === 0 && !got.json?.error) {
+      console.log(`cleanup: closed worker pane ${w.pane} (${w.name})`);
+      w.closed = closed.at;
+      closed.panes.push({ name: w.name, pane: w.pane });
+    } else console.log(`cleanup: worker pane ${w.pane} (${w.name}) not closed`);
+  }
+  if (dry) return;
+  job.cleanup = closed;
   save(repo, job);
-  herdr(["workspace", "close", workspace]);
+}
+
+function killWatcher(job) {
+  const pid = Number(job.watcherPid);
+  if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) return;
+  try {
+    // Only a process that still looks like our watcher, never a recycled pid.
+    const cmd = readFileSync(`/proc/${pid}/cmdline`, "utf8");
+    if (!cmd.includes("watch") || !cmd.includes(String(job.id))) return;
+    process.kill(pid, "SIGTERM");
+  } catch {
+    // gone already, or no /proc
+  }
 }
 
 // Saves the terminal status first. A sender failure cannot flip it back.
@@ -640,8 +719,11 @@ async function markTerminal(repo, job, status, reason) {
   if (!FINISH_STATUSES.has(status)) fail(`not a terminal status: ${status}`);
   job.status = status;
   job.finished = new Date().toISOString();
+  job.updated = job.finished;
+  job.finishRounds = [...(Array.isArray(job.finishRounds) ? job.finishRounds : []), { round: roundOf(job), status, at: job.finished }];
   if (reason) job.stopReason = reason;
   save(repo, job);
+  killWatcher(job);
   try {
     return await deliverFinish(repo, job);
   } catch (err) {
@@ -734,6 +816,54 @@ function sh(args) {
   return args.map(q).join(" ");
 }
 
+// Ports held by other jobs that might still run something: not finished, or kept.
+function takenPorts(repo, job) {
+  const taken = [];
+  for (const other of loadAllJobs(repo)) {
+    if (other.id === job.id) continue;
+    if (FINISH_STATUSES.has(other.status) && !other.keep) continue;
+    if (Array.isArray(other.ports)) taken.push(...other.ports);
+    else if (other.port != null) taken.push(other.port);
+  }
+  return taken;
+}
+
+async function assignPorts(repo, job) {
+  if (job.port != null) return;
+  const got = await ports.allocatePorts(job.id, { taken: takenPorts(repo, job) });
+  job.port = got.port;
+  job.ports = got.ports;
+}
+
+function portPromptLines(job) {
+  const list = Array.isArray(job.ports) && job.ports.length ? job.ports : job.port != null ? [job.port] : [];
+  const lines = [];
+  if (list.length) {
+    lines.push(`Your job port${list.length > 1 ? "s" : ""}: ${list.join(", ")} (env ORCA_PORT=${job.port ?? list[0]}${list.length > 1 ? `, ORCA_PORTS=${list.join(",")}` : ""}).`);
+    lines.push(`Use your job port(s) ($ORCA_PORT / the ports listed above) for any dev or preview server, never a fixed default like 3000 or 5173, so concurrent orca jobs never collide.`);
+  }
+  lines.push(
+    `Decide operational questions yourself by choosing the safe recommended option instead of asking. Examples: stop a stale server left by a finished orca job, or pick your own job port when one is busy.`,
+    `Only ask when a genuine human decision or a secret is required. A question nobody sees leaves the job stuck.`,
+  );
+  return lines;
+}
+
+function portEnvArgs(job) {
+  return Object.entries(ports.portEnv(job)).flatMap(([k, v]) => ["--env", `${k}=${v}`]);
+}
+
+function startWatcher(repo, job) {
+  if (job.status !== "running" || !job.agent || !job.pane) return;
+  try {
+    const dir = ensureJobDir(repo, job.id);
+    job.watcherPid = watch.spawnWatcher({ orcaBin: ORCA, jobId: job.id, repo, logPath: join(dir, "watcher.log") });
+    save(repo, job);
+  } catch (err) {
+    console.error(`watcher not started: ${err?.message || err}`);
+  }
+}
+
 function workerPrompt(job, name, task, alias) {
   const dir = jobDir(job.repo, job.id);
   const result = join(dir, "results", `${name}.json`);
@@ -746,6 +876,7 @@ function workerPrompt(job, name, task, alias) {
     `Browser checks, if this task needs them, go in ${VERIFY_FILE} at the worktree root, or the path in ${join(job.repo, ".orca", "config.json")} "verify".`,
     `Shape: {"steps":[["open","http://HOST:PORT/"],{"visible":"SELECTOR"},{"text":"SELECTOR","includes":"EXPECTED"}]}`,
     `Use this project's URL. Do not copy a host or port from another repo. Do not run orca verify unless the task says so.`,
+    ...portPromptLines(job),
     `Use exactly one agent-browser session, named ${browserPrefix(job)}-${name} (agent-browser --session ${browserPrefix(job)}-${name}). Reuse it for every check. Never spawn a fresh session per check. When the task is done, close it: agent-browser --session ${browserPrefix(job)}-${name} close`,
     ``,
     String(task).trim(),
@@ -936,6 +1067,7 @@ function verifierPrompt(job, name, task, alias, round) {
     `Never weaken, loosen or delete a check to make it pass. Never skip a failing check.`,
     `Shape: {"steps":[["open","http://HOST:PORT/"],{"visible":"SELECTOR"},{"text":"SELECTOR","includes":"EXPECTED"}]}`,
     `Use this project's URL. Do not copy a host or port from another repo.`,
+    ...portPromptLines(job),
     `Use exactly one agent-browser session, named ${session} (agent-browser --session ${session}). Reuse it for every check. Never spawn a fresh session per check. When done, close it: agent-browser --session ${session} close`,
     ``,
     `When finished, write ${result} as JSON:`,
@@ -963,6 +1095,7 @@ function orchestratorPrompt(job) {
     `Worktree (shared by every worker): ${job.worktree}`,
     `Branch: ${job.branch}`,
     `Do not create branches or worktrees. Do not push. Workers share this checkout in v0.`,
+    ...portPromptLines(job),
     ``,
     `Goal:`,
     job.goal.trim(),
@@ -1003,7 +1136,8 @@ function orchestratorPrompt(job) {
     `Then mark the job done, which sends the finish wake and records the verifier verdict (a fail verdict marks the job failed):`,
     `  orca done ${job.id}`,
     `If orca is not on PATH, run ${ORCA} done ${job.id}.`,
-    `Then stop working.`,
+    `Then stop working. Your pane stays open after orca done, so Olaf can still give feedback with orca steer; a follow-up message starts a new round, and you run orca done ${job.id} again when that round is finished (the finish wake is sent again, marked followUp).`,
+    `If you stop and wait on a question, orca's watcher tells Olaf you need input, so ask only the genuine human questions described above.`,
   ].join("\n");
 }
 
@@ -1025,7 +1159,8 @@ function printDryRun(repo, job) {
   console.log(`worktree: ${wt}`);
   console.log(`layout: shared worktree (workers do not get sibling checkouts)`);
   console.log(`git: git -C ${q(repo)} worktree add -b ${q(branch)} ${q(wt)} HEAD`);
-  console.log(`workspace: herdr workspace create --cwd ${q(wt)} --label ${q(`orca-${job.id}`.slice(0, 40))} --no-focus --env PATH=<orca-bins>:$PATH`);
+  console.log(`workspace: herdr workspace create --cwd ${q(wt)} --label ${q(`orca-${job.id}`.slice(0, 40))} --no-focus --env PATH=<orca-bins>:$PATH${job.port != null ? ` ${portEnvArgs(job).map(q).join(" ")}` : " (+ ORCA_PORT env, allocated at run)"}`);
+  console.log(`port: ${job.port != null ? (job.ports || [job.port]).join(",") : "allocated at run"} (ORCA_PORT in the panes and orca verify scripts; urls and commands in ${VERIFY_FILE} expand \${ORCA_PORT})`);
   console.log(`lead: herdr ${sh(startArgs(name, "<pane>", kind, orchestratorModel))}`);
   if (kind === "claude") {
     console.log(`models: orchestrator=${orchestratorModel} worker=${workerModel}`);
@@ -1041,6 +1176,8 @@ function printDryRun(repo, job) {
     console.log(`worker-lead: herdr ${sh(startArgs("<worker>", "<pane>", "pi", ""))}`);
   }
   console.log("finish webhook: posts {job, status, branch} when the CLI marks done, failed, or stopped");
+  console.log("watcher: orca watch <id> (detached) posts {kind:needs-input, job, title, status, question, pane} when the orchestrator waits on a question");
+  console.log("cleanup on finish: browsers, worktree servers and worker panes close at once; the orchestrator pane and workspace stay until orca cleanup finds them idle");
   console.log(`verify: orca verify ${job.id} (skips when the worktree has no checks file)`);
 }
 
@@ -1055,7 +1192,7 @@ function assignClaudeModels(job, args) {
   job.model = models.orchestratorModel;
 }
 
-function cmdNew(args) {
+async function cmdNew(args) {
   if ("model" in args) fail("use --worker-model on orca new, not --model");
   allowFlags(args, ["cwd", "title", "goal", "kind", "orchestrator-model", "worker-model", "keep", "max-rounds"]);
   const title = args.title;
@@ -1104,6 +1241,8 @@ function cmdNew(args) {
     created: new Date().toISOString(),
   };
   if (maxRounds) job.maxRounds = maxRounds;
+  sweepQuietly(repo);
+  await assignPorts(repo, job);
   const head = git(repo, ["rev-parse", "--verify", "--quiet", "HEAD"]);
   if (head.code === 0 && head.out.trim()) job.baseCommit = head.out.trim();
   save(repo, job);
@@ -1141,6 +1280,7 @@ function createWorkspace(job) {
     "--no-focus",
     "--env",
     `PATH=${pathPrefix()}`,
+    ...portEnvArgs(job),
   ]);
   const pane = got.json?.result?.root_pane?.pane_id;
   const workspace = got.json?.result?.workspace?.workspace_id;
@@ -1176,6 +1316,8 @@ async function cmdRun(args) {
   const job = load(repo, id);
   if (job.status !== "queued") fail(`job ${id} is ${job.status}, not queued`);
   assignClaudeModels(job, args);
+  if (!args["dry-run"]) sweepQuietly(repo);
+  if (!args["dry-run"] || job.port == null) await assignPorts(repo, job);
   if (args.keep) job.keep = true;
   const maxRounds = parseMaxRounds(args);
   if (maxRounds) job.maxRounds = maxRounds;
@@ -1198,24 +1340,26 @@ async function cmdRun(args) {
     job.status = "running";
     job.started = new Date().toISOString();
     save(repo, job);
+    startWatcher(repo, job);
   } catch (err) {
     if (job.worktree || job.pane || job.agent) {
       try {
         const wake = await markTerminal(repo, job, "failed", err.message);
         console.error(finishLine(wake));
-        cleanupJob(repo, job);
+        releaseJob(repo, job);
       } catch (markErr) {
         console.error(markErr?.message || markErr);
       }
     }
     throw err;
   }
-  const extra = job.kind === "claude" ? ` role=orchestrator model=${job.orchestratorModel} worker=${job.workerModel}` : " role=orchestrator kind=pi";
+  const portNote = job.port != null ? ` port=${job.port}` : "";
+  const extra = (job.kind === "claude" ? ` role=orchestrator model=${job.orchestratorModel} worker=${job.workerModel}` : " role=orchestrator kind=pi") + portNote;
   console.log(`${id} running pane=${job.pane} agent=${job.agent} branch=${job.branch} worktree=${job.worktree}${extra}`);
 }
 
-function splitPane(fromPane, cwd) {
-  const split = herdr(["pane", "split", "--pane", fromPane, "--direction", "right", "--cwd", cwd, "--no-focus", "--env", `PATH=${pathPrefix()}`]);
+function splitPane(fromPane, cwd, job) {
+  const split = herdr(["pane", "split", "--pane", fromPane, "--direction", "right", "--cwd", cwd, "--no-focus", "--env", `PATH=${pathPrefix()}`, ...portEnvArgs(job)]);
   const pane = split.json?.result?.pane?.pane_id;
   if (!pane) herdrFail(split, "pane split");
   return pane;
@@ -1260,7 +1404,7 @@ function cmdWorker(args) {
   if (!job.pane || !job.agent || !job.worktree) fail("orchestrator is not running");
   if (job.status !== "running") fail(`job ${id} is ${job.status}, not running`);
   ensureJobDir(repo, job.id);
-  const pane = args.pane ? String(args.pane) : splitPane(job.pane, job.worktree);
+  const pane = args.pane ? String(args.pane) : splitPane(job.pane, job.worktree, job);
   const started = herdr(startArgs(String(name), pane, kind, alias), 90000);
   if (started.code !== 0 || started.json?.error) herdrFail(started, "worker start");
   promptWithRetry(String(name), role === "verifier" ? verifierPrompt(job, String(name), String(task), alias, round) : workerPrompt(job, String(name), String(task), alias));
@@ -1305,6 +1449,12 @@ function cmdStatus(args) {
     console.log(`  branch: ${job.branch || `orca/${job.id}`}`);
     console.log(`  worktree: ${job.worktree || "(not created)"}`);
     console.log(`  layout: ${job.workerLayout || "shared-worktree"}`);
+    if (job.port != null) console.log(`  port: ${job.port}${Array.isArray(job.ports) && job.ports.length > 1 ? ` ports=${job.ports.join(",")}` : ""}`);
+    if (roundOf(job) > 1) console.log(`  round: ${roundOf(job)} (follow-up)`);
+    if (job.watcherPid && job.status === "running") console.log(`  watcher: pid ${job.watcherPid}`);
+    if (job.workspaceClosed) console.log(`  workspace: closed ${job.workspaceClosed}`);
+    else if (FINISH_STATUSES.has(job.status) && job.workspace) console.log(`  workspace: ${job.workspace} open until idle ${staleLabel(repo)}`);
+    if (job.cleanup) console.log(`  cleaned up: ${job.cleanup.browsers.length} browser(s), ${job.cleanup.servers.length} server(s), ${job.cleanup.panes.length} worker pane(s)`);
     if (job.kind === "claude") console.log(`  models: orchestrator=${job.orchestratorModel || job.model || "-"} worker=${job.workerModel || "-"}`);
     if (job.agent || job.pane) console.log(`  agent: ${job.agent || "-"} pane=${job.pane || "-"} workspace=${job.workspace || "-"} model=${job.orchestratorModel || job.model || "-"}`);
     for (const worker of job.workers || []) console.log(`  worker: ${worker.name} pane=${worker.pane} ${worker.model ? `model=${worker.model}` : "kind=pi"}${worker.role === "verifier" ? " role=verifier" : ""}`);
@@ -1325,6 +1475,11 @@ function cmdStatus(args) {
     return;
   }
   for (const file of files) line(JSON.parse(readFileSync(join(jobsDir(repo), file), "utf8")));
+}
+
+function staleLabel(repo) {
+  const ms = staleThreshold(repo);
+  return `for ${Math.round(ms / 3600000 * 10) / 10}h`;
 }
 
 function printVerifierDetail(job) {
@@ -1363,12 +1518,33 @@ function cmdSteer(args) {
   if (!id || !message) fail('need: orca steer <id> "message"');
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, id);
-  if (job.status !== "running" || !job.agent) fail(`${id} is ${job.status}; not steered`);
+  const finished = FINISH_STATUSES.has(job.status);
+  if ((job.status !== "running" && !finished) || !job.agent) fail(`${id} is ${job.status}; not steered`);
+  // A finished job can be steered while its orchestrator pane is still open:
+  // that starts a follow-up round, and the next orca done sends the wake again.
+  if (finished && (job.workspaceClosed || !agentExists(job.agent))) {
+    fail(`${id} is ${job.status} and its orchestrator pane is gone; not steered`);
+  }
   promptWithRetry(job.agent, message);
+  const now = new Date().toISOString();
   job.steers = job.steers || [];
-  job.steers.push({ at: new Date().toISOString(), message });
+  job.steers.push({ at: now, message });
+  job.steered = now;
+  job.updated = now;
+  if (finished) {
+    job.round = roundOf(job) + 1;
+    job.followUp = true;
+    job.status = "running";
+    job.stopReason = "";
+  }
   save(repo, job);
-  console.log(`steered ${id}`);
+  if (finished) startWatcher(repo, job);
+  console.log(finished ? `steered ${id} (follow-up round ${job.round}; run orca done ${id} when finished)` : `steered ${id}`);
+}
+
+function agentExists(name) {
+  const got = herdr(["agent", "get", name]);
+  return got.code === 0 && !got.json?.error && Boolean(got.json?.result?.agent);
 }
 
 function interrupt(name) {
@@ -1394,7 +1570,7 @@ async function cmdStop(args) {
     console.log(`reason: ${reason}`);
     const preview = await deliverFinish(repo, { ...job, status: "stopped" }, { dryRun: true });
     for (const line of preview.lines) console.log(`finish webhook: ${line}`);
-    cleanupJob(repo, job, { dryRun: true, keep: args.keep });
+    releaseJob(repo, job, { dryRun: true, keep: args.keep });
     return;
   }
   if (job.status !== "running" && job.status !== "queued") {
@@ -1402,7 +1578,6 @@ async function cmdStop(args) {
     return;
   }
   let how = "recorded";
-  let closedWs = false;
   if (job.status === "running") {
     let ok = false;
     if (job.agent) {
@@ -1410,15 +1585,12 @@ async function cmdStop(args) {
       for (const worker of job.workers || []) interrupt(worker.name);
       if (lead) {
         ok = true;
-        how = job.workspace ? "interrupted; cleanup closes the workspace" : "interrupted";
+        how = "interrupted";
+      } else if (!agentExists(job.agent)) {
+        // Nothing left to interrupt. The workspace stays for orca cleanup.
+        ok = true;
+        how = "agent already gone";
       }
-    }
-    if (!ok && job.workspace && !args.keep && !job.keep) {
-      const closed = herdr(["workspace", "close", job.workspace]);
-      ok = closed.code === 0 && !closed.json?.error;
-      closedWs = ok;
-      if (ok) job.workspaceClosed = new Date().toISOString();
-      how = ok ? "workspace closed" : "workspace close failed";
     }
     if (!ok && (job.workspace || job.agent)) fail(`could not stop ${id}; job left running (${how})`);
     if (!job.workspace && !job.agent) how = "no pane recorded";
@@ -1428,7 +1600,7 @@ async function cmdStop(args) {
   const wake = await markTerminal(repo, job, "stopped", reason);
   console.log(`stopped ${id} (${how}): ${reason}`);
   console.log(finishLine(wake));
-  cleanupJob(repo, job, { keep: args.keep, skipWorkspace: closedWs });
+  releaseJob(repo, job, { keep: args.keep });
 }
 
 function verifierFailReason(rounds, blocking = []) {
@@ -1463,7 +1635,7 @@ async function cmdDone(args) {
     if (verifierLine(view)) console.log(verifierLine(view));
     const preview = await deliverFinish(repo, { ...view, status: failing ? "failed" : "done" }, { dryRun: true });
     for (const line of preview.lines) console.log(`finish webhook: ${line}`);
-    cleanupJob(repo, job, { dryRun: true, keep: args.keep });
+    releaseJob(repo, job, { dryRun: true, keep: args.keep });
     return;
   }
   if (terminal) {
@@ -1483,7 +1655,7 @@ async function cmdDone(args) {
   console.log(`${failed ? "failed" : "done"} ${id}: ${why}`);
   if (verifierLine(job)) console.log(verifierLine(job));
   console.log(finishLine(wake));
-  cleanupJob(repo, job, { keep: args.keep });
+  releaseJob(repo, job, { keep: args.keep });
 }
 
 function webhookExit(result) {
@@ -1562,7 +1734,14 @@ function classifyChecks(path) {
   return "script";
 }
 
-function loadSteps(path) {
+function expandDeep(value, job) {
+  if (typeof value === "string") return ports.expandPortVars(value, job);
+  if (Array.isArray(value)) return value.map((v) => expandDeep(v, job));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, expandDeep(v, job)]));
+  return value;
+}
+
+function loadSteps(path, job) {
   let parsed;
   try {
     parsed = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""));
@@ -1581,7 +1760,7 @@ function loadSteps(path) {
   }
   if (!steps.length) fail("checks file has no steps");
   if (steps.length > 100) fail("checks file has more than 100 steps");
-  return steps;
+  return job ? expandDeep(steps, job) : steps;
 }
 
 function needString(value, label) {
@@ -1711,8 +1890,8 @@ function isAssertion(plan) {
   return plan.argv[0] === "wait" && plan.argv.some((arg) => arg === "--text" || arg === "--url" || arg === "--fn");
 }
 
-function loadPlans(path) {
-  const steps = loadSteps(path);
+function loadPlans(path, job) {
+  const steps = loadSteps(path, job);
   const plans = steps.map((step, index) => {
     try {
       return planStep(step);
@@ -1863,6 +2042,7 @@ function runScript(path, cwd, session, logPath, job) {
       ORCA_REPO: job.repo,
       ORCA_WORKTREE: job.worktree,
       ORCA_BRANCH: job.branch || "",
+      ...ports.portEnv(job),
     },
   });
   const out = `${r.stdout || ""}${r.stderr || ""}`.trim().slice(-4000);
@@ -1922,7 +2102,7 @@ function printVerifyDryRun(id, job, path, kind) {
     console.log("would run the script with AGENT_BROWSER_SESSION set, then close that session");
     return;
   }
-  const plans = loadPlans(path);
+  const plans = loadPlans(path, job);
   console.log(`steps: ${plans.length}`);
   plans.forEach((plan, index) => console.log(`  ${index + 1}. ${describePlan(plan)}`));
 }
@@ -1970,7 +2150,7 @@ function cmdVerifyBase(repo, job, args) {
     noteSession(repo, job, session);
     closeSession(session, tmp);
     if (kind === "json") {
-      const plans = loadPlans(runPath);
+      const plans = loadPlans(runPath, job);
       plans.forEach((plan, index) => {
         let outcome = "pass";
         try {
@@ -2051,7 +2231,7 @@ function cmdVerify(args) {
   let started = false;
   try {
     if (kind === "json") {
-      const plans = loadPlans(checks.path);
+      const plans = loadPlans(checks.path, job);
       started = true;
       closeSession(session, job.worktree);
       runPlans(session, plans, job.worktree, logPath);
@@ -2088,47 +2268,120 @@ function cmdVerify(args) {
   }
 }
 
-function cmdCleanup(args) {
-  allowFlags(args, ["cwd", "dry-run"]);
-  const repo = requireRepo(args.cwd || process.cwd());
-  const dry = Boolean(args["dry-run"]);
+// --older-than, else "staleAfter" in .orca/config.json (such as "12h"), else 12h.
+function staleThreshold(repo, flag) {
+  if (flag !== undefined) return lifecycle.parseDuration(flagValue({ "older-than": flag }, "older-than"));
+  try {
+    const configured = JSON.parse(readFileSync(configPath(repo), "utf8")).staleAfter;
+    if (configured != null && configured !== "") return typeof configured === "number" ? configured : lifecycle.parseDuration(configured);
+  } catch {
+    // fall back to the default
+  }
+  return lifecycle.DEFAULT_STALE_MS;
+}
+
+// Closes the workspace of finished jobs idle longer than the threshold. Browsers
+// first, then workspaces. Returns what it did. quiet: no "nothing to close" line.
+function sweep(repo, { dry = false, thresholdMs, orphans = true, quiet = false } = {}) {
   const verb = dry ? "would close" : "closed";
-  const jobs = existsSync(jobsDir(repo))
-    ? readdirSync(jobsDir(repo)).filter((f) => f.endsWith(".json") && !f.endsWith(".finish.json")).map((f) => load(repo, f.slice(0, -5)))
-    : [];
+  const jobs = loadAllJobs(repo);
   const live = jobs.filter((j) => j.status === "running");
+  const now = Date.now();
   let count = 0;
-  const closeBrowsers = (names) => {
+  const workspaces = jobs.filter((j) => lifecycle.isStale(j, now, thresholdMs));
+  if (orphans) {
+    const names = new Set();
+    for (const s of [...browserList(), ...jobs.flatMap((j) => j.browserSessions || [])]) {
+      const owner = jobs.find((j) => s.startsWith(`${browserPrefix(j)}-`) || s === legacyVerifySession(j));
+      if (owner && !live.includes(owner) && !owner.keep) names.add(s);
+    }
+    for (const s of orphanSessions()) names.add(s);
     for (const s of names) {
       if (dry || closeBrowser(s)) {
         console.log(`cleanup: ${verb} browser ${s}`);
         count++;
       }
     }
-  };
-  const workspaces = [];
-  for (const job of jobs) {
-    if (!FINISH_STATUSES.has(job.status) || job.keep || !job.workspace || job.workspaceClosed) continue;
-    workspaces.push(job);
   }
-  const names = new Set();
-  for (const s of [...browserList(), ...jobs.flatMap((j) => j.browserSessions || [])]) {
-    const owner = jobs.find((j) => s.startsWith(`${browserPrefix(j)}-`) || s === legacyVerifySession(j));
-    if (owner && !live.includes(owner) && !owner.keep) names.add(s);
-  }
-  for (const s of orphanSessions()) names.add(s);
-  closeBrowsers([...names]);
   for (const j of workspaces) {
-    console.log(`cleanup: ${verb} workspace ${j.workspace}`);
+    console.log(`cleanup: ${verb} workspace ${j.workspace} (${j.id}, idle since ${new Date(lifecycle.lastActivity(j) || 0).toISOString()})`);
     count++;
   }
-  if (!count) console.log("cleanup: nothing to close");
-  if (dry) return;
+  if (!count && !quiet) console.log("cleanup: nothing to close");
+  if (dry) return count;
   for (const j of workspaces) {
+    // The record first: closing the workspace kills any pane in it.
     j.workspaceClosed = new Date().toISOString();
     save(repo, j);
     herdr(["workspace", "close", j.workspace]);
   }
+  return count;
+}
+
+// Opportunistic sweep at orca new / run. Only stale workspaces; never fatal, never on stdout.
+function sweepQuietly(repo) {
+  try {
+    const jobs = loadAllJobs(repo);
+    const now = Date.now();
+    const threshold = staleThreshold(repo);
+    const stale = jobs.filter((j) => lifecycle.isStale(j, now, threshold));
+    for (const j of stale) {
+      j.workspaceClosed = new Date().toISOString();
+      save(repo, j);
+      herdr(["workspace", "close", j.workspace]);
+    }
+    if (stale.length) console.error(`cleanup: closed ${stale.length} stale workspace${stale.length === 1 ? "" : "s"} (${stale.map((j) => j.id).join(", ")})`);
+  } catch {
+    // a sweep must never block new or run
+  }
+}
+
+function cmdCleanup(args) {
+  allowFlags(args, ["cwd", "dry-run", "older-than"]);
+  const repo = requireRepo(args.cwd || process.cwd());
+  sweep(repo, { dry: Boolean(args["dry-run"]), thresholdMs: staleThreshold(repo, args["older-than"]) });
+}
+
+// Hidden: runs detached from orca run. Posts needs-input to the finish webhook until the job is terminal.
+async function cmdWatch(args) {
+  allowFlags(args, ["cwd", "dry-run"]);
+  const id = args._[1];
+  if (!id) fail("need id");
+  const repo = requireRepo(args.cwd || process.cwd());
+  const job = load(repo, id);
+  const log = (msg) => console.log(`${new Date().toISOString()} watch ${id}: ${msg}`);
+  if (FINISH_STATUSES.has(job.status)) {
+    log(`job is ${job.status}; nothing to watch`);
+    return;
+  }
+  if (!job.agent || !job.pane) fail(`job ${id} has no orchestrator agent or pane to watch`);
+  const config = readFinishConfig(repo);
+  if (args["dry-run"]) {
+    console.log(`dry-run watch ${id}: agent=${job.agent} pane=${job.pane}`);
+    console.log(`would post {kind:"needs-input", job, title, status, question, pane} to ${config.origin || (config.off ? "(no webhook configured: log and skip)" : `(invalid config: ${config.error})`)}`);
+    return;
+  }
+  const deps = {
+    ...watch.defaultDeps(repo),
+    loadJob: async (jobId) => {
+      try {
+        return load(repo, jobId);
+      } catch {
+        return null;
+      }
+    },
+    post: async (payload) => {
+      const cfg = readFinishConfig(repo);
+      if (cfg.off) return log("no finish webhook configured; needs-input not sent");
+      if (cfg.error) return log(`finish webhook config invalid (${cfg.error}); needs-input not sent`);
+      const sent = await postFinish(cfg, payload);
+      log(`needs-input ${payload.status}: ${sent.outcome} (${sent.detail})`);
+    },
+    log,
+  };
+  log(`watching agent ${job.agent} pane ${job.pane}`);
+  const result = await watch.watchJob({ jobId: id, agent: job.agent, pane: job.pane, deps });
+  log(`exit: ${result.exit}`);
 }
 
 function help() {
@@ -2143,11 +2396,12 @@ function help() {
            (--model is claude only; pi workers have no model flag)
            (--role verifier needs --name verifier; no round limit unless the job has --max-rounds)
   orca status [id] [--cwd <repo>]
-  orca steer <id> "message"
+  orca steer <id> "message"   (also on a finished job whose orchestrator pane is still open: starts a follow-up round)
   orca stop <id> [reason] [--dry-run] [--keep]
   orca strategy <id> "<what changed>"
   orca done <id> [reason] [--give-up "<reason>"] [--dry-run] [--keep] [--cwd <repo>]
-  orca cleanup [--dry-run] [--cwd <repo>]
+  orca cleanup [--dry-run] [--older-than <12h>] [--cwd <repo>]
+  orca watch <id> [--dry-run] [--cwd <repo>]   (started by orca run; not for hand use)
   orca webhook <id> [--dry-run] [--force] [--cwd <repo>]
   orca verify <id> [--base] [--dry-run] [--cwd <repo>]
   orca help
@@ -2201,8 +2455,9 @@ Verifier (both kinds)
 
 A prompt that is still idle after ~8s is sent once more.
 status reads the job file. It does not poll Herdr. One job also prints the finish-wake record and verify.
-stop closes the job workspace, or interrupts the lead if there is no workspace, then marks stopped.
+stop interrupts the lead and workers, then marks stopped. It does not close the workspace.
 done marks a running job done (default reason "completed") and sends the finish wake. It refuses a queued job and leaves a finished one alone.
+done does not close the orchestrator pane or the workspace: Olaf may still want to give feedback (see Follow-up rounds).
 A failed run marks failed after the worktree or pane exists. Idle is not terminal.
 
 Finish wake is automatic from this CLI when it marks a job done, failed, or stopped.
@@ -2225,15 +2480,39 @@ verify
   Example: {"steps":[["open","http://127.0.0.1:3000/"],{"visible":"h1"},{"text":"h1","includes":"Ready"}]}
   See README. examples/orca.verify.json is an example only; orca does not run it.
 
-cleanup
-  After done, stop, or a failed run, orca closes the job's agent-browser sessions
-  (names start with orca-<8 hex of sha1(id)>; workers use <prefix>-<worker>, verify <prefix>-verify)
-  and then the job Herdr workspace recorded on the job. The job record, worktree and branch stay.
-  Output is printed before the workspace closes, because that kills the calling pane.
-  --keep on new, run, done or stop skips cleanup. --dry-run on done or stop lists what it would close.
-  orca cleanup is a one-shot sweep of this repo's jobs: workspaces of done, stopped or failed jobs,
-  orca- browser sessions whose job is not running, and agent-browser sessions whose pid file names a dead process.
-  No cron, no polling. --dry-run prints "would close" lines.
+cleanup (delayed, not close-everything)
+  On done, stop or a failed run orca frees at once only: the job's agent-browser sessions (names start with
+  orca-<8 hex of sha1(id)>; workers use <prefix>-<worker>, verify <prefix>-verify), dev/preview servers whose
+  process cwd is inside the job worktree (never orca itself or its ancestors), and the panes of finished
+  workers and the verifier (herdr pane close). What was closed is stored in job.cleanup.
+  The orchestrator pane and the Herdr workspace stay open so Olaf can still steer. The record, worktree and branch always stay.
+  orca cleanup [--dry-run] [--older-than 12h] closes the workspace of jobs that are finished (done, failed,
+  stopped) and idle longer than the threshold (default 12h; or "staleAfter": "<duration>" in .orca/config.json).
+  Idle is measured from the latest of finished, steer, verifier and follow-up round times. A job is only closed once.
+  It also closes orca- browser sessions of jobs that are not running and agent-browser sessions whose pid file names a dead process.
+  The same stale sweep runs quietly at the start of orca new and orca run (stderr, one line, only if it closed something).
+  No cron, no polling. --keep on new, run, done or stop opts out of everything. --dry-run lists "would close" lines.
+
+Follow-up rounds
+  orca steer <id> "message" works on a done, failed or stopped job whose orchestrator pane still exists. It sets the job
+  back to running, bumps job.round, and updates the activity time so the job is not stale. When the orchestrator calls
+  orca done again the finish wake is sent again for that round: the payload adds "round": N and "followUp": true and
+  <id>.finish.json keeps a per-round record ("rounds" and a "round" on each attempt). Round 1 payloads are unchanged.
+
+Ports
+  orca new allocates a block of ports for the job (lib/ports.mjs), unique among the other unfinished jobs, and stores
+  job.port and job.ports. ORCA_PORT, ORCA_PORTS and PORT are exported into the orchestrator and worker panes and into
+  orca verify scripts; the prompts state them too. In orca.verify.json, \${ORCA_PORT}, \${ORCA_PORT_2} and {{port}} expand in
+  every url and command. orca status prints the port. Older jobs without a port keep working (run allocates one).
+  Prompts tell agents to use their job port for dev servers and to decide operational questions themselves
+  (stop a stale server from a finished orca job, pick their own port); they ask only for a human decision or a secret.
+
+Needs-input watcher
+  orca run starts a detached watcher (orca watch <id>, log: <repo>/.orca/jobs/<id>/watcher.log, pid in job.watcherPid).
+  When the orchestrator is blocked or idle on a question it POSTs, through the finish webhook config,
+  {"kind":"needs-input","job","title","status":"blocked"|"idle","question","pane"}. It dedupes per episode and exits when the
+  job is terminal (markTerminal also stops it). With no webhook configured it logs and skips. Workers never post;
+  only orca done, stop or a failed run send the finish wake.
 
 claude must be on PATH in the pane, and on PATH here so aliases can be checked.
 This CLI does not install it.
@@ -2248,7 +2527,7 @@ async function main() {
     return;
   }
   if (cmd === "init") cmdInit(args);
-  else if (cmd === "new") cmdNew(args);
+  else if (cmd === "new") await cmdNew(args);
   else if (cmd === "run") await cmdRun(args);
   else if (cmd === "worker") cmdWorker(args);
   else if (cmd === "status") cmdStatus(args);
@@ -2259,6 +2538,7 @@ async function main() {
   else if (cmd === "webhook") await cmdWebhook(args);
   else if (cmd === "verify") cmdVerify(args);
   else if (cmd === "cleanup") cmdCleanup(args);
+  else if (cmd === "watch") await cmdWatch(args);
   else fail(`unknown command ${cmd}\nrun: orca help`);
 }
 
