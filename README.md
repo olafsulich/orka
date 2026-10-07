@@ -8,7 +8,7 @@ Not a fork of [limen](https://github.com/overment/limen). Not the old `orch` scr
 
 ![How orca works](docs/orca-how-it-works.png)
 
-You run `orca run`. The CLI checks out branch `orca/<id>` in a linked worktree and spawns a Herdr pane there. The pane runs an orchestrator that splits the goal and starts one worker per task, several in parallel when tasks are independent, all in the same worktree. A Claude job uses `opus` for the orchestrator and `sonnet` for workers; a Pi job uses Pi for both. Optional `orca verify` drives `agent-browser` from `orca.verify.json`. When the CLI marks the job `done`, `failed`, or `stopped`, it can POST `{job, status, branch}` to Grok Bot (`orca-finish-wake`).
+You run `orca run`. The CLI checks out branch `orca/<id>` in a linked worktree and spawns a Herdr pane there. The pane runs an orchestrator that splits the goal and starts one worker per task, several in parallel when tasks are independent, all in the same worktree. A Claude job uses `opus` for the orchestrator and `sonnet` for workers; a Pi job uses Pi for both. After the builders report, the orchestrator starts one dedicated verifier worker (`orca worker --role verifier`). It runs `orca verify`, the project's own checks, and targeted `agent-browser` checks against the goal's acceptance criteria, and writes a pass/fail verdict. On fail the orchestrator routes the failures back to builders and starts the verifier again, up to 3 rounds. The orchestrator itself never runs `orca verify`. When the CLI marks the job `done`, `failed`, or `stopped`, it can POST `{job, status, branch}` to Grok Bot (`orca-finish-wake`).
 
 ## How this differs from limen
 
@@ -89,6 +89,7 @@ orca new --title "..." --goal "..." [--cwd <repo>] [--kind claude|pi] [--keep] \
 orca run <id> [--dry-run] [--keep] [--cwd <repo>] \
   [--orchestrator-model <alias>] [--worker-model <alias>]
 orca worker --job <id> --name <agent> --task "..." [--model <alias>] [--dry-run]
+orca worker --job <id> --name verifier --role verifier --task "<built + acceptance criteria>"
 orca status [id] [--cwd <repo>]
 orca steer <id> "message"
 orca stop <id> [reason] [--dry-run] [--keep]
@@ -99,7 +100,7 @@ orca verify <id> [--dry-run] [--cwd <repo>]
 orca help
 ```
 
-`--kind` defaults to `claude`.
+`--kind` defaults to `claude`. `--role` on `orca worker` is `builder` (default) or `verifier`.
 
 `claude` jobs store `orchestratorModel` and `workerModel` on the job file. Defaults are `opus` (Opus 5.5) and `sonnet` (Sonnet 5.5). Those are aliases from `claude --help`, not pinned ids, so they track the latest model of that family. `new` sets them. A real `run` writes any override back onto the job before it starts. `--dry-run` prints the override and does not write it. `orca worker --model` overrides one worker; the job default stays `workerModel`. The lead alias is also stored as `model`, the same value as `orchestratorModel`.
 
@@ -119,15 +120,15 @@ If the lead (or a worker) is still `idle` about 8 seconds after the prompt, orca
 
 `stop` closes the job's Herdr workspace (or interrupts the lead if there is no workspace) and sets `stopped`. It does not delete the worktree or the branch. The finish wake, if configured, is sent after that status is saved, then terminal cleanup runs (see Cleanup). `--dry-run` prints the plan and does not stop or send.
 
-`done` marks a running job `done` (reason defaults to `completed`) and sends the finish wake once, then runs terminal cleanup (see Cleanup), which closes the job's browser sessions and Herdr workspace. It does not interrupt the lead before that. A queued job is refused with exit 1, since nothing ran. An already `done`, `failed`, or `stopped` job prints that status, exits 0, and sends nothing. `--dry-run` prints the plan and the finish payload, and does not change status or send.
+`done` marks a running job `done` (reason defaults to `completed`) and sends the finish wake once, then runs terminal cleanup (see Cleanup), which closes the job's browser sessions and Herdr workspace. It does not interrupt the lead before that. A queued job is refused with exit 1, since nothing ran. If a verifier ran, `done` reads `results/verifier.json` and records the verdict on `job.verifier`; a final verdict of `fail` marks the job `failed` (reason like `verifier failed after 3 rounds`) instead of `done`. An already `done`, `failed`, or `stopped` job prints that status, exits 0, and sends nothing. `--dry-run` prints the plan and the finish payload, and does not change status or send.
 
 `webhook` previews or retries that POST. It does not change job status.
 
 `cleanup` is a one-shot sweep of the repo's finished jobs. See Cleanup.
 
-`verify` runs project browser checks in the job worktree. See Verify. It does not set the job to `done`; `orca done` does.
+`verify` runs project browser checks in the job worktree. See Verify. It does not set the job to `done`; `orca done` does. The verifier worker runs it, not the orchestrator.
 
-`claude` must already be on `PATH` inside the pane, and on `PATH` here so aliases can be checked. This CLI does not install it. `agent-browser` must be on `PATH` for `verify`. This CLI does not install that either.
+`claude` must already be on `PATH` inside the pane, and on `PATH` here so aliases can be checked. This CLI does not install it. `agent-browser` must be on `PATH` for `verify` and the verifier. This CLI does not install that either.
 
 ## Verify
 
@@ -164,7 +165,43 @@ Also: `click`, `fill` as `[selector, text]`, `press`, `wait`, `waitText`, `title
 
 A non-JSON checks file is a script. orca runs it in the worktree with `AGENT_BROWSER_SESSION` set to the job's verify session (`<prefix>-verify`, see Cleanup), plus `ORCA_JOB`, `ORCA_REPO`, `ORCA_WORKTREE`, and `ORCA_BRANCH`. It closes that session when the script exits. The script must exit non-zero when a check fails. Use this when the check has to boot a server. Prefer JSON when the app is already up. A script is stopped after 600s. A JSON step is stopped after 90s.
 
-orca does not watch workers. The orchestrator is told to run `orca verify <id>` after workers report and before the summary.  You can run it yourself any time the worktree exists. `status` prints `verify` once it has run, or `not run` when a checks file is present and verify has not.
+orca does not watch workers. The orchestrator no longer runs `orca verify`; the verifier worker does (see below). You can run it yourself any time the worktree exists. `status` prints `verify` once it has run, or `not run` when a checks file is present and verify has not.
+
+## Verifier worker
+
+After all builders report, the orchestrator starts exactly one verifier: `orca worker --job <id> --name verifier --role verifier --task "..."`. The name must be `verifier`. It works for `claude` and `pi` jobs and uses the job's worker model. Each start increments `job.verifier.rounds`. The cap is 3 rounds; a 4th `orca worker --role verifier` is refused with an error.
+
+The verifier gets a fresh context in the same worktree. It runs:
+
+- `orca verify <id>`;
+- the project's own checks (`npm test`, `npm run check`, when present in `package.json`);
+- targeted `agent-browser` checks against the goal's acceptance criteria, in one session named `<prefix>-verifier`, closed at the end.
+
+It must not edit product code. It may author or extend `orca.verify.json` only to cover the goal's acceptance criteria. It never weakens or deletes a check to make it pass. It writes `results/verifier.json` and `notes/verifier.txt`, then prompts the orchestrator like any worker.
+
+```json
+{
+  "name": "verifier",
+  "role": "verifier",
+  "round": 2,
+  "verdict": "pass",
+  "checks": [{ "name": "npm test", "outcome": "pass", "notes": "..." }],
+  "failures": [],
+  "summary": "..."
+}
+```
+
+`verdict` is `pass` or `fail`. `outcome` is `pass`, `fail`, or `skipped`. `failures` holds one concrete note per failure.
+
+Loop: on `fail` the orchestrator routes the failures to the relevant builders (new or resumed), then starts the verifier again, max 3 rounds. The orchestrator never edits checks and only runs trivial read-only commands to read results.
+
+The job record carries the outcome:
+
+```json
+{"verifier":{"rounds":2,"verdict":"pass","history":[{"round":1,"verdict":"fail","at":"<iso>"},{"round":2,"verdict":"pass","at":"<iso>"}]}}
+```
+
+`orca done` records the verdict and history for the latest round. A final `fail` marks the job `failed` (`verifier failed after 3 rounds`); otherwise `done`. With no verifier run, behaviour is unchanged. The finish wake line and `orca status` report `verified by verifier: pass, round 2` (or `verifier: fail, round 3`), and nothing when no verifier ran.
 
 ## Cleanup
 
@@ -179,7 +216,7 @@ cleanup: closed workspace <w>
 
 Output is printed before the workspace closes, because closing it kills the calling orchestrator pane.
 
-Sessions have deterministic names. The prefix is `orca-` plus the first 8 hex chars of `sha1(job.id)`. A worker's session is `<prefix>-<worker>`; `orca verify` uses `<prefix>-verify`. The rule is one `agent-browser` session per worker, named that way, never a shared or default one. orca records the names it hands out on `job.browserSessions`.
+Sessions have deterministic names. The prefix is `orca-` plus the first 8 hex chars of `sha1(job.id)`. A worker's session is `<prefix>-<worker>`; `orca verify` uses `<prefix>-verify`; the verifier worker uses `<prefix>-verifier`. The rule is one `agent-browser` session per worker, named that way, never a shared or default one. orca records the names it hands out on `job.browserSessions`.
 
 Opt out with `--keep`. On `orca done` and `orca stop` it skips cleanup for that call. On `orca new` or `orca run` it stores `keep: true` on the job, which skips cleanup on every terminal path. `--dry-run` on `done` and `stop` prints what cleanup would close.
 
