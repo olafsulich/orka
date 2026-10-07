@@ -103,7 +103,8 @@ orca steer <id> "message"
 orca stop <id> [reason] [--dry-run] [--keep]
 orca done <id> [reason] [--give-up "<reason>"] [--dry-run] [--keep] [--cwd <repo>]
 orca strategy <id> "<what changed>"
-orca cleanup [--dry-run] [--cwd <repo>]
+orca cleanup [--dry-run] [--older-than 12h] [--cwd <repo>]
+orca watch <id> [--dry-run] [--cwd <repo>]   # started by orca run, not for hand use
 orca webhook <id> [--dry-run] [--force] [--cwd <repo>]
 orca verify <id> [--base] [--dry-run] [--cwd <repo>]
 orca help
@@ -125,17 +126,19 @@ If the lead (or a worker) is still `idle` about 8 seconds after the prompt, orca
 
 `status` reads the job file. It does not poll Herdr. For one job it also prints the finish-wake record, and verify once it has run or a checks file is present. If a verifier ran it also prints the rounds, the last failing checks, the stall (if any), and the strategy changes, and records the latest round first.
 
-`steer` prompts the lead agent and records the message on the job.
+`steer` prompts the lead agent and records the message on the job. It also works on a `done`, `failed` or `stopped` job whose orchestrator pane still exists: that starts a follow-up round (see Follow-up rounds).
 
-`stop` closes the job's Herdr workspace (or interrupts the lead if there is no workspace) and sets `stopped`. It does not delete the worktree or the branch. The finish wake, if configured, is sent after that status is saved, then terminal cleanup runs (see Cleanup). `--dry-run` prints the plan and does not stop or send.
+`stop` interrupts the lead and its workers and sets `stopped`. It leaves the Herdr workspace open (see Cleanup). It does not delete the worktree or the branch. The finish wake, if configured, is sent after that status is saved, then terminal cleanup runs (see Cleanup). `--dry-run` prints the plan and does not stop or send.
 
-`done` marks a running job `done` (reason defaults to `completed`) and sends the finish wake once, then runs terminal cleanup (see Cleanup), which closes the job's browser sessions and Herdr workspace. It does not interrupt the lead before that. A queued job is refused with exit 1, since nothing ran. If a verifier ran, `done` reads `results/verifier.json` and records the verdict on `job.verifier`; a final verdict of `fail` marks the job `failed` (reason `verifier failed after N rounds: <blocking checks>`) instead of `done`. `--give-up "<reason>"` marks the job `failed` with that reason and stores it as `job.verifier.stopReason`; the orchestrator uses it only when it cannot progress. An already `done`, `failed`, or `stopped` job prints that status, exits 0, and sends nothing. `--dry-run` prints the plan and the finish payload, and does not change status or send.
+`done` marks a running job `done` (reason defaults to `completed`) and sends the finish wake once, then frees what the job no longer needs (see Cleanup): browser sessions, worktree dev servers and finished worker panes. The orchestrator pane and the workspace stay open so you can still give feedback. A queued job is refused with exit 1, since nothing ran. If a verifier ran, `done` reads `results/verifier.json` and records the verdict on `job.verifier`; a final verdict of `fail` marks the job `failed` (reason `verifier failed after N rounds: <blocking checks>`) instead of `done`. `--give-up "<reason>"` marks the job `failed` with that reason and stores it as `job.verifier.stopReason`; the orchestrator uses it only when it cannot progress. An already `done`, `failed`, or `stopped` job prints that status, exits 0, and sends nothing. `--dry-run` prints the plan and the finish payload, and does not change status or send.
 
 `strategy` appends `<what changed>` to `job.verifier.strategyChanges` for the current round and prints the count. The orchestrator runs it after changing approach on a stall.
 
 `webhook` previews or retries that POST. It does not change job status.
 
-`cleanup` is a one-shot sweep of the repo's finished jobs. See Cleanup.
+`cleanup` closes the workspaces of finished jobs that have been idle for a while. See Cleanup.
+
+`watch` is the needs-input watcher that `run` starts in the background. See Needs-input watcher.
 
 `verify` runs project browser checks in the job worktree. See Verify. It does not set the job to `done`; `orca done` does. The verifier worker runs it, not the orchestrator. `--base` runs the same checks against the base commit instead (see Verify).
 
@@ -241,28 +244,55 @@ The job record carries the outcome:
 
 ## Cleanup
 
-orca cleans up after itself so finished jobs do not leave Herdr workspaces or browser sessions running.
+Finished jobs must not pile up stale panes, but you may still want to give feedback to the orchestrator after `orca done`. So cleanup is delayed and split in two.
 
-Terminal cleanup runs on `orca done`, `orca stop`, and the `failed` path of `orca run`. It runs after the status and summary are saved and the finish webhook has been delivered. It closes every `agent-browser` session whose name starts with the job prefix (`agent-browser --session <s> close`), then closes the job's Herdr workspace (`herdr workspace close`). It only closes the `workspace` recorded on that job's record, never one found by label. The job record, worktree, and branch are kept. One line is printed per thing closed:
+**Right away** on `orca done`, `orca stop` and the `failed` path of `orca run` (after the status is saved and the finish webhook delivered), orca frees only what nobody can still use:
+
+- the job's `agent-browser` sessions (`agent-browser --session <s> close`);
+- dev or preview servers whose process cwd is inside the job worktree (never the orca process or its ancestors; a process is treated as a server by a heuristic on its command line);
+- the panes of finished workers and the verifier (`herdr pane close <pane>`, for each worker pane recorded in `job.workers`).
+
+What was closed is stored in `job.cleanup` (`browsers`, `servers`, `panes`). The orchestrator pane and the Herdr workspace stay open. Records, worktrees and branches are never deleted. One line is printed per thing closed:
 
 ```text
 cleanup: closed browser orca-1a2b3c4d-docs
-cleanup: closed workspace <w>
+cleanup: stopped server pid 4242 (node dev.mjs)
+cleanup: closed worker pane <p> (w1)
 ```
 
-Output is printed before the workspace closes, because closing it kills the calling orchestrator pane.
+**Later**, `orca cleanup [--dry-run] [--older-than 12h] [--cwd <repo>]` closes the workspace (`herdr workspace close`) of every job that is `done`, `stopped` or `failed`, not `keep`, and idle longer than the threshold. Idle is measured from the latest of the finish time, steers, verifier rounds and follow-up rounds, so a job you just steered is not stale. The threshold is `--older-than` (`30m`, `12h`, `2d`; a bare number is refused), else `"staleAfter"` in `.orca/config.json` (for example `"staleAfter": "6h"`), else 12 hours. A workspace is closed once; `job.workspaceClosed` records it. The same command also closes `orca-` prefixed `agent-browser` sessions of jobs that are not running and orphaned sessions whose owning process is dead. `--dry-run` prints `would close` lines, and `cleanup: nothing to close` is printed when there is nothing.
+
+The same stale-workspace sweep runs opportunistically and quietly at the start of `orca new` and `orca run` (one line on stderr, only when it closed something; never on stdout, which `new` uses for the id). There is no cron and no polling.
 
 Sessions have deterministic names. The prefix is `orca-` plus the first 8 hex chars of `sha1(job.id)`. A worker's session is `<prefix>-<worker>`; `orca verify` uses `<prefix>-verify`; the verifier worker uses `<prefix>-verifier`. The rule is one `agent-browser` session per worker, named that way, never a shared or default one. orca records the names it hands out on `job.browserSessions`.
 
-Opt out with `--keep`. On `orca done` and `orca stop` it skips cleanup for that call. On `orca new` or `orca run` it stores `keep: true` on the job, which skips cleanup on every terminal path. `--dry-run` on `done` and `stop` prints what cleanup would close.
+`--keep` opts out of everything. On `orca done` and `orca stop` it skips the immediate cleanup for that call. On `orca new` or `orca run` it stores `keep: true` on the job, which skips immediate cleanup on every terminal path and exempts the job from the stale sweep. `--dry-run` on `done` and `stop` prints what would be closed.
 
-`orca cleanup [--dry-run] [--cwd <repo>]` is a one-shot sweep, not a cron or a poller. For jobs of the repo it:
+## Follow-up rounds
 
-- closes the Herdr workspace of every job that is `done`, `stopped`, or `failed`, unless the job has `keep`;
-- closes `orca-` prefixed `agent-browser` sessions whose job is not running;
-- closes orphaned `agent-browser` sessions whose owning process is dead. If that cannot be determined, this step is skipped.
+`orca steer <id> "message"` accepts a finished job as long as its orchestrator agent pane still exists (not if the workspace was already swept). It prompts the orchestrator, sets the status back to `running`, increments `job.round`, and updates the activity time. When the orchestrator calls `orca done` again, the finish wake is sent again for the new round instead of being suppressed as already sent. The payload adds `"round": N` and `"followUp": true` (round 1 payloads are unchanged), for example:
 
-It prints each item closed, or `would close` with `--dry-run`, and `cleanup: nothing to close` when there is nothing.
+```json
+{"job":"<id>","status":"done","branch":"orca/<id>","round":2,"followUp":true}
+```
+
+`<id>.finish.json` keeps a per-round record: `rounds: [{round, status, at, followUp}]`, and every attempt carries its `round`. `job.finishRounds` lists the same rounds on the job. A `done` on a job that was not steered is still a no-op.
+
+## Ports
+
+`orca new` allocates a block of 4 ports for the job with `lib/ports.mjs` (derived from the job id, checked free, never shared with another unfinished job) and stores `job.port` (the first) and `job.ports`. They are exported as `ORCA_PORT`, `ORCA_PORTS` and `PORT` into the orchestrator and worker panes (the Herdr workspace and pane split `--env`) and into `orca verify` scripts. Herdr's `agent start` has no env option, so every prompt also states the ports. In `orca.verify.json`, `${ORCA_PORT}`, `${ORCA_PORT_2}` (the second port, and so on) and `{{port}}` expand in every url and command. `orca status` prints the port. Jobs created before this have no port and keep working (`orca run` allocates one).
+
+The orchestrator, worker and verifier prompts say: use your job port(s) for any dev or preview server; decide operational questions yourself by taking the safe recommended option (stop a stale server left by a finished orca job, or pick your own port) instead of asking; ask only when a genuine human decision or a secret is required.
+
+## Needs-input watcher
+
+A job must never sit silently waiting for an answer. `orca run` starts a detached watcher (`orca watch <id>`, log at `.orca/jobs/<id>/watcher.log`, pid in `job.watcherPid`). When the orchestrator agent is `blocked`, or `idle` for over a minute without the job being finished, it POSTs through the same `finish-webhook.env` config:
+
+```json
+{"kind":"needs-input","job":"<id>","title":"<title>","status":"blocked","question":"<text of the question on the pane>","pane":"<orchestrator pane>"}
+```
+
+`status` is `blocked` or `idle`. Each waiting episode is posted once. The watcher exits when the job is `done`, `failed` or `stopped` (`markTerminal` also stops it), when the agent is gone, or on its own `SIGTERM`. With no webhook configured it logs and skips. `orca watch <id> --dry-run` prints what it would do. A follow-up `steer` on a finished job starts a new watcher. Workers never post; only `orca done`, `stop` and a failed `run` send the finish wake.
 
 ## Trust
 
