@@ -35,7 +35,8 @@ function scratch() {
   stub(
     "herdr",
     `case "$1 $2" in
-  "agent get") echo "{\\"result\\":{\\"agent\\":{\\"agent_status\\":\\"$(cat "${base}/agent-status" 2>/dev/null || echo working)\\"}}}";;
+  "agent start") touch "${base}/started-$3";;
+  "agent get") case "$3" in w*) [ -e "${base}/started-$3" ] || { echo '{"error":{"message":"not found"}}'; exit 1; };; esac; echo "{\\"result\\":{\\"agent\\":{\\"agent_status\\":\\"$(cat "${base}/agent-status" 2>/dev/null || echo working)\\"}}}";;
   "agent wait") sleep 1;;
   "pane read") cat "${base}/pane-text" 2>/dev/null;;
   "agent prompt") printf '%s' "$4" > "${base}/last-prompt";;

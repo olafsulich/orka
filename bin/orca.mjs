@@ -20,7 +20,6 @@ const ORCA = fileURLToPath(import.meta.url);
 // tracks the latest model of that family, so these are not pinned ids.
 const DEFAULT_ORCHESTRATOR_MODEL = "opus";
 const DEFAULT_WORKER_MODEL = "sonnet";
-const IDLE_RETRY_MS = 8000;
 const VERIFY_STEP_TIMEOUT_MS = 90000;
 const VERIFY_SCRIPT_TIMEOUT_MS = 600000;
 const VERIFY_FILE = "orca.verify.json";
@@ -114,10 +113,42 @@ function flagValue(args, key) {
 
 let modelSpec;
 
+const CLAUDE_HELP_TIMEOUT_MS = 120000;
+const MODEL_CACHE_MAX_AGE_MS = 24 * 3600 * 1000;
+
+// claude --help takes a minute under heavy load, so the parsed aliases are cached on disk.
+// Kept under the orca repo's .orca/ (gitignored), never in a home directory.
+let activeRepo = null;
+
+function modelCachePath() {
+  return activeRepo ? join(activeRepo, ".orca", "cache", "claude-models.json") : null;
+}
+
+function readModelCache() {
+  try {
+    const data = JSON.parse(readFileSync(modelCachePath(), "utf8"));
+    if (!Array.isArray(data.aliases) || !data.aliases.length || Date.now() - Date.parse(data.at) > MODEL_CACHE_MAX_AGE_MS) return null;
+    return { aliases: data.aliases.map(String), acceptsFullName: Boolean(data.acceptsFullName) };
+  } catch {
+    return null;
+  }
+}
+
+function writeModelCache(spec) {
+  try {
+    const path = modelCachePath();
+    if (!path) return;
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ at: new Date().toISOString(), ...spec }));
+  } catch {
+    // the cache is only an optimisation
+  }
+}
+
 function claudeHelpText() {
   const r = spawnSync("claude", ["--help"], {
     encoding: "utf8",
-    timeout: 20000,
+    timeout: CLAUDE_HELP_TIMEOUT_MS,
     env: { ...process.env, PATH: pathPrefix() },
   });
   if (r.error && r.error.code === "ENOENT") fail("claude is not on PATH; cannot validate model aliases");
@@ -142,8 +173,15 @@ function modelHelpBlob(text) {
   return blob.join(" ");
 }
 
-function claudeModelSpec() {
-  if (modelSpec) return modelSpec;
+function claudeModelSpec(refresh = false) {
+  if (modelSpec && !refresh) return modelSpec;
+  if (!refresh) {
+    const cached = readModelCache();
+    if (cached) {
+      modelSpec = { ...cached, cached: true };
+      return modelSpec;
+    }
+  }
   const blob = modelHelpBlob(claudeHelpText());
   const aliases = [];
   for (const match of blob.matchAll(/['"]([A-Za-z0-9][A-Za-z0-9._:-]*)['"]/g)) aliases.push(match[1].toLowerCase());
@@ -152,6 +190,7 @@ function claudeModelSpec() {
     acceptsFullName: /full name/i.test(blob),
   };
   if (!modelSpec.aliases.length) fail("could not read model aliases from claude --help");
+  writeModelCache(modelSpec);
   return modelSpec;
 }
 
@@ -163,8 +202,10 @@ function assertClaudeModel(raw, role) {
   const alias = String(raw ?? "").trim();
   if (!alias) fail(`need a ${role} model alias`);
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(alias)) fail(`invalid model alias "${alias}"`);
-  const spec = claudeModelSpec();
-  const known = spec.aliases.find((item) => item === alias.toLowerCase());
+  let spec = claudeModelSpec();
+  const lookup = () => spec.aliases.find((item) => item === alias.toLowerCase());
+  if (!lookup() && spec.cached) spec = claudeModelSpec(true); // an alias the cache lacks may be new
+  const known = lookup();
   if (known) return known;
   if (spec.acceptsFullName && isFullModelName(alias)) return alias.toLowerCase();
   const extra = spec.acceptsFullName ? "\na full model name (claude-…) is also accepted" : "";
@@ -211,6 +252,7 @@ function configPath(repo) {
 function requireRepo(start) {
   const { primary } = gitMeta(start);
   if (!existsSync(configPath(primary))) fail(`not an orca repo: ${primary}\nrun: orca init`);
+  activeRepo = primary;
   return primary;
 }
 
@@ -785,19 +827,62 @@ function agentStatus(name) {
   return got.json?.result?.agent?.agent_status || "unknown";
 }
 
+const PROMPT_WAIT_MS = Number(process.env.ORCA_PROMPT_WAIT_MS) || 60000;
+const PROMPT_POLL_MS = Number(process.env.ORCA_PROMPT_POLL_MS) || 1000;
+
+function agentPane(name) {
+  const got = herdr(["agent", "get", name]);
+  return got.json?.result?.agent?.pane_id || "";
+}
+
+// What the pane shows: the text still sitting in the input box (after the last prompt line), if any.
+function unsubmittedInput(paneText) {
+  const lines = String(paneText || "").split(/\r?\n/);
+  const tail = lines.slice(-25).join("\n");
+  if (/\[(?:Pasted text|\.\.\.Truncated text)[^\]]*\]/i.test(tail)) return true;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = /^\s*[│|]?\s*[❯>]\s?(.*?)\s*[│|]?\s*$/.exec(lines[i]);
+    if (m) return m[1].trim().length > 0;
+  }
+  return false;
+}
+
+function promptSeenInPane(paneText, text) {
+  const probe = String(text).split(/\r?\n/).find((l) => l.trim().length >= 20)?.trim().slice(0, 40);
+  return Boolean(probe) && String(paneText).includes(probe);
+}
+
+// Sends the prompt once. A pasted prompt can sit unsubmitted in the input box (Enter swallowed
+// while Claude ingests the paste), so while the agent is not working press Enter instead of
+// pasting again; re-prompt only when the input box is empty and the prompt never showed up.
 function promptWithRetry(name, text) {
   const prompted = herdr(["agent", "prompt", name, text], 60000);
   if (prompted.code !== 0 || prompted.json?.error) herdrFail(prompted, "prompt");
-  const deadline = Date.now() + IDLE_RETRY_MS;
-  let status = agentStatus(name);
-  while (status === "idle" && Date.now() < deadline) {
-    sleep(500);
-    status = agentStatus(name);
+  const deadline = Date.now() + PROMPT_WAIT_MS;
+  let nextCheck = Date.now() + 3 * PROMPT_POLL_MS;
+  let backoff = 2 * PROMPT_POLL_MS;
+  const pane = agentPane(name) || prompted.json?.result?.agent?.pane_id || "";
+  while (Date.now() < deadline) {
+    if (agentStatus(name) === "working") return;
+    if (Date.now() >= nextCheck) {
+      const read = pane ? herdr(["pane", "read", pane, "--source", "recent"]) : { text: "" };
+      if (unsubmittedInput(read.text)) {
+        herdr(["agent", "send-keys", name, "Enter"]);
+        backoff = Math.min(backoff * 2, 15000);
+      }
+      nextCheck = Date.now() + backoff;
+    }
+    sleep(PROMPT_POLL_MS);
   }
-  if (status === "idle") {
-    const again = herdr(["agent", "prompt", name, text], 60000);
-    if (again.code !== 0 || again.json?.error) herdrFail(again, "prompt retry");
+  if (agentStatus(name) === "working") return;
+  const read = pane ? herdr(["pane", "read", pane, "--source", "recent"]) : { text: "" };
+  if (unsubmittedInput(read.text)) {
+    herdr(["agent", "send-keys", name, "Enter"]);
+    return;
   }
+  if (promptSeenInPane(read.text, text) || agentStatus(name) !== "idle") return;
+  const again = herdr(["agent", "prompt", name, text], 60000);
+  if (again.code !== 0 || again.json?.error) herdrFail(again, "prompt retry");
 }
 
 function ensureJobDir(repo, id) {
@@ -888,6 +973,7 @@ function workerPrompt(job, name, task, alias) {
     `herdr agent prompt ${job.agent} "<the one-line note>"`,
     `If that prompt is rejected because the orchestrator is busy, the files are enough.`,
     ``,
+    `Never close panes (yours or anyone's, no herdr pane close): orca frees them when the job is done or stopped.`,
     `Finish wake is automatic from the orca CLI when it marks the job done, failed, or stopped. That is not your job. Do not run herdr-finish-watch. Do not run orca stop or orca webhook. Do not start another agent.`,
   ].join("\n");
 }
@@ -918,9 +1004,37 @@ function parseRole(args) {
   return role;
 }
 
+const isVerifierName = (name) => name === VERIFIER_NAME || /^verifier-[0-9]+$/.test(name);
+
+// Names are never reused: a finished pane keeps its name until orca frees it on done/stop.
+// herdr agent names are global across workspaces and jobs, so ask for every agent, not just ours.
+function herdrAgentNames() {
+  const got = herdr(["agent", "list"]);
+  const agents = got.json?.result?.agents;
+  return new Set(Array.isArray(agents) ? agents.map((a) => a?.name).filter(Boolean) : []);
+}
+
+function herdrAgentExists(name, names) {
+  if (names.has(name)) return true;
+  const got = herdr(["agent", "get", name]);
+  return got.code === 0 && !got.json?.error && Boolean(got.json?.result?.agent);
+}
+
+// First of base, base-2, base-3... that no worker of this job and no herdr agent holds.
+function freeWorkerName(job, base, taken = []) {
+  const used = new Set([...(job.workers || []).map((w) => w.name), ...taken]);
+  const names = herdrAgentNames();
+  for (let n = 1; n < 1000; n++) {
+    const candidate = n === 1 ? base : `${base}-${n}`;
+    if (candidate.length > 32 || used.has(candidate)) continue;
+    if (!herdrAgentExists(candidate, names)) return candidate;
+  }
+  fail(`no free worker name for "${base}"`);
+}
+
 function checkRole(role, name, job) {
   if (role === "verifier" && name !== VERIFIER_NAME) fail(`a verifier worker must be named "${VERIFIER_NAME}", got "${name}"`);
-  if (role === "builder" && name === VERIFIER_NAME) fail(`the name "${VERIFIER_NAME}" is reserved; start it with --role verifier`);
+  if (role === "builder" && isVerifierName(name)) fail(`the name "${VERIFIER_NAME}" is reserved; start it with --role verifier`);
   const max = Number(job.maxRounds) || 0;
   const rounds = verifierState(job).rounds;
   if (role === "verifier" && max && rounds >= max) {
@@ -928,8 +1042,20 @@ function checkRole(role, name, job) {
   }
 }
 
+// Every verifier round writes the same results/verifier.json. Starting the next round moves
+// the old one to verifier.round-N.json, so a stale round is never read as the current verdict.
+function verifierResultPath(repo, id) {
+  return join(jobDir(repo, id), "results", `${VERIFIER_NAME}.json`);
+}
+
+function archiveVerifierResult(repo, job, round) {
+  const path = verifierResultPath(repo, job.id);
+  if (!existsSync(path)) return;
+  renameSync(path, join(dirname(path), `${VERIFIER_NAME}.round-${round}.json`));
+}
+
 function readVerifierResult(repo, id) {
-  const path = join(jobDir(repo, id), "results", `${VERIFIER_NAME}.json`);
+  const path = verifierResultPath(repo, id);
   if (!existsSync(path)) return null;
   try {
     const data = JSON.parse(readFileSync(path, "utf8"));
@@ -1041,7 +1167,7 @@ function verificationOf(repo, job) {
 
 function verifierPrompt(job, name, task, alias, round) {
   const dir = jobDir(job.repo, job.id);
-  const result = join(dir, "results", `${name}.json`);
+  const result = verifierResultPath(job.repo, job.id);
   const note = join(dir, "notes", `${name}.txt`);
   const session = `${browserPrefix(job)}-${name}`;
   return [
@@ -1078,6 +1204,7 @@ function verifierPrompt(job, name, task, alias, round) {
     `herdr agent prompt ${job.agent} "<the one-line note>"`,
     `If that prompt is rejected because the orchestrator is busy, the files are enough.`,
     ``,
+    `Never close panes (yours or anyone's, no herdr pane close): orca frees them when the job is done or stopped.`,
     `Finish wake is automatic from the orca CLI when it marks the job done, failed, or stopped. That is not your job. Do not run herdr-finish-watch. Do not run orca stop, orca done or orca webhook. Do not start another agent.`,
   ].join("\n");
 }
@@ -1103,7 +1230,8 @@ function orchestratorPrompt(job) {
     `Start each worker with orca, which opens a Herdr pane in this same worktree:`,
     `  orca worker --job ${job.id} --name <worker> --task "<task>"`,
     `If orca is not on PATH, run ${ORCA} instead. The binary is the same file.`,
-    `Worker names must match [a-z][a-z0-9_-]{0,31}.`,
+    `Worker names must match [a-z][a-z0-9_-]{0,31}. If a name is already taken (by an earlier worker, even a finished one) orca appends -2, -3... and prints the real name.`,
+    `Never close worker or verifier panes (no herdr pane close): finished panes stay open, and orca frees them when the job is done or stopped.`,
     ...(pi
       ? [`Workers are Pi agents (kind pi). Do not pass --model; pi workers have no model flag.`, `Pane command: ${paneCommand("")}`]
       : [
@@ -1115,7 +1243,7 @@ function orchestratorPrompt(job) {
     `then prompts you with that note. Read those files. Do not trust a worker that skipped them.`,
     `The finish wake is sent by the orca CLI when orca done marks the job done (or when the job goes failed or stopped). Do not run herdr-finish-watch. Do not run orca stop or orca webhook.`,
     ``,
-    `When every builder has reported, start ONE verifier. It has fresh context and checks the work against the goal:`,
+    `When every builder has reported, start ONE verifier. It has fresh context and checks the work against the goal. Every round uses the same command; orca names the panes verifier, verifier-2, verifier-3... and each round overwrites ${dir}/results/${VERIFIER_NAME}.json (the previous one is kept as verifier.round-N.json):`,
     `  orca worker --job ${job.id} --name ${VERIFIER_NAME} --role verifier --task "<what was built and the acceptance criteria>"`,
     `The verifier runs orca verify, the project's own checks and targeted agent-browser checks, and may extend ${VERIFY_FILE} only to cover the acceptance criteria.`,
     `It writes ${dir}/results/${VERIFIER_NAME}.json: "verdict" pass or fail, "failures" (blocking: what this job changed, each with its evidence) and "warnings" (pre-existing failures the verifier showed also fail on the base commit; they never block a pass).`,
@@ -1203,9 +1331,9 @@ async function cmdNew(args) {
   if (kind === "pi" && (args["orchestrator-model"] || args["worker-model"])) {
     fail("--orchestrator-model and --worker-model are only for kind claude");
   }
+  const repo = requireRepo(args.cwd || process.cwd());
   const orchestratorModel = kind === "claude" ? assertClaudeModel(flagValue(args, "orchestrator-model") || DEFAULT_ORCHESTRATOR_MODEL, "orchestrator") : "";
   const workerModel = kind === "claude" ? assertClaudeModel(flagValue(args, "worker-model") || DEFAULT_WORKER_MODEL, "worker") : "";
-  const repo = requireRepo(args.cwd || process.cwd());
   const id = slug(title);
   const branch = `orca/${id}`;
   const check = git(repo, ["check-ref-format", "--branch", branch]);
@@ -1379,34 +1507,51 @@ function cmdWorker(args) {
   }
   allowFlags(args, ["cwd", "dry-run", "job", "name", "task", "pane", "model", "role"]);
   const id = args.job;
-  const name = args.name;
+  const requested = args.name;
   const task = args.task || args._.slice(1).join(" ");
-  if (!id || !name || !task) fail("need --job --name --task");
-  assertAgentName(String(name));
+  if (!id || !requested || !task) fail("need --job --name --task");
+  assertAgentName(String(requested));
   const role = parseRole(args);
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, String(id));
   if (role === "verifier" && !args["dry-run"]) recordVerifier(repo, job);
-  checkRole(role, String(name), job);
+  checkRole(role, String(requested), job);
+  const first = freeWorkerName(job, String(requested));
   const round = verifierState(job).rounds + 1;
   const alias = workerAlias(job, args);
   const kind = job.kind === "pi" ? "pi" : "claude";
   if (args["dry-run"]) {
     const wt = job.worktree || worktreePath(repo, job.id);
-    console.log(`dry-run worker ${name} job=${job.id} kind=${kind}${alias ? ` model=${alias}` : ""} role=${role}${role === "verifier" ? ` round=${round}` : ""}`);
+    console.log(`dry-run worker ${first} job=${job.id} kind=${kind}${alias ? ` model=${alias}` : ""} role=${role}${role === "verifier" ? ` round=${round}` : ""}`);
     console.log(`worktree: ${wt}`);
     console.log("layout: shared worktree");
     console.log(`split: herdr pane split --pane ${q(job.pane || "<orchestrator-pane>")} --direction right --cwd ${q(wt)} --no-focus`);
-    console.log(`spawn: herdr ${sh(startArgs(String(name), args.pane || "<pane>", kind, alias))}`);
+    console.log(`spawn: herdr ${sh(startArgs(first, args.pane || "<pane>", kind, alias))}`);
     console.log(`pane: ${paneCommand(alias)}`);
     return;
   }
   if (!job.pane || !job.agent || !job.worktree) fail("orchestrator is not running");
   if (job.status !== "running") fail(`job ${id} is ${job.status}, not running`);
   ensureJobDir(repo, job.id);
+  if (role === "verifier") archiveVerifierResult(repo, job, round - 1);
+  const ownPane = !args.pane;
   const pane = args.pane ? String(args.pane) : splitPane(job.pane, job.worktree, job);
-  const started = herdr(startArgs(String(name), pane, kind, alias), 90000);
-  if (started.code !== 0 || started.json?.error) herdrFail(started, "worker start");
+  let name = first;
+  const tried = [];
+  let started;
+  for (;;) {
+    started = herdr(startArgs(name, pane, kind, alias), 90000);
+    const failed = started.code !== 0 || started.json?.error;
+    if (!failed) break;
+    if (!/already used/i.test(started.text) || tried.length >= 20) break;
+    tried.push(name);
+    name = freeWorkerName(job, String(requested), tried);
+  }
+  if (started.code !== 0 || started.json?.error) {
+    // The pane was split just now and never held an agent: close only that one.
+    if (ownPane) herdr(["pane", "close", pane]);
+    herdrFail(started, "worker start");
+  }
   promptWithRetry(String(name), role === "verifier" ? verifierPrompt(job, String(name), String(task), alias, round) : workerPrompt(job, String(name), String(task), alias));
   noteSession(repo, job, `${browserPrefix(job)}-${name}`);
   job.workers = job.workers || [];
@@ -1417,7 +1562,7 @@ function cmdWorker(args) {
     model: alias,
     role,
     task: String(task),
-    result: join(jobDir(repo, job.id), "results", `${name}.json`),
+    result: role === "verifier" ? verifierResultPath(repo, job.id) : join(jobDir(repo, job.id), "results", `${name}.json`),
     note: join(jobDir(repo, job.id), "notes", `${name}.txt`),
   });
   if (role === "verifier") {
@@ -1425,6 +1570,7 @@ function cmdWorker(args) {
     job.verifier = { ...job.verifier, rounds: round, verdict: null, history: state.history, stall: null };
   }
   save(repo, job);
+  if (name !== String(requested)) console.log(`name ${requested} was taken, using ${name}`);
   console.log(`${id} worker ${name} pane=${pane} kind=${kind}${alias ? ` model=${alias}` : ""}${role === "verifier" ? ` role=verifier round=${round}` : ""} worktree=${job.worktree}`);
 }
 
@@ -2395,6 +2541,9 @@ function help() {
   orca worker --job <id> --name <agent> --task "..." [--model <alias>] [--role builder|verifier] [--dry-run]
            (--model is claude only; pi workers have no model flag)
            (--role verifier needs --name verifier; no round limit unless the job has --max-rounds)
+           A name already used by a worker of this job, or by a herdr agent, gets -2, -3... appended and
+           the real name is printed. Verifier rounds are verifier, verifier-2, verifier-3... Panes are
+           never closed while the job runs; orca frees them on done/stop.
   orca status [id] [--cwd <repo>]
   orca steer <id> "message"   (also on a finished job whose orchestrator pane is still open: starts a follow-up round)
   orca stop <id> [reason] [--dry-run] [--keep]
@@ -2446,6 +2595,7 @@ Verifier (both kinds)
   change strategy and record it with orca strategy <id> "<what changed>" before re-verifying.
   The orchestrator never runs orca verify or edits checks. If it cannot progress (the same failure survived 3
   strategy changes, or a human decision or secret is needed): orca done <id> --give-up "<reason>" marks the job failed.
+  Every round writes results/verifier.json; starting the next round moves the old one to verifier.round-N.json.
   orca done reads results/verifier.json, records job.verifier {rounds,verdict,history,stall,strategyChanges},
   and marks the job failed ("verifier failed after N rounds: <checks>") on a final fail. done and status print
   "verified by verifier: pass, round N" (or "verifier: fail, round N"). No verifier run: nothing changes.

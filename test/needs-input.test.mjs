@@ -52,13 +52,14 @@ function harness({ statuses, panes = [PANE], jobs }) {
     readPane: async () => panes[Math.min(pi++, panes.length - 1)],
     post: async (p) => (posts.push(p), { ok: true }),
     log: () => {},
+    sleep: async () => {},
     now: () => 0,
   };
   return { deps, posts };
 }
 const running = { id: "j1", title: "T", status: "running" };
 const done = { id: "j1", title: "T", status: "done" };
-const run = (h) => watchJob({ jobId: "j1", agent: "a", pane: "p", deps: h.deps, graceMs: 1 });
+const run = (h) => watchJob({ jobId: "j1", agent: "a", pane: "p", deps: h.deps, graceMs: 1, goneLimit: 3 });
 
 test("fires once per blocked episode, again after working with a new question", async () => {
   const h = harness({
@@ -133,7 +134,7 @@ function housekeepingHarness(pane, statuses = ["blocked", "working", "unknown", 
   const sent = [];
   const logs = [];
   h.deps.sendKeys = async (agent, keys) => void sent.push({ agent, keys });
-  h.deps.log = (l) => logs.push(l);
+  h.deps.log = (l) => void (/not answering|reachable again/.test(l) || logs.push(l));
   return { ...h, sent, logs };
 }
 
@@ -193,4 +194,33 @@ test("real question mentioning update available alerts and sends no keys", async
   assert.equal(h.sent.length, 0);
   assert.equal(h.posts.length, 1);
   assert.ok(h.posts[0].question.includes("update available"));
+});
+
+test("watcher survives a closed worker pane and flaky herdr, retrying instead of exiting", async () => {
+  const logs = [];
+  const sleeps = [];
+  const statuses = ["unknown", "error", "unknown", "unknown", "unknown", "unknown", "unknown", "blocked", "working"];
+  let jobs = 0;
+  const posts = [];
+  const deps = {
+    loadJob: async () => (++jobs > 12 ? done : running),
+    waitAgent: async () => {
+      const s = statuses.shift();
+      if (s === undefined) throw new Error("herdr: pane not found");
+      return s;
+    },
+    readPane: async () => {
+      throw new Error("pane read failed");
+    },
+    post: async (p) => void posts.push(p),
+    sleep: async (ms) => void sleeps.push(ms),
+    log: (l) => logs.push(l),
+  };
+  const r = await watchJob({ jobId: "j1", agent: "a", pane: "p", deps, graceMs: 1 });
+  assert.equal(r.exit, "terminal");
+  assert.ok(sleeps.length >= 7);
+  assert.ok(sleeps.every((ms) => ms >= 2000 && ms <= 60000));
+  assert.equal(logs.filter((l) => /not answering/.test(l)).length, 2);
+  assert.ok(logs.some((l) => /reachable again/.test(l)));
+  assert.equal(posts.length, 1);
 });

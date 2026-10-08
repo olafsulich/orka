@@ -1,7 +1,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:https";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -430,6 +430,31 @@ test("a second done on a done job is a no-op", async () => {
     assert.equal(again.status, 0, again.stderr);
     assert.match(again.stdout, /already done/);
     assert.equal(hits.length, 1);
+  } finally {
+    receiver.close();
+    rmSync(box.repo, { recursive: true, force: true });
+  }
+});
+
+test("finish webhook fires and job is done even when every herdr call fails (worker pane closed)", async () => {
+  const hits = [];
+  const receiver = await listen(hits);
+  const box = await scratch();
+  try {
+    writeEnv(box.repo, `https://127.0.0.1:${receiver.port}/x`);
+    const bin = join(box.repo, ".stubbin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "herdr"), `#!/bin/sh\necho '{"error":{"message":"pane not found"}}'\nexit 1\n`);
+    chmodSync(join(bin, "herdr"), 0o755);
+    const data = job(box.jobPath);
+    Object.assign(data, { status: "running", workspace: "w-1", pane: "p-lead", agent: "lead", workers: [{ name: "w1", pane: "p-gone" }] });
+    writeFileSync(box.jobPath, JSON.stringify(data));
+    const done = await orca(box.repo, ["done", box.id], { NODE_TLS_REJECT_UNAUTHORIZED: "0", PATH: `${bin}:${process.env.PATH}` });
+    assert.equal(done.status, 0, done.stderr);
+    assert.match(done.stdout, /finish webhook: accepted/);
+    assert.equal(job(box.jobPath).status, "done");
+    assert.equal(hits.length, 1);
+    assert.equal(JSON.parse(hits[0].body).status, "done");
   } finally {
     receiver.close();
     rmSync(box.repo, { recursive: true, force: true });
