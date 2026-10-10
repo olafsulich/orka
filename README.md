@@ -99,6 +99,7 @@ orca run <id> [--dry-run] [--keep] [--cwd <repo>] \
 orca worker --job <id> --name <agent> --task "..." [--model <alias>] [--dry-run]
 orca worker --job <id> --name verifier --role verifier --task "<built + acceptance criteria>"
 orca status [id] [--cwd <repo>]
+orca digest <id> [--cwd <repo>]
 orca steer <id> "message"
 orca stop <id> [reason] [--dry-run] [--keep]
 orca done <id> [reason] [--give-up "<reason>"] [--dry-run] [--keep] [--cwd <repo>]
@@ -126,7 +127,9 @@ If the lead (or a worker) is still `idle` about 8 seconds after the prompt, orca
 
 `status` reads the job file. It does not poll Herdr. For one job it also prints the finish-wake record, and verify once it has run or a checks file is present. If a verifier ran it also prints the rounds, the last failing checks, the stall (if any), and the strategy changes, and records the latest round first.
 
-`steer` prompts the lead agent and records the message on the job. It also works on a `done`, `failed` or `stopped` job whose orchestrator pane still exists: that starts a follow-up round (see Follow-up rounds).
+`digest` prints a capped snapshot of the job and does not change it.
+
+`steer` prompts the lead agent with a capped digest plus the message, and records only that message on the job. It also works on a `done`, `failed` or `stopped` job whose orchestrator pane still exists: that starts a follow-up round (see Follow-up rounds).
 
 `stop` interrupts the lead and its workers and sets `stopped`. It leaves the Herdr workspace open (see Cleanup). It does not delete the worktree or the branch. The finish wake, if configured, is sent after that status is saved, then terminal cleanup runs (see Cleanup). `--dry-run` prints the plan and does not stop or send.
 
@@ -285,6 +288,8 @@ Sessions have deterministic names. The prefix is `orca-` plus the first 8 hex ch
 ```
 
 `<id>.finish.json` keeps a per-round record: `rounds: [{round, status, at, followUp}]`, and every attempt carries its `round`. `job.finishRounds` lists the same rounds on the job. A `done` on a job that was not steered is still a no-op.
+
+Steer sends a capped digest plus the message. The stored steer is the message only. The webhook body is unchanged (still job, status, branch, and round/followUp after round 1). No digest field.
 
 ## Ports
 

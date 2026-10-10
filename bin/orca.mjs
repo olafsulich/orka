@@ -5,11 +5,12 @@
 // if <repo>/.orca/secrets/finish-webhook.env exists. Never a home path.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
+import { DIGEST_MAX, FILE_READ_MAX, SUMMARY_MAX, VERIFIER_JSON_MAX, renderDigest, steerText } from "../lib/digest.mjs";
 import * as lifecycle from "../lib/lifecycle.mjs";
 import * as ports from "../lib/ports.mjs";
 import * as watch from "../lib/watch.mjs";
@@ -972,6 +973,7 @@ function workerPrompt(job, name, task, alias) {
     `Then send that line to the orchestrator:`,
     `herdr agent prompt ${job.agent} "<the one-line note>"`,
     `If that prompt is rejected because the orchestrator is busy, the files are enough.`,
+    `The note and the herdr prompt are one line, at most 200 characters. Do not paste logs, diffs, or the job file. The orchestrator will run orca digest.`,
     ``,
     `Never close panes (yours or anyone's, no herdr pane close): orca frees them when the job is done or stopped.`,
     `Finish wake is automatic from the orca CLI when it marks the job done, failed, or stopped. That is not your job. Do not run herdr-finish-watch. Do not run orca stop or orca webhook. Do not start another agent.`,
@@ -1240,7 +1242,8 @@ function orchestratorPrompt(job) {
         ]),
     ``,
     `Each worker writes ${dir}/results/<name>.json and a one-line note at ${dir}/notes/<name>.txt,`,
-    `then prompts you with that note. Read those files. Do not trust a worker that skipped them.`,
+    `then prompts you with that note. Do not trust a worker that skipped them.`,
+    `When a worker note arrives, run orca digest ${job.id} and trust it over memory after compaction. Do not read the job JSON, verify.log, or a pane transcript. Open results/<name>.json only if the digest says the note is missing or ok is not true. When routing a verifier failure, use the evidence already in the digest. Do not paste a longer excerpt into the next worker task.`,
     `The finish wake is sent by the orca CLI when orca done marks the job done (or when the job goes failed or stopped). Do not run herdr-finish-watch. Do not run orca stop or orca webhook.`,
     ``,
     `When every builder has reported, start ONE verifier. It has fresh context and checks the work against the goal. Every round uses the same command; orca names the panes verifier, verifier-2, verifier-3... and each round overwrites ${dir}/results/${VERIFIER_NAME}.json (the previous one is kept as verifier.round-N.json):`,
@@ -1258,8 +1261,8 @@ function orchestratorPrompt(job) {
     `You never run orca verify yourself and never edit ${VERIFY_FILE} or any check. You may only run trivial read-only commands to read results.`,
     `Do not invent a URL or a checks file unless the goal asked for checks.`,
     ``,
-    `Then read ${jobPath(job.repo, job.id)} again, write a short summary to ${dir}/summary.txt`,
-    `and set the "summary" field to that same text. Keep every other field, including verify.`,
+    `Before orca done, run orca digest ${job.id}, write a short summary to ${dir}/summary.txt from that digest and what you already know, and set the summary field. Do not load the job JSON into the turn to copy fields.`,
+    `Keep every other field, including verify.`,
     `Do not change verify or verifier; the verifier and orca done write those.`,
     `Then mark the job done, which sends the finish wake and records the verifier verdict (a fail verdict marks the job failed):`,
     `  orca done ${job.id}`,
@@ -1657,6 +1660,101 @@ function cmdStrategy(args) {
   console.log(`strategy change ${list.length} recorded for ${id}`);
 }
 
+// Snapshot input only. Never copy workers[].task. Never open verify.log.
+function digestView(job) {
+  const workers = Array.isArray(job.workers) ? job.workers.map((worker) => ({ name: worker?.name, role: worker?.role })) : [];
+  return { ...job, workers };
+}
+
+function readCapped(path, maxBytes) {
+  const size = statSync(path).size;
+  const n = Math.min(size, maxBytes);
+  if (n <= 0) return { size, text: "" };
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.alloc(n);
+    let off = 0;
+    while (off < n) {
+      const got = readSync(fd, buf, off, n - off, off);
+      if (got <= 0) break;
+      off += got;
+    }
+    return { size, text: buf.subarray(0, off).toString("utf8") };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+const SAFE_WORKER = /^[a-z][a-z0-9_-]{0,31}$/;
+
+function workerOk(dir, worker, files) {
+  if (worker.role === "verifier") return files.verifierSkipped == null && files.verifier?.ok === true;
+  const path = join(dir, "results", `${worker.name}.json`);
+  if (!existsSync(path)) return false;
+  try {
+    const size = statSync(path).size;
+    if (size > FILE_READ_MAX) return false;
+    return JSON.parse(readCapped(path, size).text)?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+function collectDigestFiles(repo, job) {
+  const dir = jobDir(repo, job.id);
+  const files = { notes: {}, ok: {} };
+  const summaryPath = join(dir, "summary.txt");
+  if (existsSync(summaryPath)) {
+    try {
+      files.summary = readCapped(summaryPath, FILE_READ_MAX).text.slice(0, SUMMARY_MAX);
+    } catch {
+      files.summary = "";
+    }
+  } else if (job.summary) {
+    files.summary = String(job.summary).slice(0, SUMMARY_MAX);
+  }
+  const verifierPath = join(dir, "results", `${VERIFIER_NAME}.json`);
+  if (existsSync(verifierPath)) {
+    try {
+      const size = statSync(verifierPath).size;
+      if (size > VERIFIER_JSON_MAX) files.verifierSkipped = size;
+      else files.verifier = JSON.parse(readCapped(verifierPath, size).text);
+    } catch {
+      if (files.verifierSkipped == null) files.verifier = null;
+    }
+  }
+  for (const worker of job.workers || []) {
+    const name = worker?.name;
+    if (typeof name !== "string" || !name) continue;
+    if (!SAFE_WORKER.test(name)) {
+      files.notes[name] = null;
+      files.ok[name] = false;
+      continue;
+    }
+    const notePath = join(dir, "notes", `${name}.txt`);
+    if (!existsSync(notePath)) files.notes[name] = null;
+    else {
+      try {
+        files.notes[name] = readCapped(notePath, FILE_READ_MAX).text;
+      } catch {
+        files.notes[name] = null;
+      }
+    }
+    files.ok[name] = workerOk(dir, worker, files);
+  }
+  return files;
+}
+
+function cmdDigest(args) {
+  allowFlags(args, ["cwd"]);
+  const id = args._[1];
+  if (!id) fail("need: orca digest <id>");
+  const repo = requireRepo(args.cwd || process.cwd());
+  const job = load(repo, id);
+  const text = renderDigest(digestView(job), collectDigestFiles(repo, job));
+  process.stdout.write(text.length < DIGEST_MAX ? `${text}\n` : text);
+}
+
 function cmdSteer(args) {
   allowFlags(args, ["cwd"]);
   const id = args._[1];
@@ -1671,7 +1769,8 @@ function cmdSteer(args) {
   if (finished && (job.workspaceClosed || !agentExists(job.agent))) {
     fail(`${id} is ${job.status} and its orchestrator pane is gone; not steered`);
   }
-  promptWithRetry(job.agent, message);
+  const digest = renderDigest(digestView(job), collectDigestFiles(repo, job));
+  promptWithRetry(job.agent, steerText(digest, message));
   const now = new Date().toISOString();
   job.steers = job.steers || [];
   job.steers.push({ at: now, message });
@@ -2545,6 +2644,7 @@ function help() {
            the real name is printed. Verifier rounds are verifier, verifier-2, verifier-3... Panes are
            never closed while the job runs; orca frees them on done/stop.
   orca status [id] [--cwd <repo>]
+  orca digest <id> [--cwd <repo>]
   orca steer <id> "message"   (also on a finished job whose orchestrator pane is still open: starts a follow-up round)
   orca stop <id> [reason] [--dry-run] [--keep]
   orca strategy <id> "<what changed>"
@@ -2554,6 +2654,8 @@ function help() {
   orca webhook <id> [--dry-run] [--force] [--cwd <repo>]
   orca verify <id> [--base] [--dry-run] [--cwd <repo>]
   orca help
+
+digest prints a capped snapshot and does not change the job.
 
 Jobs: <repo>/.orca/jobs/<id>.json
 Worktree: <repo>/.orca/worktrees/<id> on branch orca/<id>
@@ -2681,6 +2783,7 @@ async function main() {
   else if (cmd === "run") await cmdRun(args);
   else if (cmd === "worker") cmdWorker(args);
   else if (cmd === "status") cmdStatus(args);
+  else if (cmd === "digest") cmdDigest(args);
   else if (cmd === "steer") cmdSteer(args);
   else if (cmd === "strategy") cmdStrategy(args);
   else if (cmd === "stop") await cmdStop(args);

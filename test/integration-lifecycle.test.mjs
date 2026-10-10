@@ -136,7 +136,11 @@ test("done twice (follow-up round) sends the webhook twice, marked followUp on t
     assert.equal(mid.status, "running");
     assert.equal(mid.round, 2);
     assert.ok(mid.steered);
-    assert.equal(readFileSync(join(box.base, "last-prompt"), "utf8"), "one more thing");
+    const lastPrompt = readFileSync(join(box.base, "last-prompt"), "utf8");
+    assert.ok(lastPrompt.startsWith(`Orca digest for ${job.id}`), lastPrompt.slice(0, 120));
+    assert.match(lastPrompt, /Owner steer:/);
+    assert.ok(lastPrompt.endsWith("one more thing"), lastPrompt.slice(-80));
+    assert.equal(mid.steers.at(-1).message, "one more thing");
 
     const again = await orca(box, ["done", job.id]);
     assert.equal(again.status, 0, again.stderr);
