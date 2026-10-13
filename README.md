@@ -279,6 +279,10 @@ Sessions have deterministic names. The prefix is `orca-` plus the first 8 hex ch
 
 `--keep` opts out of everything. On `orca done` and `orca stop` it skips the immediate cleanup for that call. On `orca new` or `orca run` it stores `keep: true` on the job, which skips immediate cleanup on every terminal path and exempts the job from the stale sweep. `--dry-run` on `done` and `stop` prints what would be closed.
 
+### Browser processes
+
+Agents do not always use the named `agent-browser` session: Playwright scripts, `chrome-devtools-mcp`, and ad-hoc sessions start Chrome directly, and a detached daemon is reparented to init, so closing sessions by name alone leaked browsers. Every job pane now runs with `ORCA_JOB=<id>` (plus `ORCA_WORKER=<name>`, or `orchestrator`), and every browser it starts inherits that tag. orca kills a job's tagged browser processes on `done`, `stop` and `failed`. `orca reap <id> [--worker <name>]` closes one worker's browsers mid-job without touching its pane, and the orchestrator runs it when a worker or the verifier finishes. `orca cleanup` also reaps tagged browsers of this repo's finished jobs. It never touches untagged processes, a running or queued job's processes, a `--keep` job's processes, or a job from another repo.
+
 ## Follow-up rounds
 
 `orca steer <id> "message"` accepts a finished job as long as its orchestrator agent pane still exists (not if the workspace was already swept). It prompts the orchestrator, sets the status back to `running`, increments `job.round`, and updates the activity time. When the orchestrator calls `orca done` again, the finish wake is sent again for the new round instead of being suppressed as already sent. The payload adds `"round": N` and `"followUp": true` (round 1 payloads are unchanged), for example:

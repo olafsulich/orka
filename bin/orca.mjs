@@ -11,6 +11,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
 import { DIGEST_MAX, FILE_READ_MAX, SUMMARY_MAX, VERIFIER_JSON_MAX, renderDigest, steerText } from "../lib/digest.mjs";
+import * as browsers from "../lib/browsers.mjs";
 import * as lifecycle from "../lib/lifecycle.mjs";
 import * as ports from "../lib/ports.mjs";
 import * as watch from "../lib/watch.mjs";
@@ -56,6 +57,7 @@ const VALUE_FLAGS = new Set([
   "max-rounds",
   "give-up",
   "older-than",
+  "worker",
 ]);
 const BOOL_FLAGS = new Set(["dry-run", "help", "force", "keep", "base"]);
 const FINISH_STATUSES = new Set(["done", "failed", "stopped"]);
@@ -711,6 +713,7 @@ function releaseJob(repo, job, opts = {}) {
       closed.browsers.push(s);
     } else console.log(`cleanup: browser ${s} not closed`);
   }
+  closed.browserPids = reapBrowsers(job, { dry });
   if (job.worktree && existsSync(job.worktree)) {
     const servers = lifecycle.findWorktreeServers(job.worktree);
     for (const p of servers) {
@@ -933,6 +936,29 @@ function portPromptLines(job) {
     `Only ask when a genuine human decision or a secret is required. A question nobody sees leaves the job stuck.`,
   );
   return lines;
+}
+
+// ORCA_JOB / ORCA_WORKER tag every process a pane starts, browsers included.
+function jobEnvArgs(job, worker) {
+  return ["--env", `ORCA_JOB=${job.id}`, ...(worker ? ["--env", `ORCA_WORKER=${worker}`] : [])];
+}
+
+// Kills the tagged browser processes of one job (or one worker of it).
+function reapBrowsers(job, { worker = null, dry = false } = {}) {
+  const procs = browsers.selectReap(browsers.findTaggedBrowsers(), { jobId: job.id, worker });
+  return killBrowserProcs(procs, dry);
+}
+
+function killBrowserProcs(procs, dry) {
+  for (const p of procs) console.log(`cleanup: ${dry ? "would kill" : "killed"} browser pid ${p.pid} (${p.job}${p.worker ? ` ${p.worker}` : ""}: ${p.cmdline.slice(0, 80)})`);
+  if (!dry && procs.length) {
+    try {
+      lifecycle.killProcesses(procs.map((p) => p.pid), { graceMs: 3000 });
+    } catch (err) {
+      console.log(`cleanup: could not kill a browser: ${err.message}`);
+    }
+  }
+  return procs.map((p) => p.pid);
 }
 
 function portEnvArgs(job) {
@@ -1234,6 +1260,7 @@ function orchestratorPrompt(job) {
     `If orca is not on PATH, run ${ORCA} instead. The binary is the same file.`,
     `Worker names must match [a-z][a-z0-9_-]{0,31}. If a name is already taken (by an earlier worker, even a finished one) orca appends -2, -3... and prints the real name.`,
     `Never close worker or verifier panes (no herdr pane close): finished panes stay open, and orca frees them when the job is done or stopped.`,
+    `When a worker or the verifier has finished, run orca reap ${job.id} --worker <name> to close its browsers (its pane stays open).`,
     ...(pi
       ? [`Workers are Pi agents (kind pi). Do not pass --model; pi workers have no model flag.`, `Pane command: ${paneCommand("")}`]
       : [
@@ -1412,6 +1439,7 @@ function createWorkspace(job) {
     "--env",
     `PATH=${pathPrefix()}`,
     ...portEnvArgs(job),
+    ...jobEnvArgs(job, "orchestrator"),
   ]);
   const pane = got.json?.result?.root_pane?.pane_id;
   const workspace = got.json?.result?.workspace?.workspace_id;
@@ -1489,8 +1517,8 @@ async function cmdRun(args) {
   console.log(`${id} running pane=${job.pane} agent=${job.agent} branch=${job.branch} worktree=${job.worktree}${extra}`);
 }
 
-function splitPane(fromPane, cwd, job) {
-  const split = herdr(["pane", "split", "--pane", fromPane, "--direction", "right", "--cwd", cwd, "--no-focus", "--env", `PATH=${pathPrefix()}`, ...portEnvArgs(job)]);
+function splitPane(fromPane, cwd, job, worker) {
+  const split = herdr(["pane", "split", "--pane", fromPane, "--direction", "right", "--cwd", cwd, "--no-focus", "--env", `PATH=${pathPrefix()}`, ...portEnvArgs(job), ...jobEnvArgs(job, worker)]);
   const pane = split.json?.result?.pane?.pane_id;
   if (!pane) herdrFail(split, "pane split");
   return pane;
@@ -1538,7 +1566,7 @@ function cmdWorker(args) {
   ensureJobDir(repo, job.id);
   if (role === "verifier") archiveVerifierResult(repo, job, round - 1);
   const ownPane = !args.pane;
-  const pane = args.pane ? String(args.pane) : splitPane(job.pane, job.worktree, job);
+  const pane = args.pane ? String(args.pane) : splitPane(job.pane, job.worktree, job, first);
   let name = first;
   const tried = [];
   let started;
@@ -2547,6 +2575,10 @@ function sweep(repo, { dry = false, thresholdMs, orphans = true, quiet = false }
         count++;
       }
     }
+    // Leftover browser processes of this repo's finished jobs (tagged ORCA_JOB).
+    const finished = jobs.filter((j) => j.status !== "running" && j.status !== "queued" && !j.keep).map((j) => j.id);
+    const procs = browsers.selectReap(browsers.findTaggedBrowsers(), { finishedJobIds: finished });
+    count += killBrowserProcs(procs, dry).length;
   }
   for (const j of workspaces) {
     console.log(`cleanup: ${verb} workspace ${j.workspace} (${j.id}, idle since ${new Date(lifecycle.lastActivity(j) || 0).toISOString()})`);
@@ -2579,6 +2611,21 @@ function sweepQuietly(repo) {
   } catch {
     // a sweep must never block new or run
   }
+}
+
+// Closes one job's browsers (or one worker's) without touching panes. Safe mid-job.
+function cmdReap(args) {
+  allowFlags(args, ["cwd", "dry-run", "worker"]);
+  const id = args._[1];
+  if (!id) fail("need id");
+  const repo = requireRepo(args.cwd || process.cwd());
+  const job = load(repo, id);
+  const worker = args.worker ? String(args.worker) : null;
+  const dry = Boolean(args["dry-run"]);
+  const sessions = jobSessions(job).filter((s) => !worker || s === `${browserPrefix(job)}-${worker}`);
+  for (const s of sessions) if (dry || closeBrowser(s)) console.log(`cleanup: ${dry ? "would close" : "closed"} browser ${s}`);
+  const pids = reapBrowsers(job, { worker, dry });
+  if (!pids.length) console.log("reap: no browser processes left");
 }
 
 function cmdCleanup(args) {
@@ -2650,6 +2697,7 @@ function help() {
   orca strategy <id> "<what changed>"
   orca done <id> [reason] [--give-up "<reason>"] [--dry-run] [--keep] [--cwd <repo>]
   orca cleanup [--dry-run] [--older-than <12h>] [--cwd <repo>]
+  orca reap <id> [--worker <name>] [--dry-run] [--cwd <repo>]   (closes browsers only; panes stay)
   orca watch <id> [--dry-run] [--cwd <repo>]   (started by orca run; not for hand use)
   orca webhook <id> [--dry-run] [--force] [--cwd <repo>]
   orca verify <id> [--base] [--dry-run] [--cwd <repo>]
@@ -2791,6 +2839,7 @@ async function main() {
   else if (cmd === "webhook") await cmdWebhook(args);
   else if (cmd === "verify") cmdVerify(args);
   else if (cmd === "cleanup") cmdCleanup(args);
+  else if (cmd === "reap") cmdReap(args);
   else if (cmd === "watch") await cmdWatch(args);
   else fail(`unknown command ${cmd}\nrun: orca help`);
 }
