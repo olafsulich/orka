@@ -31,9 +31,10 @@ if [ "$1 $2" = "agent start" ]; then
   if grep -qx "$3" "${base}/hidden" 2>/dev/null; then echo '{"error":{"message":"agent name '"$3"' is already used; candidates: x"}}'; exit 1; fi
   echo "$3" >> "${agents}"; echo '{"result":{"pane":{"pane_id":"p-new"}}}'; exit 0; fi
 if [ "$1 $2" = "agent get" ]; then
-  if grep -qx "$3" "${agents}"; then echo '{"result":{"agent":{"agent_status":"working"}}}'; else echo '{"error":{"message":"not found"}}'; exit 1; fi
+  if grep -qx "$3" "${agents}"; then if [ -e "${base}/prompted-$3" ]; then echo '{"result":{"agent":{"agent_status":"working","interactive_ready":true}}}'; else echo '{"result":{"agent":{"agent_status":"idle","interactive_ready":true}}}'; fi; else echo '{"error":{"message":"not found"}}'; exit 1; fi
   exit 0
 fi
+if [ "$1 $2" = "agent prompt" ]; then touch "${base}/prompted-$3"; fi
 if [ "$1 $2" = "pane split" ]; then echo '{"result":{"pane":{"pane_id":"p-split"}}}'; exit 0; fi
 echo '{}'
 `,
@@ -231,7 +232,11 @@ case "$1 $2" in
   "pane split") echo '{"result":{"pane":{"pane_id":"p-split"}}}';;
   "agent list") echo '{"result":{"agents":[]}}';;
   "agent get")
-    if [ "$3" = "api" ] && [ ! -e "${dir}/started" ]; then echo '{"error":{"code":"agent_not_found","message":"no"}}'; exit 1; fi
+    if [ "$3" = "api" ] && [ ! -e "${dir}/started" ]; then
+      # First get is the free-name check (not found); then the fresh agent is idle and ready for its prompt.
+      if [ ! -e "${dir}/seen" ]; then touch "${dir}/seen"; echo '{"error":{"code":"agent_not_found","message":"no"}}'; exit 1; fi
+      echo '{"result":{"agent":{"agent_status":"idle","interactive_ready":true,"pane_id":"p-split"}}}'; exit 0
+    fi
     s=$(head -n1 "${dir}/statuses"); [ -n "$s" ] || s=working
     n=$(wc -l < "${dir}/statuses"); [ "$n" -gt 1 ] && tail -n +2 "${dir}/statuses" > "${dir}/s2" && mv "${dir}/s2" "${dir}/statuses"
     echo "{\\"result\\":{\\"agent\\":{\\"agent_status\\":\\"$s\\",\\"pane_id\\":\\"p-split\\"}}}";;
@@ -242,7 +247,7 @@ case "$1 $2" in
 esac
 `,
   );
-  const run = () => spawnSync(process.execPath, [ORCA, "worker", "--job", j.id, "--name", "api", "--task", "do the thing in a long enough line", "--cwd", t.repo], { encoding: "utf8", env: { ...process.env, ...t.env, ORCA_PROMPT_WAIT_MS: "6000", ORCA_PROMPT_POLL_MS: "200" } });
+  const run = (extra = {}) => spawnSync(process.execPath, [ORCA, "worker", "--job", j.id, "--name", "api", "--task", "do the thing in a long enough line", "--cwd", t.repo], { encoding: "utf8", env: { ...process.env, ...t.env, ORCA_PROMPT_WAIT_MS: "6000", ORCA_PROMPT_POLL_MS: "200", ...extra } });
   const count = (what) => readFileSync(t.log, "utf8").split("\n").filter((l) => l.startsWith(what)).length;
   return { run, count };
 }
@@ -263,10 +268,11 @@ test("unknown statuses followed by working never duplicate the prompt or press E
   assert.equal(b.count("herdr agent send-keys"), 0);
 });
 
-test("an idle agent with an empty input box that never saw the prompt is prompted once more", () => {
+test("an idle agent with an empty input box that never saw the prompt is re-prompted, then reported as failed", () => {
   const b = promptBox({ statuses: ["idle"], pane: "\u276f \n" });
-  const r = b.run();
-  assert.equal(r.status, 0, r.stderr);
-  assert.equal(b.count("herdr agent prompt api"), 2);
+  const r = b.run({ ORCA_PROMPT_WAIT_MS: "800", ORCA_PROMPT_BACKOFF_MS: "50" });
+  assert.notEqual(r.status, 0, "idle is never delivered");
+  assert.match(r.stderr, /did not start/);
+  assert.equal(b.count("herdr agent prompt api"), 3);
   assert.equal(b.count("herdr agent send-keys"), 0);
 });

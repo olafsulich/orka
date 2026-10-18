@@ -36,10 +36,10 @@ function scratch() {
     "herdr",
     `case "$1 $2" in
   "agent start") touch "${base}/started-$3";;
-  "agent get") case "$3" in w*) [ -e "${base}/started-$3" ] || { echo '{"error":{"message":"not found"}}'; exit 1; };; esac; echo "{\\"result\\":{\\"agent\\":{\\"agent_status\\":\\"$(cat "${base}/agent-status" 2>/dev/null || echo working)\\"}}}";;
+  "agent get") case "$3" in w*) [ -e "${base}/started-$3" ] || { echo '{"error":{"message":"not found"}}'; exit 1; };; esac; if [ -e "${base}/prompted-$3" ] || [ -e "${base}/agent-status" ]; then echo "{\\"result\\":{\\"agent\\":{\\"agent_status\\":\\"$(cat "${base}/agent-status" 2>/dev/null || echo working)\\",\\"interactive_ready\\":true}}}"; else echo '{"result":{"agent":{"agent_status":"idle","interactive_ready":true}}}'; fi;;
   "agent wait") sleep 1;;
   "pane read") cat "${base}/pane-text" 2>/dev/null;;
-  "agent prompt") printf '%s' "$4" > "${base}/last-prompt";;
+  "agent prompt") printf '%s' "$4" > "${base}/last-prompt"; touch "${base}/prompted-$3";;
   "pane split") echo '{"result":{"pane":{"pane_id":"p-new"}}}';;
   *) echo '{}';;
 esac`,
