@@ -34,4 +34,4 @@ The test runs from the task 01 and 02 jobs left 21 detached `orca.mjs watch` pro
 - Tests set `ORCA_NO_WATCH=1`; the watcher self-guard (`lib/watch.mjs`) exits on missing repo/job/worktree or a lead pane gone more than M minutes; `zz-no-leaked-watchers` asserts none survive.
 - `orca cleanup [--dry-run]` also kills orphan `orca.mjs watch` processes of the repo (job missing, terminal, or pid not `watcherPid`), never a live job's recorded watcher, and prints each (`lib/watch.mjs` `listWatchers`/`selectOrphanWatchers`; tests use `ORCA_FAKE_WATCHERS`, nothing real is killed).
 - `orca digest` shows `verdict=pass|fail|none` for the verifier, read from `results/verifier.json`.
-- `npm test`: 171 pass, 0 fail.
+- `npm test`: 172 pass, 0 fail.

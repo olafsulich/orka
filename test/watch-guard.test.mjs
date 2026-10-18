@@ -86,3 +86,27 @@ test("an unknown pane state (null) never ends the watcher", async () => {
   h.deps.loadJob = async () => (++n > 5 ? { ...running, status: "done" } : running);
   assert.deepEqual(await Promise.race([run(h, { paneGoneMs: 1000 }), timeout(2000)]), { exit: "terminal" });
 });
+
+test("worktree removed while the agent is unknown: exits within one poll interval", async () => {
+  const pollMs = 50;
+  const h = harness();
+  let answers = 0;
+  let removedAt = 0;
+  const sleeps = [];
+  h.deps.waitAgent = async () => {
+    answers += 1;
+    if (answers === 6) {
+      h.state.paths.clear();
+      removedAt = Date.now();
+    }
+    return "unknown";
+  };
+  h.deps.sleep = (ms) => {
+    sleeps.push(ms);
+    return new Promise((r) => setTimeout(r, ms));
+  };
+  const r = await Promise.race([run(h, { waitMs: pollMs }), timeout(5000)]);
+  assert.deepEqual(r, { exit: "worktree-gone" });
+  assert.ok(Date.now() - removedAt <= pollMs * 2, "guard must fire about one poll interval after removal");
+  assert.ok(sleeps.length >= 5 && sleeps.every((ms) => ms <= pollMs), `backoff sleeps capped at the poll interval: ${sleeps}`);
+});
