@@ -17,10 +17,14 @@ The test runs from the task 01 and 02 jobs left 21 detached `orca.mjs watch` pro
 - **Reaper.** `orca cleanup` also kills orphan `orca.mjs watch` processes whose job is terminal, missing or not the recorded `watcherPid`. Support `--dry-run`, and print what it killed.
 - **Regression test.** Run the suite, then assert that no new `orca.mjs watch` process with a `/tmp/orca-*` cwd survives.
 
+- **Also leaking now:** `test/verifier-model.test.mjs` (`/tmp/orca-vmodel-*`). One `npm test` on main at cb33c0a left 4 watchers, and the task 02/03 job runs left 19 in total (killed by hand).
+- **Extra (small): digest verdict.** `orca digest` shows `verifier ok not true` for a passing verifier, because `results/verifier.json` has `verdict`, not `ok`. Fix `lib/digest.mjs` (and the digest builder in bin/orca.mjs) so that for the verifier it reads `verdict` (pass/fail) and shows `verdict=pass|fail`, not the builder `ok` check. Add a test.
+
 ## Acceptance criteria
 - After `npm test`, `pgrep -af "orca.mjs watch"` shows no test-spawned watcher.
 - A watcher whose repo or job is deleted exits by itself within one poll interval.
 - `orca cleanup --dry-run` lists orphan watchers, and `orca cleanup` kills them, without touching live jobs' watchers.
+- The digest shows `verdict=pass` for a passing verifier, with no `ok not true`.
 - `npm test` is green.
 
 ## Olaf's notes
