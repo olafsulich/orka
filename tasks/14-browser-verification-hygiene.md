@@ -54,3 +54,7 @@ Verification leaves Chrome behind, and the verifier uses agent-browser without t
 
 ## Olaf's notes
 - "Audit whether orca leaves Chrome running after verification. Improve verification using agent-browser's own skill."
+
+## Found 2026-10-19 (night)
+
+`orca cleanup` "close browser orca-*" for stale agent-browser sessions *starts* a fresh agent-browser daemon + Chrome per session and then hangs: one cleanup on motion-lab spawned ~11 untagged Chromes (~3 GB RAM) and never exited. Closing a stale session must never launch a browser (check whether its daemon/Chrome is alive first; otherwise just delete its state), cleanup must have a timeout, and every browser orca starts must carry ORCA_JOB so orphans are findable.
