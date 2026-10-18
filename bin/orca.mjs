@@ -60,7 +60,7 @@ const VALUE_FLAGS = new Set([
   "older-than",
   "worker",
 ]);
-const BOOL_FLAGS = new Set(["dry-run", "help", "force", "keep", "base"]);
+const BOOL_FLAGS = new Set(["dry-run", "help", "force", "keep", "base", "ui"]);
 const FINISH_STATUSES = new Set(["done", "failed", "stopped"]);
 const VERIFIER_NAME = "verifier";
 const FINISH_TIMEOUT_MS = 8000;
@@ -232,11 +232,66 @@ function claudeModels(job, args) {
   };
 }
 
-// Precedence: --verifier-model flag > repo .orca/config.json "verifierModel" > the job's workerModel.
-function resolveVerifierModel(repo, args, workerModel) {
+// Task 10 playbooks are not built yet; this is the hook where a playbook that implies UI will return a reason.
+function playbookImpliesUi() {
+  return "";
+}
+
+function browserStepAction(step) {
+  if (Array.isArray(step)) return String(step[0] || "");
+  if (step && typeof step === "object") return Object.keys(step).find((key) => STEP_ACTIONS.has(key)) || "";
+  return "";
+}
+
+function hasBrowserSteps(path) {
+  try {
+    const data = JSON.parse(readFileSync(path, "utf8"));
+    const steps = Array.isArray(data) ? data : data?.steps;
+    return Array.isArray(steps) && steps.some((step) => STEP_ACTIONS.has(browserStepAction(step)));
+  } catch {
+    return false;
+  }
+}
+
+const UI_GOAL_RE = /agent-browser|\b(ui|browser|visual)\s+(verification|check|checks|test|tests|testing)\b|\b(verify|check|test)\s+(the\s+)?(ui|user interface|user flows?)\b/i;
+
+// A job is ui when --ui is set, a playbook implies it, the checks file has browser steps, or the goal asks for browser/UI verification.
+function detectJobType(repo, goal, ui, worktree) {
+  if (ui) return { jobType: "ui", reason: "--ui flag" };
+  if (playbookImpliesUi()) return { jobType: "ui", reason: playbookImpliesUi() };
+  let cfg = {};
+  try {
+    cfg = JSON.parse(readFileSync(configPath(repo), "utf8"));
+  } catch {}
+  const custom = typeof cfg.verify === "string" && cfg.verify ? cfg.verify : "";
+  if (cfg.verify !== false) {
+    const roots = [worktree, repo].filter(Boolean);
+    const found = roots.map((root) => resolve(root, custom || VERIFY_FILE)).find((path) => existsSync(path) && hasBrowserSteps(path));
+    if (found) return { jobType: "ui", reason: `${custom || VERIFY_FILE} has browser steps` };
+  }
+  if (UI_GOAL_RE.test(String(goal || ""))) return { jobType: "ui", reason: "goal asks for browser/UI verification" };
+  return { jobType: "cli", reason: "" };
+}
+
+function verifierDefaultLabel(jobType, reason) {
+  return jobType === "ui" ? `default: ui job, ${reason}` : "default: cli job";
+}
+
+// Precedence: --verifier-model flag > repo .orca/config.json "verifierModel" > the job-type default (ui sonnet, cli haiku).
+// Returns the model and a short label of where it came from.
+function resolveVerifierModel(repo, args, jobType, reason) {
   const flag = flagValue(args, "verifier-model");
-  const cfg = flag ? "" : readConfig(repo).verifierModel;
-  return assertClaudeModel(flag || (cfg ? String(cfg) : "") || workerModel, "verifier");
+  if (flag) return { model: assertClaudeModel(flag, "verifier"), source: "--verifier-model" };
+  let cfg;
+  try {
+    cfg = JSON.parse(readFileSync(configPath(repo), "utf8")).verifierModel;
+  } catch {}
+  if (cfg) return { model: assertClaudeModel(String(cfg), "verifier"), source: "config verifierModel" };
+  return { model: assertClaudeModel(jobType === "ui" ? "sonnet" : "haiku", "verifier"), source: verifierDefaultLabel(jobType, reason) };
+}
+
+function verifierLabel(job) {
+  return `verifier=${job.verifierModel || job.workerModel} (${job.verifierSource || "job file"})`;
 }
 
 function sleep(ms) {
@@ -1366,7 +1421,7 @@ function orchestratorPrompt(job) {
       : [
           `That uses this job's worker model (${job.workerModel}). Pass --model <alias> only to override one worker.`,
           `Pane command: ${paneCommand(job.workerModel)}`,
-          `The verifier (--role verifier) uses the job's verifier model (${job.verifierModel || job.workerModel}), not the worker model, unless you pass --model.`,
+          `The verifier (--role verifier) uses the job's verifier model, ${verifierLabel(job)}, not the worker model, unless you pass --model.`,
         ]),
     ``,
     `Each worker writes ${dir}/results/<name>.json and a one-line note at ${dir}/notes/<name>.txt,`,
@@ -1424,7 +1479,7 @@ function printDryRun(repo, job) {
   console.log(`lead: herdr ${sh(startArgs(name, "<pane>", kind, orchestratorModel))}`);
   if (kind === "claude") {
     const verifierModel = job.verifierModel || workerModel;
-    console.log(`models: orchestrator=${orchestratorModel} worker=${workerModel} verifier=${verifierModel}`);
+    console.log(`models: orchestrator=${orchestratorModel} worker=${workerModel} ${verifierLabel(job)}`);
     console.log(`pane: ${paneCommand(orchestratorModel)}`);
     console.log(`worker: orca worker --job ${job.id} --name <worker> --task "<task>"`);
     console.log(`worker-pane: ${paneCommand(workerModel)}`);
@@ -1449,8 +1504,17 @@ function assignClaudeModels(job, args) {
     return;
   }
   const models = claudeModels(job, args);
-  if (args["verifier-model"]) job.verifierModel = resolveVerifierModel(job.repo, args, models.workerModel);
-  else if (!job.verifierModel || job.verifierModel === job.workerModel) job.verifierModel = resolveVerifierModel(job.repo, args, models.workerModel);
+  const sticky = job.jobType === "ui" && job.jobTypeReason === "--ui flag";
+  const detected = detectJobType(job.repo, job.goal, args.ui || sticky, job.worktree);
+  job.jobType = detected.jobType;
+  if (detected.reason) job.jobTypeReason = detected.reason;
+  else delete job.jobTypeReason;
+  const storedDefault = !job.verifierModel || String(job.verifierSource || "").startsWith("default:");
+  if (args["verifier-model"] || storedDefault) {
+    const v = resolveVerifierModel(job.repo, args, job.jobType, job.jobTypeReason);
+    job.verifierModel = v.model;
+    job.verifierSource = v.source;
+  }
   job.orchestratorModel = models.orchestratorModel;
   job.workerModel = models.workerModel;
   job.model = models.orchestratorModel;
@@ -1458,7 +1522,7 @@ function assignClaudeModels(job, args) {
 
 async function cmdNew(args) {
   if ("model" in args) fail("use --worker-model on orca new, not --model");
-  allowFlags(args, ["cwd", "title", "goal", "kind", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds"]);
+  allowFlags(args, ["cwd", "title", "goal", "kind", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds", "ui"]);
   const title = args.title;
   const goal = args.goal;
   const kind = args.kind || "claude";
@@ -1470,7 +1534,10 @@ async function cmdNew(args) {
   const repo = requireRepo(args.cwd || process.cwd());
   const orchestratorModel = kind === "claude" ? assertClaudeModel(flagValue(args, "orchestrator-model") || DEFAULT_ORCHESTRATOR_MODEL, "orchestrator") : "";
   const workerModel = kind === "claude" ? assertClaudeModel(flagValue(args, "worker-model") || DEFAULT_WORKER_MODEL, "worker") : "";
-  const verifierModel = kind === "claude" ? resolveVerifierModel(repo, args, workerModel) : "";
+  if (kind === "pi" && args.ui) fail("--ui is only for kind claude");
+  const detected = detectJobType(repo, goal, args.ui);
+  const verifier = kind === "claude" ? resolveVerifierModel(repo, args, detected.jobType, detected.reason) : null;
+  const verifierModel = verifier ? verifier.model : "";
   const id = slug(title);
   const branch = `orca/${id}`;
   const check = git(repo, ["check-ref-format", "--branch", branch]);
@@ -1495,7 +1562,9 @@ async function cmdNew(args) {
     model: orchestratorModel,
     orchestratorModel,
     workerModel,
-    ...(verifierModel ? { verifierModel } : {}),
+    ...(verifierModel ? { verifierModel, verifierSource: verifier.source } : {}),
+    jobType: detected.jobType,
+    ...(detected.reason ? { jobTypeReason: detected.reason } : {}),
     workers: [],
     browserSessions: [],
     keep: Boolean(args.keep),
@@ -1576,7 +1645,7 @@ function startLead(job) {
 
 async function cmdRun(args) {
   if ("model" in args) fail("use --orchestrator-model and --worker-model on orca run, not --model");
-  allowFlags(args, ["cwd", "dry-run", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds"]);
+  allowFlags(args, ["cwd", "dry-run", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds", "ui"]);
   const id = args._[1];
   if (!id) fail("need id");
   const repo = requireRepo(args.cwd || process.cwd());
@@ -1806,7 +1875,7 @@ function cmdStatus(args) {
     if (job.workspaceClosed) console.log(`  workspace: closed ${job.workspaceClosed}`);
     else if (FINISH_STATUSES.has(job.status) && job.workspace) console.log(`  workspace: ${job.workspace} open until idle ${staleLabel(repo)}`);
     if (job.cleanup) console.log(`  cleaned up: ${job.cleanup.browsers.length} browser(s), ${job.cleanup.servers.length} server(s), ${job.cleanup.panes.length} worker pane(s)`);
-    if (job.kind === "claude") console.log(`  models: orchestrator=${job.orchestratorModel || job.model || "-"} worker=${job.workerModel || "-"} verifier=${job.verifierModel || job.workerModel || "-"}`);
+    if (job.kind === "claude") console.log(`  models: orchestrator=${job.orchestratorModel || job.model || "-"} worker=${job.workerModel || "-"} ${verifierLabel(job)}`);
     if (job.agent || job.pane) console.log(`  agent: ${job.agent || "-"} pane=${job.pane || "-"} workspace=${job.workspace || "-"} model=${job.orchestratorModel || job.model || "-"}${job.leadDelivery === "failed" ? ` delivery=failed${job.stopReason ? ` [${job.stopReason}]` : ""}` : ""}`);
     for (const worker of job.workers || []) console.log(`  worker: ${worker.name} pane=${worker.pane} ${worker.model ? `model=${worker.model}` : "kind=pi"}${worker.role === "verifier" ? " role=verifier" : ""}${worker.delivery ? ` delivery=${worker.delivery}` : ""}${worker.closedUnused ? ` closed-unused (${worker.closedUnused.reason})` : ""}${worker.delivery === "failed" && worker.deliveryReason ? ` [${worker.deliveryReason}]` : ""}`);
     for (const steer of (job.steers || []).filter((x) => x?.delivery === "failed")) console.log(`  steer: ${String(steer.message ?? "").slice(0, 200).replace(/[\r\n]+/g, " ")} delivery=failed${steer.deliveryReason ? ` [${steer.deliveryReason}]` : ""}`);

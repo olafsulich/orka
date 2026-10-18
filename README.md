@@ -119,9 +119,9 @@ orca help
 
 ### Verifier model
 
-`--verifier-model <alias>` on `new` or `run` stores `job.verifierModel`; `orca worker --role verifier` starts `claude --model <verifierModel>`. Builders keep `workerModel`. `status`, `run --dry-run` and the orchestrator prompt show it. An explicit `orca worker --model` still overrides one worker. Precedence: `orca worker --model` > `--verifier-model` > `"verifierModel"` in `<repo>/.orca/config.json` > `workerModel`. The resolved value is recorded on the job when it is created (or when `run` replaces it).
+`--verifier-model <alias>` on `new` or `run` stores `job.verifierModel`; `orca worker --role verifier` starts `claude --model <verifierModel>`. Builders keep `workerModel`. `status`, `run --dry-run` and the orchestrator prompt show it. An explicit `orca worker --model` still overrides one worker. Precedence: `orca worker --model` > `--verifier-model` > `"verifierModel"` in `<repo>/.orca/config.json` > job-type default. The resolved value is recorded on the job when it is created (or when `run` replaces it).
 
-A cheaper verifier is supported: `--verifier-model haiku` or `--verifier-model claude-haiku-5-5`. It is recommended to trial Haiku on a real job, but it is not the default. The default stays `workerModel` (no change for existing jobs) because Haiku has not yet been shown on a real job to catch failures, and the stricter evidence standard in the verifier prompt does not by itself make a weaker model catch them. To opt in for a repo, set `{"verifierModel": "haiku"}` in `.orca/config.json`.
+The verifier default depends on job type: `haiku` for a CLI job, `sonnet` for a UI job (`--ui`, browser steps in `orca.verify.json` or the config `verify` file, or a goal that asks for agent-browser/UI verification); precedence is `orca worker --model` > `--verifier-model` > config `verifierModel` > the type default, and `status`, `--dry-run` and the prompt show the source.
 
 `haiku` is not listed by `claude --help`, so orca keeps a small extra-alias list (`haiku`) that is merged with the aliases read from `claude --help`. Unknown aliases are still rejected.
 

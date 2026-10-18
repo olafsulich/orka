@@ -68,13 +68,13 @@ function running(t, id) {
   writeFileSync(t.jobFile(id), JSON.stringify(job));
 }
 
-test("default verifier model is the worker model when nothing is set", () => {
+test("default verifier model is the job-type default (haiku for cli), not the worker model", () => {
   const t = scratch();
   const id = t.mk("--worker-model", "opus").stdout.trim();
-  assert.equal(t.read(id).verifierModel, "opus");
+  assert.equal(t.read(id).verifierModel, "haiku");
   const dry = t.orca(["worker", "--job", id, "--name", "verifier", "--role", "verifier", "--task", "t", "--dry-run"]);
-  assert.match(dry.stdout, /model=opus role=verifier/);
-  assert.match(dry.stdout, /pane: claude --model opus/);
+  assert.match(dry.stdout, /model=haiku role=verifier/);
+  assert.match(dry.stdout, /pane: claude --model haiku/);
 });
 
 test("--verifier-model is stored; verifier pane uses it, builders keep workerModel", () => {
@@ -124,16 +124,16 @@ test("status and run --dry-run show the verifier model", () => {
   assert.match(dry, /verifier-pane: claude --model haiku/);
 });
 
-test("run --verifier-model replaces it; a defaulted verifier follows a new worker model", () => {
+test("run --verifier-model replaces it; a stored default does not follow a new worker model", () => {
   const t = scratch();
   const id = t.mk().stdout.trim();
-  assert.equal(t.read(id).verifierModel, "sonnet");
+  assert.equal(t.read(id).verifierModel, "haiku");
   const r = t.orca(["run", id, "--worker-model", "opus"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(t.read(id).verifierModel, "opus");
+  assert.equal(t.read(id).verifierModel, "haiku");
   const id2 = t.orca(["new", "--kind", "claude", "--title", "vm3", "--goal", "g"]).stdout.trim();
-  assert.equal(t.orca(["run", id2, "--verifier-model", "haiku"]).status, 0);
-  assert.equal(t.read(id2).verifierModel, "haiku");
+  assert.equal(t.orca(["run", id2, "--verifier-model", "opus"]).status, 0);
+  assert.equal(t.read(id2).verifierModel, "opus");
 });
 
 test("orchestrator prompt names the verifier model", () => {
@@ -141,7 +141,7 @@ test("orchestrator prompt names the verifier model", () => {
   const id = t.mk("--verifier-model", "haiku").stdout.trim();
   const r = t.orca(["run", id]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(t.calls(), /verifier \(--role verifier\) uses the job's verifier model \(haiku\)/);
+  assert.match(t.calls(), /verifier \(--role verifier\) uses the job's verifier model, verifier=haiku \(--verifier-model\)/);
 });
 
 test("verifier prompt carries the evidence standard", () => {
