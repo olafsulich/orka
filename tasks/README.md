@@ -18,7 +18,8 @@ Source-ref paths: `pstack/…` = `/home/olaf/projects/cursor-plugins/pstack/…`
 | [10](10-playbooks.md) | Playbooks by job type | todo | pstack | 18 |
 | [11](11-worker-prompt-delivery.md) | Reliable worker prompt delivery (wait for ready, verify start, retry) | todo | incident 2026-10-18 | - |
 | [12](12-tests-leak-watchers.md) | Tests leak `orca watch` processes: kill in teardown, self-exit guard, reaper | todo | incident 2026-10-18 | - |
-| [13](13-readme-clarity.md) | README clarity: how it works and what you can use, with diagram-framework graphs | todo | Limen + Olaf | 20 |
+| [13](13-verifier-default-by-job-type.md) | Verifier model default by job type (haiku for CLI, sonnet for UI) | todo | Olaf | - |
+| [14](14-readme-clarity.md) | README clarity: how it works and what you can use, with diagram-framework graphs | todo | Limen + Olaf | 20 |
 
 ## Skipped
 

@@ -1,4 +1,4 @@
-# 13 · README clarity: how orca works and what you can use, with diagrams
+# 14 · README clarity: how orca works and what you can use, with diagrams
 
 Status: todo · Source: Olaf + Limen · Doc: [#20](../research/IMPROVEMENTS-pstack-limen.md#3-combined-ranking) (expanded)
 
@@ -26,7 +26,7 @@ The README is a 316-line reference that mixes concepts, flags and edge cases. It
   1. a refreshed how-it-works diagram;
   2. the orchestrator → workers → verifier loop with rounds;
   3. a context-injection diagram.
-- Do this task last, so it reflects tasks 01-12 as they land.
+- Do this task last, so it reflects tasks 01-13 as they land.
 
 ## Acceptance criteria
 - The README has exactly the two main parts (a) and (b), plus a short intro and links to `docs/`.
