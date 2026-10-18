@@ -256,16 +256,18 @@ function hasBrowserSteps(path) {
 const UI_GOAL_RE = /agent-browser|\b(ui|browser|visual)\s+(verification|check|checks|test|tests|testing)\b|\b(verify|check|test)\s+(the\s+)?(ui|user interface|user flows?)\b/i;
 
 // A job is ui when --ui is set, a playbook implies it, the checks file has browser steps, or the goal asks for browser/UI verification.
-function detectJobType(repo, goal, ui) {
+function detectJobType(repo, goal, ui, worktree) {
   if (ui) return { jobType: "ui", reason: "--ui flag" };
   if (playbookImpliesUi()) return { jobType: "ui", reason: playbookImpliesUi() };
   let cfg = {};
   try {
     cfg = JSON.parse(readFileSync(configPath(repo), "utf8"));
   } catch {}
-  const checks = typeof cfg.verify === "string" && cfg.verify ? resolve(repo, cfg.verify) : join(repo, VERIFY_FILE);
-  if (cfg.verify !== false && existsSync(checks) && hasBrowserSteps(checks)) {
-    return { jobType: "ui", reason: `${typeof cfg.verify === "string" && cfg.verify ? cfg.verify : VERIFY_FILE} has browser steps` };
+  const custom = typeof cfg.verify === "string" && cfg.verify ? cfg.verify : "";
+  if (cfg.verify !== false) {
+    const roots = [worktree, repo].filter(Boolean);
+    const found = roots.map((root) => resolve(root, custom || VERIFY_FILE)).find((path) => existsSync(path) && hasBrowserSteps(path));
+    if (found) return { jobType: "ui", reason: `${custom || VERIFY_FILE} has browser steps` };
   }
   if (UI_GOAL_RE.test(String(goal || ""))) return { jobType: "ui", reason: "goal asks for browser/UI verification" };
   return { jobType: "cli", reason: "" };
@@ -1502,9 +1504,14 @@ function assignClaudeModels(job, args) {
     return;
   }
   const models = claudeModels(job, args);
-  if (args.ui && job.jobType !== "ui") Object.assign(job, { jobType: "ui", jobTypeReason: "--ui flag" });
-  if (args["verifier-model"] || args.ui || !job.verifierModel) {
-    const v = resolveVerifierModel(job.repo, args, job.jobType || "cli", job.jobTypeReason);
+  const sticky = job.jobType === "ui" && job.jobTypeReason === "--ui flag";
+  const detected = detectJobType(job.repo, job.goal, args.ui || sticky, job.worktree);
+  job.jobType = detected.jobType;
+  if (detected.reason) job.jobTypeReason = detected.reason;
+  else delete job.jobTypeReason;
+  const storedDefault = !job.verifierModel || String(job.verifierSource || "").startsWith("default:");
+  if (args["verifier-model"] || storedDefault) {
+    const v = resolveVerifierModel(job.repo, args, job.jobType, job.jobTypeReason);
     job.verifierModel = v.model;
     job.verifierSource = v.source;
   }

@@ -37,4 +37,5 @@ Olaf decided that Haiku is the default verifier for CLI and prompt jobs, which i
 - `detectJobType` in `bin/orca.mjs` runs in `cmdNew` (and `--ui` on `run`): `--ui`, browser steps in `orca.verify.json` or the config `verify` file, or a goal that asks for agent-browser/UI verification gives `ui`; otherwise `cli`. Stored as `job.jobType`, `job.jobTypeReason`, `job.verifierSource`. The playbook trigger is a no-op hook (task 10 not built).
 - Defaults: cli `haiku`, ui `sonnet`. Precedence: `worker --model` > `--verifier-model` > config `verifierModel` > type default; alias validation kept. A stored default no longer follows `--worker-model`.
 - `status`, `--dry-run` and the orchestrator prompt print `verifier=<model> (<source>)`. README: one line in the Verifier model section.
-- Tests: new `test/verifier-default.test.mjs` (9), `test/verifier-model.test.mjs` updated (11); fake herdr, no watchers.
+- Tests: new `test/verifier-default.test.mjs` (11), `test/verifier-model.test.mjs` updated (11); fake herdr, no watchers.
+- `run` re-runs detection (flag, checks file in worktree or repo, config verify path, goal) and updates `jobType`; a stored explicit verifier (`--verifier-model`, config) is kept, only a default-sourced one is re-derived. Suite: 183 pass.

@@ -154,3 +154,23 @@ test("status, dry-run and the orchestrator prompt show model and source", () => 
   assert.equal(r.status, 0, r.stderr);
   assert.match(t.calls(), /verifier model, verifier=opus \(--verifier-model\)/);
 });
+
+test("run keeps an explicit --verifier-model from new, even with --ui; a new flag on run overrides", () => {
+  const t = scratch();
+  const id = t.mk("add a flag", "--verifier-model", "opus").stdout.trim();
+  const plain = t.orca(["run", id, "--dry-run"]).stdout;
+  assert.match(plain, /verifier=opus \(--verifier-model\)/);
+  const ui = t.orca(["run", id, "--ui", "--dry-run"]).stdout;
+  assert.match(ui, /verifier=opus \(--verifier-model\)/);
+  const over = t.orca(["run", id, "--verifier-model", "haiku", "--dry-run"]).stdout;
+  assert.match(over, /verifier=haiku \(--verifier-model\)/);
+});
+
+test("run re-detects the job type from orca.verify.json at the repo root", () => {
+  const t = scratch();
+  const id = t.mk("add a flag").stdout.trim();
+  assert.equal(t.read(id).jobType, "cli");
+  t.write("orca.verify.json", { steps: [["open", "http://localhost:38892/"]] });
+  const out = t.orca(["run", id, "--dry-run"]).stdout;
+  assert.match(out, /verifier=sonnet \(default: ui job, orca\.verify\.json has browser steps\)/);
+});
