@@ -1,6 +1,6 @@
 # 03 · Structured worker brief
 
-Status: todo · Source: pstack · Doc: [#3](../research/IMPROVEMENTS-pstack-limen.md#3-combined-ranking)
+Status: done · Source: pstack · Doc: [#3](../research/IMPROVEMENTS-pstack-limen.md#3-combined-ranking)
 
 ## Why
 Workers can't ask questions, so a vague task fails quietly. The orchestrator should write every worker task in a fixed brief. Its ACCEPTANCE lines then feed the verifier task.
@@ -33,3 +33,6 @@ So the verifier checks all builders' work together against the job goal.
 ## Olaf's notes
 - "Sounds good." The orchestrator writes the brief.
 - Land this together with 02 to avoid two prompt-edit rounds.
+
+## Done
+`orchestratorPrompt` now requires the GOAL / SCOPE / CONTEXT / ACCEPTANCE / VERIFY / TIMEBOX / FORBIDDEN / REPORT brief (collapsing to GOAL + ACCEPTANCE for one-command tasks) and tells the orchestrator to build the verifier `--task` from the builders' ACCEPTANCE lines. `workerPrompt` has the narrowest-reading footer. `cmdWorker` prints a non-fatal stderr warning for builder tasks without `SCOPE:` or `ACCEPTANCE:` (also in `--dry-run`; verifiers are not warned). 3 new tests in `test/verifier-model.test.mjs`; `npm test` 138 pass, 0 fail (was 135).
