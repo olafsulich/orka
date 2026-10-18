@@ -21,7 +21,7 @@ Olaf decided that Haiku is the default verifier for CLI and prompt jobs, which i
 
   Keep `haiku` alias validation from task 02.
 - **Visible everywhere:** show the choice and its source in `orca status`, `--dry-run` and the orchestrator prompt, e.g. `verifier=haiku (default: cli job)` or `verifier=sonnet (default: ui job, orca.verify.json has browser steps)`.
-- Update the README models section in one line. The detailed docs go in task 14.
+- Update the README models section in one line. The detailed docs go in task 15.
 
 ## Acceptance criteria
 - A CLI job with no flags or config gets `haiku`. A job with `--ui`, or with browser steps in `orca.verify.json`, gets `sonnet`.
