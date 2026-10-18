@@ -1,6 +1,6 @@
 # 13 · Verifier model default by job type
 
-Status: todo · Source: Olaf decision 2026-10-18 (after Haiku verifier trials)
+Status: done · Source: Olaf decision 2026-10-18 (after Haiku verifier trials)
 
 ## Why
 Olaf decided that Haiku is the default verifier for CLI and prompt jobs, which is cheap and good enough there. Sonnet stays the verifier for UI and browser jobs, where checking real user flows needs a stronger model. Today the default is static (task 02), so orca should pick it from the job type.
@@ -32,3 +32,9 @@ Olaf decided that Haiku is the default verifier for CLI and prompt jobs, which i
 
 ## Olaf's notes
 - "Haiku is the default verifier for CLI and prompt jobs, and Sonnet for UI and browser jobs."
+
+## Done
+- `detectJobType` in `bin/orca.mjs` runs in `cmdNew` (and `--ui` on `run`): `--ui`, browser steps in `orca.verify.json` or the config `verify` file, or a goal that asks for agent-browser/UI verification gives `ui`; otherwise `cli`. Stored as `job.jobType`, `job.jobTypeReason`, `job.verifierSource`. The playbook trigger is a no-op hook (task 10 not built).
+- Defaults: cli `haiku`, ui `sonnet`. Precedence: `worker --model` > `--verifier-model` > config `verifierModel` > type default; alias validation kept. A stored default no longer follows `--worker-model`.
+- `status`, `--dry-run` and the orchestrator prompt print `verifier=<model> (<source>)`. README: one line in the Verifier model section.
+- Tests: new `test/verifier-default.test.mjs` (9), `test/verifier-model.test.mjs` updated (11); fake herdr, no watchers.
