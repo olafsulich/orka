@@ -40,9 +40,11 @@ function scratch() {
     `#!/bin/sh
 echo "$1 $2" >> "${log}"
 if [ "$1 $2" = "agent prompt" ]; then
-  printf '%s' "$4" > "${prompt}"
+  printf '%s' "$4" > "${prompt}"; touch "${prompt}.working"
 fi
-echo '{"result":{"agent":{"agent_status":"working","pane_id":"p-1"}}}'
+# idle and ready, except working once right after a prompt
+if [ -e "${prompt}.working" ] && [ "$1 $2" = "agent get" ]; then rm -f "${prompt}.working"; echo '{"result":{"agent":{"agent_status":"working","pane_id":"p-1"}}}'
+else echo '{"result":{"agent":{"agent_status":"idle","interactive_ready":true,"pane_id":"p-1"}}}'; fi
 `,
   );
   writeFileSync(

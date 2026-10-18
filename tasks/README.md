@@ -16,7 +16,7 @@ Source-ref paths: `pstack/…` = `/home/olaf/projects/cursor-plugins/pstack/…`
 | [08](08-repro-first-bug-jobs.md) | Repro-first for bug jobs | todo | pstack | 14 |
 | [09](09-feature-map.md) | Feature map as cross-job memory | todo | pstack | 17 |
 | [10](10-playbooks.md) | Playbooks by job type | todo | pstack | 18 |
-| [11](11-worker-prompt-delivery.md) | Reliable worker prompt delivery (wait for ready, verify start, retry) | todo | incident 2026-10-18 | - |
+| [11](11-worker-prompt-delivery.md) | Reliable worker prompt delivery (wait for ready, verify start, retry) | done | incident 2026-10-18 | - |
 | [12](12-tests-leak-watchers.md) | Tests leak `orca watch` processes: kill in teardown, self-exit guard, reaper | todo | incident 2026-10-18 | - |
 | [13](13-readme-clarity.md) | README clarity: how it works and what you can use, with diagram-framework graphs | todo | Limen + Olaf | 20 |
 

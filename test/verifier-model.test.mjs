@@ -20,11 +20,15 @@ function scratch() {
     `#!/bin/sh
 echo "herdr $*" >> "${log}"
 case "$1 $2" in
-  "workspace create") echo '{"result":{"root_pane":{"pane_id":"p-root"}}}';;
+  "workspace create") rm -f "${base}/prompted" "${base}"/seen-*; echo '{"result":{"root_pane":{"pane_id":"p-root"}}}';;
   "pane split") echo '{"result":{"pane":{"pane_id":"p-split"}}}';;
   "agent list") echo '{"result":{"agents":[]}}';;
   "agent get")
-    if [ ! -e "${base}/prompted" ]; then echo '{"error":{"code":"agent_not_found","message":"no"}}'; exit 1; fi
+    if [ ! -e "${base}/prompted" ]; then
+      # The first get is the free-name check (not found); once the agent exists it is idle and ready.
+      if [ ! -e "${base}/seen-$3" ]; then touch "${base}/seen-$3"; echo '{"error":{"code":"agent_not_found","message":"no"}}'; exit 1; fi
+      echo '{"result":{"agent":{"agent_status":"idle","interactive_ready":true,"pane_id":"p-split"}}}'; exit 0
+    fi
     echo '{"result":{"agent":{"agent_status":"working","pane_id":"p-split"}}}';;
   "agent prompt") touch "${base}/prompted"; echo '{"result":{}}';;
   *) echo '{"result":{}}';;

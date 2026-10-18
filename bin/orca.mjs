@@ -867,21 +867,59 @@ function promptSeenInPane(paneText, text) {
   return Boolean(probe) && String(paneText).includes(probe);
 }
 
-// Sends the prompt once. A pasted prompt can sit unsubmitted in the input box (Enter swallowed
-// while Claude ingests the paste), so while the agent is not working press Enter instead of
-// pasting again; re-prompt only when the input box is empty and the prompt never showed up.
-function promptWithRetry(name, text) {
-  const prompted = herdr(["agent", "prompt", name, text], 60000);
-  if (prompted.code !== 0 || prompted.json?.error) herdrFail(prompted, "prompt");
+const READY_WAIT_MS = Number(process.env.ORCA_READY_WAIT_MS) || 120000;
+const PROMPT_ATTEMPTS = Number(process.env.ORCA_PROMPT_ATTEMPTS) || 3;
+const PROMPT_BACKOFF_MS = Number(process.env.ORCA_PROMPT_BACKOFF_MS) || 5000;
+
+function agentInfo(name) {
+  const got = herdr(["agent", "get", name]);
+  return got.json?.result?.agent || {};
+}
+
+// The prompt gate: interactive_ready must be exactly true AND the status exactly idle. A missing
+// key or status, an error, blocked, working or done all mean "not ready".
+function isAgentReady(info) {
+  return Boolean(info) && info.interactive_ready === true && info.agent_status === "idle";
+}
+
+// After the prompt was sent: working means it took. Blocked also counts: the agent received the
+// prompt and waits on a permission dialog, and prompting again into that dialog is harmful.
+// Called only once the prompt is out, so blocked before the prompt is never ready (isAgentReady).
+function isDelivered(status, sawWorking) {
+  return status === "working" || (status === "blocked" && sawWorking !== false);
+}
+
+// Blocks until isAgentReady(info), polling until READY_WAIT_MS; anything else keeps polling.
+function waitAgentReady(name) {
+  const deadline = Date.now() + READY_WAIT_MS;
+  let info = agentInfo(name);
+  for (;;) {
+    if (isAgentReady(info)) return { ready: true };
+    if (Date.now() >= deadline) return { ready: false, status: info.agent_status, interactiveReady: info.interactive_ready };
+    sleep(PROMPT_POLL_MS);
+    info = agentInfo(name);
+  }
+}
+
+// One attempt: send the prompt (or press Enter when a pasted prompt sits unsubmitted in the input
+// box), then wait for the agent to start working. Enter is nudged with backoff while it does not.
+function sendAndWatch(name, text, attempt) {
+  let pane = agentPane(name);
+  const readPane = () => (pane ? herdr(["pane", "read", pane, "--source", "recent"]).text : "");
+  if (attempt > 1 && unsubmittedInput(readPane())) herdr(["agent", "send-keys", name, "Enter"]);
+  else {
+    const prompted = herdr(["agent", "prompt", name, text], 60000);
+    if (prompted.code !== 0 || prompted.json?.error) herdrFail(prompted, "prompt");
+    pane = pane || prompted.json?.result?.agent?.pane_id || "";
+  }
   const deadline = Date.now() + PROMPT_WAIT_MS;
   let nextCheck = Date.now() + 3 * PROMPT_POLL_MS;
   let backoff = 2 * PROMPT_POLL_MS;
-  const pane = agentPane(name) || prompted.json?.result?.agent?.pane_id || "";
   while (Date.now() < deadline) {
-    if (agentStatus(name) === "working") return;
+    const status = agentStatus(name);
+    if (isDelivered(status, true)) return true;
     if (Date.now() >= nextCheck) {
-      const read = pane ? herdr(["pane", "read", pane, "--source", "recent"]) : { text: "" };
-      if (unsubmittedInput(read.text)) {
+      if (unsubmittedInput(readPane())) {
         herdr(["agent", "send-keys", name, "Enter"]);
         backoff = Math.min(backoff * 2, 15000);
       }
@@ -889,15 +927,23 @@ function promptWithRetry(name, text) {
     }
     sleep(PROMPT_POLL_MS);
   }
-  if (agentStatus(name) === "working") return;
-  const read = pane ? herdr(["pane", "read", pane, "--source", "recent"]) : { text: "" };
-  if (unsubmittedInput(read.text)) {
-    herdr(["agent", "send-keys", name, "Enter"]);
-    return;
+  return isDelivered(agentStatus(name), true);
+}
+
+// Delivers a prompt and confirms it took: waits for interactive_ready + idle, sends, and only counts
+// agent_status working as delivered (the text showing up in the pane is not enough). Up to
+// ORCA_PROMPT_ATTEMPTS attempts with backoff. Returns { ok, attempts, reason }; never throws on a
+// missed start, so callers can record delivery: failed before exiting.
+function promptWithRetry(name, text) {
+  const ready = waitAgentReady(name);
+  if (!ready.ready) {
+    return { ok: false, attempts: 0, reason: `delivery failed: agent ${name} not ready after ${Math.round(READY_WAIT_MS / 1000)}s (last status ${ready.status}, interactive_ready ${ready.interactiveReady})` };
   }
-  if (promptSeenInPane(read.text, text) || agentStatus(name) !== "idle") return;
-  const again = herdr(["agent", "prompt", name, text], 60000);
-  if (again.code !== 0 || again.json?.error) herdrFail(again, "prompt retry");
+  for (let attempt = 1; attempt <= PROMPT_ATTEMPTS; attempt++) {
+    if (sendAndWatch(name, text, attempt)) return { ok: true, attempts: attempt };
+    if (attempt < PROMPT_ATTEMPTS) sleep(PROMPT_BACKOFF_MS * attempt);
+  }
+  return { ok: false, attempts: PROMPT_ATTEMPTS, reason: `agent ${name} never started working after ${PROMPT_ATTEMPTS} prompt attempts` };
 }
 
 function ensureJobDir(repo, id) {
@@ -1556,7 +1602,9 @@ async function cmdRun(args) {
     save(repo, job);
     job.agent = startLead(job);
     save(repo, job);
-    promptWithRetry(job.agent, leadPrompt(job));
+    const lead = promptWithRetry(job.agent, leadPrompt(job));
+    job.leadDelivery = lead.ok ? "ok" : "failed";
+    if (!lead.ok) fail(`orchestrator prompt not delivered: ${lead.reason}`);
     job.status = "running";
     job.started = new Date().toISOString();
     save(repo, job);
@@ -1592,6 +1640,56 @@ function workerAlias(job, args, role = "builder") {
   }
   const jobDefault = role === "verifier" ? job.verifierModel || job.workerModel : job.workerModel;
   return assertClaudeModel(flagValue(args, "model") || jobDefault || DEFAULT_WORKER_MODEL, role === "verifier" ? "verifier" : "worker");
+}
+
+function baseName(name) {
+  return String(name).replace(/-\d+$/, "");
+}
+
+// Conversation activity in a pane: an assistant/tool marker line (⏺, ⎿) or any prompt line that
+// holds text (a submitted prompt echo; the live input box is checked separately).
+function paneShowsActivity(paneText) {
+  return String(paneText || "").split(/\r?\n/).some((l) => /^\s*[│|]?\s*(?:[⏺⎿●]|[❯>]\s+[^\s│|])/.test(l));
+}
+
+// A pane is provably unused when orca recorded delivery failed (a missing or ok delivery is never
+// proof), it wrote no results/notes file, and right now (re-issue time) agent get succeeds with
+// status exactly idle and the pane read shows no conversation activity, no prompt echo and an
+// empty input box. A recorded failure alone is not proof: a hand re-delivery makes the agent work.
+// Any doubt (agent get or pane read failing, other status) keeps the pane.
+function provablyUnused(repo, job, worker) {
+  if (worker.delivery !== "failed" || worker.closed || worker.closedUnused || !worker.pane) return false;
+  if (worker.pane === job.pane) return false;
+  if ((job.workers || []).some((w) => w !== worker && w.pane === worker.pane)) return false;
+  const dir = jobDir(repo, job.id);
+  const resultFile = worker.role === "verifier" ? verifierResultPath(repo, job.id) : join(dir, "results", `${worker.name}.json`);
+  if (existsSync(resultFile) || existsSync(join(dir, "notes", `${worker.name}.txt`))) return false;
+  const got = herdr(["agent", "get", worker.name]);
+  const info = got.code === 0 && !got.json?.error ? got.json?.result?.agent : null;
+  if (!info || info.agent_status !== "idle" || info.interactive_ready === false) return false;
+  const read = herdr(["pane", "read", worker.pane, "--source", "recent"]);
+  if (read.code !== 0 || read.json?.error || typeof read.text !== "string") return false;
+  if (paneShowsActivity(read.text) || unsubmittedInput(read.text)) return false;
+  return !promptSeenInPane(read.text, worker.task);
+}
+
+// When a re-issued task got a fresh worker (builder-2), the earlier same-task pane that never
+// started is closed and recorded on the job. A pane that worked or wrote results/notes stays.
+function closeUnusedDuplicates(repo, job, name, requested, task, role) {
+  for (const worker of job.workers || []) {
+    if (worker.name === name || worker.role !== role) continue;
+    if (worker.task !== task && baseName(worker.name) !== baseName(requested)) continue;
+    if (!provablyUnused(repo, job, worker)) continue;
+    const got = herdr(["pane", "close", worker.pane]);
+    if (got.code !== 0 || got.json?.error) {
+      console.error(`warning: could not close unused duplicate pane ${worker.pane} (${worker.name})`);
+      continue;
+    }
+    const at = new Date().toISOString();
+    worker.closed = at;
+    worker.closedUnused = { at, reason: `never started working, no results/notes; replaced by ${name}` };
+    console.log(`closed unused duplicate worker ${worker.name} pane=${worker.pane} (replaced by ${name})`);
+  }
 }
 
 function cmdWorker(args) {
@@ -1649,10 +1747,13 @@ function cmdWorker(args) {
     if (ownPane) herdr(["pane", "close", pane]);
     herdrFail(started, "worker start");
   }
-  promptWithRetry(String(name), role === "verifier" ? verifierPrompt(job, String(name), String(task), alias, round) : workerPrompt(job, String(name), String(task), alias));
+  const prompt = role === "verifier" ? verifierPrompt(job, String(name), String(task), alias, round) : workerPrompt(job, String(name), String(task), alias);
+  const delivered = promptWithRetry(String(name), prompt);
   noteSession(repo, job, `${browserPrefix(job)}-${name}`);
   job.workers = job.workers || [];
   job.workers.push({
+    delivery: delivered.ok ? "ok" : "failed",
+    ...(delivered.ok ? {} : { deliveryReason: delivered.reason }),
     name: String(name),
     pane,
     kind,
@@ -1662,11 +1763,16 @@ function cmdWorker(args) {
     result: role === "verifier" ? verifierResultPath(repo, job.id) : join(jobDir(repo, job.id), "results", `${name}.json`),
     note: join(jobDir(repo, job.id), "notes", `${name}.txt`),
   });
+  if (!delivered.ok) {
+    save(repo, job);
+    fail(`worker ${name} did not start: ${delivered.reason}. Delivery failed; re-issue the task (orca worker ...) instead of waiting for a note.`);
+  }
   if (role === "verifier") {
     const state = verifierState(job);
     const { head, patchId, patchRound, stale, ...rest } = job.verifier || {};
     job.verifier = { ...rest, rounds: round, verdict: null, history: state.history, stall: null };
   }
+  closeUnusedDuplicates(repo, job, String(name), String(requested), String(task), role);
   save(repo, job);
   if (name !== String(requested)) console.log(`name ${requested} was taken, using ${name}`);
   console.log(`${id} worker ${name} pane=${pane} kind=${kind}${alias ? ` model=${alias}` : ""}${role === "verifier" ? ` role=verifier round=${round}` : ""} worktree=${job.worktree}`);
@@ -1700,8 +1806,9 @@ function cmdStatus(args) {
     else if (FINISH_STATUSES.has(job.status) && job.workspace) console.log(`  workspace: ${job.workspace} open until idle ${staleLabel(repo)}`);
     if (job.cleanup) console.log(`  cleaned up: ${job.cleanup.browsers.length} browser(s), ${job.cleanup.servers.length} server(s), ${job.cleanup.panes.length} worker pane(s)`);
     if (job.kind === "claude") console.log(`  models: orchestrator=${job.orchestratorModel || job.model || "-"} worker=${job.workerModel || "-"} verifier=${job.verifierModel || job.workerModel || "-"}`);
-    if (job.agent || job.pane) console.log(`  agent: ${job.agent || "-"} pane=${job.pane || "-"} workspace=${job.workspace || "-"} model=${job.orchestratorModel || job.model || "-"}`);
-    for (const worker of job.workers || []) console.log(`  worker: ${worker.name} pane=${worker.pane} ${worker.model ? `model=${worker.model}` : "kind=pi"}${worker.role === "verifier" ? " role=verifier" : ""}`);
+    if (job.agent || job.pane) console.log(`  agent: ${job.agent || "-"} pane=${job.pane || "-"} workspace=${job.workspace || "-"} model=${job.orchestratorModel || job.model || "-"}${job.leadDelivery === "failed" ? ` delivery=failed${job.stopReason ? ` [${job.stopReason}]` : ""}` : ""}`);
+    for (const worker of job.workers || []) console.log(`  worker: ${worker.name} pane=${worker.pane} ${worker.model ? `model=${worker.model}` : "kind=pi"}${worker.role === "verifier" ? " role=verifier" : ""}${worker.delivery ? ` delivery=${worker.delivery}` : ""}${worker.closedUnused ? ` closed-unused (${worker.closedUnused.reason})` : ""}${worker.delivery === "failed" && worker.deliveryReason ? ` [${worker.deliveryReason}]` : ""}`);
+    for (const steer of (job.steers || []).filter((x) => x?.delivery === "failed")) console.log(`  steer: ${String(steer.message ?? "").slice(0, 200).replace(/[\r\n]+/g, " ")} delivery=failed${steer.deliveryReason ? ` [${steer.deliveryReason}]` : ""}`);
     const summary = summaryOf(repo, job);
     if (summary) console.log(`  summary: ${summary}`);
     if (job.stopReason) console.log(`  stop: ${job.stopReason}`);
@@ -1836,6 +1943,14 @@ function collectDigestFiles(repo, job) {
       }
     }
     files.ok[name] = workerOk(dir, worker, files);
+    // lib/digest.mjs renders only the note text, so delivery state rides in it.
+    if (files.notes[name] == null && worker.closedUnused) files.notes[name] = "closed unused duplicate (never started)";
+    else if (worker.delivery === "failed") {
+      // Only a worker with neither results nor notes provably never ran; otherwise the task was re-delivered by hand.
+      const hasResult = existsSync(join(dir, "results", `${name}.json`));
+      if (files.notes[name] == null && !hasResult) files.notes[name] = "DELIVERY FAILED: prompt never started the agent; re-issue the task";
+      else if (files.notes[name] != null) files.notes[name] += " (delivery retried by hand)";
+    }
   }
   return files;
 }
@@ -1865,8 +1980,14 @@ function cmdSteer(args) {
     fail(`${id} is ${job.status} and its orchestrator pane is gone; not steered`);
   }
   const digest = renderDigest(digestView(job), collectDigestFiles(repo, job));
-  promptWithRetry(job.agent, steerText(digest, message));
+  const sent = promptWithRetry(job.agent, steerText(digest, message));
   const now = new Date().toISOString();
+  if (!sent.ok) {
+    job.steers = job.steers || [];
+    job.steers.push({ at: now, message, delivery: "failed", deliveryReason: sent.reason });
+    save(repo, job);
+    fail(`steer not delivered: ${sent.reason}`);
+  }
   job.steers = job.steers || [];
   job.steers.push({ at: now, message });
   job.steered = now;
