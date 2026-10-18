@@ -52,6 +52,7 @@ const VALUE_FLAGS = new Set([
   "pane",
   "orchestrator-model",
   "worker-model",
+  "verifier-model",
   "model",
   "role",
   "max-rounds",
@@ -201,18 +202,21 @@ function isFullModelName(alias) {
   return /^claude-[a-z0-9]+(?:-[a-z0-9]+)+$/i.test(alias);
 }
 
+// Aliases the installed claude accepts but its --help text does not list.
+const EXTRA_MODEL_ALIASES = ["haiku"];
+
 function assertClaudeModel(raw, role) {
   const alias = String(raw ?? "").trim();
   if (!alias) fail(`need a ${role} model alias`);
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(alias)) fail(`invalid model alias "${alias}"`);
   let spec = claudeModelSpec();
-  const lookup = () => spec.aliases.find((item) => item === alias.toLowerCase());
+  const lookup = () => [...spec.aliases, ...EXTRA_MODEL_ALIASES].find((item) => item === alias.toLowerCase());
   if (!lookup() && spec.cached) spec = claudeModelSpec(true); // an alias the cache lacks may be new
   const known = lookup();
   if (known) return known;
   if (spec.acceptsFullName && isFullModelName(alias)) return alias.toLowerCase();
   const extra = spec.acceptsFullName ? "\na full model name (claude-…) is also accepted" : "";
-  fail(`unknown model alias "${alias}" for ${role}\nknown aliases from claude --help: ${spec.aliases.join(", ")}${extra}`);
+  fail(`unknown model alias "${alias}" for ${role}\nknown aliases from claude --help: ${[...new Set([...spec.aliases, ...EXTRA_MODEL_ALIASES])].join(", ")}${extra}`);
 }
 
 function claudeModels(job, args) {
@@ -226,6 +230,13 @@ function claudeModels(job, args) {
       "worker",
     ),
   };
+}
+
+// Precedence: --verifier-model flag > repo .orca/config.json "verifierModel" > the job's workerModel.
+function resolveVerifierModel(repo, args, workerModel) {
+  const flag = flagValue(args, "verifier-model");
+  const cfg = flag ? "" : readConfig(repo).verifierModel;
+  return assertClaudeModel(flag || (cfg ? String(cfg) : "") || workerModel, "verifier");
 }
 
 function sleep(ms) {
@@ -1242,6 +1253,13 @@ function verifierPrompt(job, name, task, alias, round) {
     `What was built and the acceptance criteria:`,
     String(task).trim(),
     ``,
+    `Evidence standard (a pass needs proof, not a claim):`,
+    `- Test the real user path: run the feature the way a user would (the real command, page or API), not only unit tests or a private helper.`,
+    `- Check side effects (files written, network calls, state changed), not just the exit code.`,
+    `- Suspect the observation method first: when a check fails or looks odd, ask whether the check itself is wrong (wrong URL, stale server, wrong directory, cached output) before blaming or clearing the code.`,
+    `- Save proof under ${join(dir, "results")}/ (screenshots, command output) and name the file in the check notes or failure evidence.`,
+    `- "Inconclusive" or "could not test" is a fail, not a pass. If you cannot show it works, the verdict is fail.`,
+    ``,
     `Run these checks:`,
     `1. orca verify ${job.id} (if orca is not on PATH, run ${ORCA} verify ${job.id}).`,
     `2. The project's own checks: npm test and npm run check, each only when package.json has that script.`,
@@ -1297,6 +1315,7 @@ function orchestratorPrompt(job) {
       : [
           `That uses this job's worker model (${job.workerModel}). Pass --model <alias> only to override one worker.`,
           `Pane command: ${paneCommand(job.workerModel)}`,
+          `The verifier (--role verifier) uses the job's verifier model (${job.verifierModel || job.workerModel}), not the worker model, unless you pass --model.`,
         ]),
     ``,
     `Each worker writes ${dir}/results/<name>.json and a one-line note at ${dir}/notes/<name>.txt,`,
@@ -1352,11 +1371,13 @@ function printDryRun(repo, job) {
   console.log(`port: ${job.port != null ? (job.ports || [job.port]).join(",") : "allocated at run"} (ORCA_PORT in the panes and orca verify scripts; urls and commands in ${VERIFY_FILE} expand \${ORCA_PORT})`);
   console.log(`lead: herdr ${sh(startArgs(name, "<pane>", kind, orchestratorModel))}`);
   if (kind === "claude") {
-    console.log(`models: orchestrator=${orchestratorModel} worker=${workerModel}`);
+    const verifierModel = job.verifierModel || workerModel;
+    console.log(`models: orchestrator=${orchestratorModel} worker=${workerModel} verifier=${verifierModel}`);
     console.log(`pane: ${paneCommand(orchestratorModel)}`);
     console.log(`worker: orca worker --job ${job.id} --name <worker> --task "<task>"`);
     console.log(`worker-pane: ${paneCommand(workerModel)}`);
     console.log(`worker-lead: herdr ${sh(startArgs("<worker>", "<pane>", "claude", workerModel))}`);
+    console.log(`verifier-pane: ${paneCommand(verifierModel)}`);
   } else {
     console.log("role: orchestrator (pi)");
     console.log(`pane: ${paneCommand("")}`);
@@ -1372,10 +1393,12 @@ function printDryRun(repo, job) {
 
 function assignClaudeModels(job, args) {
   if (job.kind !== "claude") {
-    if (args["orchestrator-model"] || args["worker-model"]) fail("--orchestrator-model and --worker-model are only for kind claude");
+    if (args["orchestrator-model"] || args["worker-model"] || args["verifier-model"]) fail("--orchestrator-model, --worker-model and --verifier-model are only for kind claude");
     return;
   }
   const models = claudeModels(job, args);
+  if (args["verifier-model"]) job.verifierModel = resolveVerifierModel(job.repo, args, models.workerModel);
+  else if (!job.verifierModel || job.verifierModel === job.workerModel) job.verifierModel = resolveVerifierModel(job.repo, args, models.workerModel);
   job.orchestratorModel = models.orchestratorModel;
   job.workerModel = models.workerModel;
   job.model = models.orchestratorModel;
@@ -1383,18 +1406,19 @@ function assignClaudeModels(job, args) {
 
 async function cmdNew(args) {
   if ("model" in args) fail("use --worker-model on orca new, not --model");
-  allowFlags(args, ["cwd", "title", "goal", "kind", "orchestrator-model", "worker-model", "keep", "max-rounds"]);
+  allowFlags(args, ["cwd", "title", "goal", "kind", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds"]);
   const title = args.title;
   const goal = args.goal;
   const kind = args.kind || "claude";
   if (!title || !goal) fail("need --title and --goal");
   if (kind !== "pi" && kind !== "claude") fail("kind must be pi or claude");
-  if (kind === "pi" && (args["orchestrator-model"] || args["worker-model"])) {
-    fail("--orchestrator-model and --worker-model are only for kind claude");
+  if (kind === "pi" && (args["orchestrator-model"] || args["worker-model"] || args["verifier-model"])) {
+    fail("--orchestrator-model, --worker-model and --verifier-model are only for kind claude");
   }
   const repo = requireRepo(args.cwd || process.cwd());
   const orchestratorModel = kind === "claude" ? assertClaudeModel(flagValue(args, "orchestrator-model") || DEFAULT_ORCHESTRATOR_MODEL, "orchestrator") : "";
   const workerModel = kind === "claude" ? assertClaudeModel(flagValue(args, "worker-model") || DEFAULT_WORKER_MODEL, "worker") : "";
+  const verifierModel = kind === "claude" ? resolveVerifierModel(repo, args, workerModel) : "";
   const id = slug(title);
   const branch = `orca/${id}`;
   const check = git(repo, ["check-ref-format", "--branch", branch]);
@@ -1419,6 +1443,7 @@ async function cmdNew(args) {
     model: orchestratorModel,
     orchestratorModel,
     workerModel,
+    ...(verifierModel ? { verifierModel } : {}),
     workers: [],
     browserSessions: [],
     keep: Boolean(args.keep),
@@ -1499,7 +1524,7 @@ function startLead(job) {
 
 async function cmdRun(args) {
   if ("model" in args) fail("use --orchestrator-model and --worker-model on orca run, not --model");
-  allowFlags(args, ["cwd", "dry-run", "orchestrator-model", "worker-model", "keep", "max-rounds"]);
+  allowFlags(args, ["cwd", "dry-run", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds"]);
   const id = args._[1];
   if (!id) fail("need id");
   const repo = requireRepo(args.cwd || process.cwd());
@@ -1544,7 +1569,7 @@ async function cmdRun(args) {
     throw err;
   }
   const portNote = job.port != null ? ` port=${job.port}` : "";
-  const extra = (job.kind === "claude" ? ` role=orchestrator model=${job.orchestratorModel} worker=${job.workerModel}` : " role=orchestrator kind=pi") + portNote;
+  const extra = (job.kind === "claude" ? ` role=orchestrator model=${job.orchestratorModel} worker=${job.workerModel} verifier=${job.verifierModel || job.workerModel}` : " role=orchestrator kind=pi") + portNote;
   console.log(`${id} running pane=${job.pane} agent=${job.agent} branch=${job.branch} worktree=${job.worktree}${extra}`);
 }
 
@@ -1555,17 +1580,18 @@ function splitPane(fromPane, cwd, job, worker) {
   return pane;
 }
 
-function workerAlias(job, args) {
+function workerAlias(job, args, role = "builder") {
   if (job.kind === "pi") {
     if ("model" in args) fail("--model is only for kind claude; pi workers have no model flag");
     return "";
   }
-  return assertClaudeModel(flagValue(args, "model") || job.workerModel || DEFAULT_WORKER_MODEL, "worker");
+  const jobDefault = role === "verifier" ? job.verifierModel || job.workerModel : job.workerModel;
+  return assertClaudeModel(flagValue(args, "model") || jobDefault || DEFAULT_WORKER_MODEL, role === "verifier" ? "verifier" : "worker");
 }
 
 function cmdWorker(args) {
   if ("orchestrator-model" in args || "worker-model" in args) {
-    fail("use --model to override a worker; the job default is workerModel");
+    fail("use --model to override a worker; the job default is workerModel (verifierModel for --role verifier)");
   }
   allowFlags(args, ["cwd", "dry-run", "job", "name", "task", "pane", "model", "role"]);
   const id = args.job;
@@ -1580,7 +1606,7 @@ function cmdWorker(args) {
   checkRole(role, String(requested), job);
   const first = freeWorkerName(job, String(requested));
   const round = verifierState(job).rounds + 1;
-  const alias = workerAlias(job, args);
+  const alias = workerAlias(job, args, role);
   const kind = job.kind === "pi" ? "pi" : "claude";
   if (args["dry-run"]) {
     const wt = job.worktree || worktreePath(repo, job.id);
@@ -1664,7 +1690,7 @@ function cmdStatus(args) {
     if (job.workspaceClosed) console.log(`  workspace: closed ${job.workspaceClosed}`);
     else if (FINISH_STATUSES.has(job.status) && job.workspace) console.log(`  workspace: ${job.workspace} open until idle ${staleLabel(repo)}`);
     if (job.cleanup) console.log(`  cleaned up: ${job.cleanup.browsers.length} browser(s), ${job.cleanup.servers.length} server(s), ${job.cleanup.panes.length} worker pane(s)`);
-    if (job.kind === "claude") console.log(`  models: orchestrator=${job.orchestratorModel || job.model || "-"} worker=${job.workerModel || "-"}`);
+    if (job.kind === "claude") console.log(`  models: orchestrator=${job.orchestratorModel || job.model || "-"} worker=${job.workerModel || "-"} verifier=${job.verifierModel || job.workerModel || "-"}`);
     if (job.agent || job.pane) console.log(`  agent: ${job.agent || "-"} pane=${job.pane || "-"} workspace=${job.workspace || "-"} model=${job.orchestratorModel || job.model || "-"}`);
     for (const worker of job.workers || []) console.log(`  worker: ${worker.name} pane=${worker.pane} ${worker.model ? `model=${worker.model}` : "kind=pi"}${worker.role === "verifier" ? " role=verifier" : ""}`);
     const summary = summaryOf(repo, job);
@@ -2722,11 +2748,11 @@ function help() {
 
   orca init [--cwd <repo>]
   orca new --title "..." --goal "..." [--cwd <repo>] [--kind claude|pi] [--keep]
-           [--orchestrator-model <alias>] [--worker-model <alias>] [--max-rounds <N>]
+           [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds <N>]
   orca run <id> [--dry-run] [--cwd <repo>] [--keep]
-           [--orchestrator-model <alias>] [--worker-model <alias>] [--max-rounds <N>]
+           [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds <N>]
   orca worker --job <id> --name <agent> --task "..." [--model <alias>] [--role builder|verifier] [--dry-run]
-           (--model is claude only; pi workers have no model flag)
+           (--model is claude only; pi workers have no model flag; --role verifier defaults to the job's verifierModel)
            (--role verifier needs --name verifier; no round limit unless the job has --max-rounds)
            A name already used by a worker of this job, or by a herdr agent, gets -2, -3... appended and
            the real name is printed. Verifier rounds are verifier, verifier-2, verifier-3... Panes are

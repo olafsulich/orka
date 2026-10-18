@@ -93,9 +93,9 @@ Commands resolve the primary checkout from the current directory, including from
 ```bash
 orca init [--cwd <repo>]
 orca new --title "..." --goal "..." [--cwd <repo>] [--kind claude|pi] [--keep] \
-  [--orchestrator-model <alias>] [--worker-model <alias>] [--max-rounds N]
+  [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds N]
 orca run <id> [--dry-run] [--keep] [--cwd <repo>] \
-  [--orchestrator-model <alias>] [--worker-model <alias>] [--max-rounds N]
+  [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds N]
 orca worker --job <id> --name <agent> --task "..." [--model <alias>] [--dry-run]
 orca worker --job <id> --name verifier --role verifier --task "<built + acceptance criteria>"
 orca status [id] [--cwd <repo>]
@@ -116,6 +116,14 @@ orca help
 `claude` jobs store `orchestratorModel` and `workerModel` on the job file. Defaults are `opus` (Opus 5.5) and `sonnet` (Sonnet 5.5). Those are aliases from `claude --help`, not pinned ids, so they track the latest model of that family. `new` sets them. A real `run` writes any override back onto the job before it starts. `--dry-run` prints the override and does not write it. `orca worker --model` overrides one worker; the job default stays `workerModel`. The lead alias is also stored as `model`, the same value as `orchestratorModel`.
 
 `run` starts `claude --model <orchestratorModel>` in a new Herdr workspace whose cwd is the worktree. The orchestrator is not the implementer. It starts workers with `orca worker`, which splits a pane in that same workspace and runs `claude --model <workerModel>`. Herdr has no `--model` flag; the alias is an agent argument.
+
+### Verifier model
+
+`--verifier-model <alias>` on `new` or `run` stores `job.verifierModel`; `orca worker --role verifier` starts `claude --model <verifierModel>`. Builders keep `workerModel`. `status`, `run --dry-run` and the orchestrator prompt show it. An explicit `orca worker --model` still overrides one worker. Precedence: `orca worker --model` > `--verifier-model` > `"verifierModel"` in `<repo>/.orca/config.json` > `workerModel`. The resolved value is recorded on the job when it is created (or when `run` replaces it).
+
+A cheaper verifier is supported: `--verifier-model haiku` or `--verifier-model claude-haiku-5-5`. It is recommended to trial Haiku on a real job, but it is not the default. The default stays `workerModel` (no change for existing jobs) because Haiku has not yet been shown on a real job to catch failures, and the stricter evidence standard in the verifier prompt does not by itself make a weaker model catch them. To opt in for a repo, set `{"verifierModel": "haiku"}` in `.orca/config.json`.
+
+`haiku` is not listed by `claude --help`, so orca keeps a small extra-alias list (`haiku`) that is merged with the aliases read from `claude --help`. Unknown aliases are still rejected.
 
 An alias is checked against `claude --help` before the job is stored or started. An unknown alias fails and lists the aliases `claude --help` names, when it names any. A full model name (`claude-…`) is accepted when help says a full name is accepted. `opus-5-5` is not an alias.
 
