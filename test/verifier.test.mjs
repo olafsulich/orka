@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, readdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { rmSync as rmScratch } from "node:fs";
 import test from "node:test";
 
 const ORCA = join(import.meta.dirname, "..", "bin", "orca.mjs");
@@ -10,6 +11,7 @@ const ORCA = join(import.meta.dirname, "..", "bin", "orca.mjs");
 // herdr and agent-browser are stubs on PATH; they only append to a log.
 function scratch() {
   const base = mkdtempSync(join(tmpdir(), "orca-verifier-"));
+  process.on("exit", () => rmScratch(base, { recursive: true, force: true }));
   const repo = join(base, "repo");
   const bin = join(base, "bin");
   const home = join(base, "home");
@@ -22,7 +24,7 @@ function scratch() {
     chmodSync(join(bin, name), 0o755);
   }
   execFileSync("git", ["init", "-q"], { cwd: repo });
-  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: home, XDG_RUNTIME_DIR: run, AGENT_BROWSER_SOCKET_DIR: "" };
+  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: home, XDG_RUNTIME_DIR: run, AGENT_BROWSER_SOCKET_DIR: "", ORCA_NO_WATCH: "1" };
   const orca = (args) => spawnSync(process.execPath, [ORCA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...process.env, ...env } });
   orca(["init"]);
   return { repo, orca };

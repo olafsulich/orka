@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { rmSync as rmScratch } from "node:fs";
 import test from "node:test";
 import { renderDigest } from "../lib/digest.mjs";
 
@@ -21,6 +22,7 @@ const TASK = "GOAL: build the delivery feature carefully. SCOPE: bin. ACCEPTANCE
 // prompt time are recorded so tests can prove ordering.
 function scratch(env = {}) {
   const base = mkdtempSync(join(tmpdir(), "orca-delivery-"));
+  process.on("exit", () => rmScratch(base, { recursive: true, force: true }));
   const repo = join(base, "repo");
   const bin = join(base, "bin");
   for (const d of [repo, bin, join(base, "home"), join(base, "run"), join(base, "state")]) mkdirSync(d, { recursive: true });
@@ -61,7 +63,7 @@ esac
   chmodSync(join(bin, "agent-browser"), 0o755);
   execFileSync("git", ["init", "-q"], { cwd: repo });
   const fast = { ORCA_PROMPT_POLL_MS: "10", ORCA_PROMPT_WAIT_MS: "250", ORCA_PROMPT_BACKOFF_MS: "20", ORCA_READY_WAIT_MS: "1500" };
-  const full = { PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ...fast, ...env };
+  const full = { PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORCA_NO_WATCH: "1", ...fast, ...env };
   const orca = (args) => spawnSync(process.execPath, [ORCA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...process.env, ...full } });
   orca(["init"]);
   const t = {

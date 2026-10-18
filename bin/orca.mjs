@@ -1023,6 +1023,7 @@ function portEnvArgs(job) {
 }
 
 function startWatcher(repo, job) {
+  if (process.env.ORCA_NO_WATCH === "1") return;
   if (job.status !== "running" || !job.agent || !job.pane) return;
   try {
     const dir = ensureJobDir(repo, job.id);
@@ -1890,7 +1891,7 @@ function readCapped(path, maxBytes) {
 const SAFE_WORKER = /^[a-z][a-z0-9_-]{0,31}$/;
 
 function workerOk(dir, worker, files) {
-  if (worker.role === "verifier") return files.verifierSkipped == null && files.verifier?.ok === true;
+  if (worker.role === "verifier") return files.verifierSkipped == null && files.verifier?.verdict === "pass";
   const path = join(dir, "results", `${worker.name}.json`);
   if (!existsSync(path)) return false;
   try {
@@ -2750,6 +2751,21 @@ function staleThreshold(repo, flag) {
   return lifecycle.DEFAULT_STALE_MS;
 }
 
+// Kills orphan `orca.mjs watch` processes of this repo. Prints each one.
+function reapWatchers(repo, jobs, dry) {
+  const orphans = watch.selectOrphanWatchers(watch.listWatchers(), { repo, jobs, exists: (p) => Boolean(p) && existsSync(p) });
+  for (const o of orphans) {
+    console.log(`cleanup: ${dry ? "would kill" : "killed"} orphan watcher pid ${o.pid} (${o.jobId}, ${o.why})`);
+    if (dry || process.env.ORCA_FAKE_WATCHERS) continue;
+    try {
+      process.kill(o.pid, "SIGTERM");
+    } catch {
+      // gone already
+    }
+  }
+  return orphans.length;
+}
+
 // Closes the workspace of finished jobs idle longer than the threshold. Browsers
 // first, then workspaces. Returns what it did. quiet: no "nothing to close" line.
 function sweep(repo, { dry = false, thresholdMs, orphans = true, quiet = false } = {}) {
@@ -2776,6 +2792,7 @@ function sweep(repo, { dry = false, thresholdMs, orphans = true, quiet = false }
     const finished = jobs.filter((j) => j.status !== "running" && j.status !== "queued" && !j.keep).map((j) => j.id);
     const procs = browsers.selectReap(browsers.findTaggedBrowsers(), { finishedJobIds: finished });
     count += killBrowserProcs(procs, dry).length;
+    count += reapWatchers(repo, jobs, dry);
   }
   for (const j of workspaces) {
     console.log(`cleanup: ${verb} workspace ${j.workspace} (${j.id}, idle since ${new Date(lifecycle.lastActivity(j) || 0).toISOString()})`);
@@ -2859,6 +2876,8 @@ async function cmdWatch(args) {
         return null;
       }
     },
+    repoExists: () => existsSync(repo),
+    pathExists: (p) => existsSync(p),
     post: async (payload) => {
       const cfg = readFinishConfig(repo);
       if (cfg.off) return log("no finish webhook configured; needs-input not sent");
