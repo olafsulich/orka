@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { rmSync as rmScratch } from "node:fs";
 import test from "node:test";
 import {
   BLOCKING_MAX,
@@ -27,6 +28,7 @@ const ELLIPSIS = "\u2026";
 
 function scratch() {
   const base = mkdtempSync(join(tmpdir(), "orca-digest-"));
+  process.on("exit", () => rmScratch(base, { recursive: true, force: true }));
   const repo = join(base, "repo");
   const bin = join(base, "bin");
   const home = join(base, "home");
@@ -61,7 +63,7 @@ echo '{}'
     PATH: `${bin}:${process.env.PATH}`,
     HOME: home,
     XDG_RUNTIME_DIR: run,
-    AGENT_BROWSER_SOCKET_DIR: "",
+    AGENT_BROWSER_SOCKET_DIR: "", ORCA_NO_WATCH: "1",
     ORCA_PROMPT_WAIT_MS: "1500",
     ORCA_PROMPT_POLL_MS: "100",
   };
@@ -382,4 +384,16 @@ test("a capped digest printed by the CLI ends with the suffix inside 2400", () =
   assert.equal(r.stdout.length, 2400);
   assert.ok(r.stdout.endsWith(suffix));
   assert.ok(r.stdout.startsWith(`Orca digest for ${j.id} (capped snapshot, not the job file).`));
+});
+
+test("digest shows verdict=pass|fail for the verifier, never 'ok not true'", () => {
+  const id = "20260101000000000-v";
+  const job = { id, status: "running", workers: [{ name: "verifier", role: "verifier" }] };
+  const pass = renderDigest(job, { notes: {}, ok: {}, verifier: { verdict: "pass" } });
+  assert.match(pass, /- verifier role=verifier verdict=pass /);
+  assert.doesNotMatch(pass, /ok not true/);
+  const fail = renderDigest(job, { notes: {}, ok: {}, verifier: { verdict: "fail", failures: [] } });
+  assert.match(fail, /verifier role=verifier verdict=fail /);
+  assert.doesNotMatch(fail, /ok not true/);
+  assert.match(renderDigest(job, { notes: {}, ok: {} }), /verifier role=verifier verdict=none /);
 });

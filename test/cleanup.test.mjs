@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { rmSync as rmScratch } from "node:fs";
 import test from "node:test";
 
 const ORCA = join(import.meta.dirname, "..", "bin", "orca.mjs");
@@ -11,6 +12,7 @@ const ORCA = join(import.meta.dirname, "..", "bin", "orca.mjs");
 // herdr and agent-browser are stubs on PATH; they only append to a log.
 function scratch() {
   const base = mkdtempSync(join(tmpdir(), "orca-cleanup-"));
+  process.on("exit", () => rmScratch(base, { recursive: true, force: true }));
   const repo = join(base, "repo");
   const bin = join(base, "bin");
   const home = join(base, "home");
@@ -25,7 +27,7 @@ function scratch() {
   stub("herdr", "echo '{}'");
   stub("agent-browser", `case "$*" in *"session list"*) echo '{"success":true,"data":{"sessions":["$LIVE"]}}';; esac`);
   execFileSync("git", ["init", "-q"], { cwd: repo });
-  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: home, XDG_RUNTIME_DIR: run, AGENT_BROWSER_SOCKET_DIR: "" };
+  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: home, XDG_RUNTIME_DIR: run, AGENT_BROWSER_SOCKET_DIR: "", ORCA_NO_WATCH: "1" };
   const orca = (args) => spawnSync(process.execPath, [ORCA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...process.env, ...env } });
   orca(["init"]);
   const calls = () => readFileSync(log, "utf8").trim().split("\n").filter(Boolean);
@@ -206,4 +208,40 @@ test("cleanup closes a legacy orca-verify session of a finished job", () => {
   const j = makeJob(t, "done");
   writeFileSync(join(t.bin, "agent-browser"), `#!/bin/sh\necho "agent-browser $*" >> "${t.log}"\ncase "$*" in *"session list"*) echo '{"success":true,"data":{"sessions":["orca-verify-${j.id}"]}}';; esac\n`);
   assert.match(t.orca(["cleanup"]).stdout, new RegExp(`closed browser orca-verify-${j.id}`));
+});
+
+// Fake process lists: nothing is really killed (ORCA_FAKE_WATCHERS makes cleanup only report).
+function fakeWatchers(t, list) {
+  const file = join(t.repo, "..", "watchers.json");
+  writeFileSync(file, JSON.stringify(list));
+  return file;
+}
+
+test("cleanup kills orphan watchers (terminal, missing, unrecorded pid) and spares the live recorded one", () => {
+  const t = scratch();
+  const live = makeJob(t, "running", { patch: { watcherPid: 4001 } });
+  const done = makeJob(t, "running");
+  const stale = makeJob(t, "running", { patch: { watcherPid: 4003 } });
+  patchJob(done, "done", { watcherPid: 4002 });
+  const list = [
+    { pid: 4001, jobId: live.id, cwd: t.repo },
+    { pid: 4002, jobId: done.id, cwd: t.repo },
+    { pid: 4004, jobId: "no-such-job", cwd: t.repo },
+    { pid: 4005, jobId: stale.id, cwd: t.repo },
+    { pid: 4006, jobId: "x", cwd: join(t.repo, "..", "home") },
+    { pid: 4007, jobId: "y", cwd: join(t.repo, "..", "deleted-repo") },
+  ];
+  const file = fakeWatchers(t, list);
+  const env = { ORCA_FAKE_WATCHERS: file };
+  const run = (extra) => spawnSync(process.execPath, [ORCA, "cleanup", ...extra, "--cwd", t.repo], { encoding: "utf8", env: { ...process.env, PATH: `${t.bin}:${process.env.PATH}`, XDG_RUNTIME_DIR: t.run, ORCA_NO_WATCH: "1", ...env } });
+  const dry = run(["--dry-run"]);
+  assert.equal(dry.status, 0, dry.stderr);
+  for (const pid of [4002, 4004, 4005, 4007]) assert.match(dry.stdout, new RegExp(`would kill orphan watcher pid ${pid} `));
+  assert.match(dry.stdout, /pid 4002 .*job done/);
+  assert.match(dry.stdout, /pid 4004 .*job missing/);
+  assert.match(dry.stdout, /pid 4005 .*not the recorded watcher/);
+  for (const pid of [4001, 4006]) assert.doesNotMatch(dry.stdout, new RegExp(`pid ${pid} `));
+  const real = run([]);
+  assert.match(real.stdout, /killed orphan watcher pid 4002 /);
+  assert.doesNotMatch(real.stdout, /pid 4001 /);
 });

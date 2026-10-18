@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { rmSync as rmScratch } from "node:fs";
 import test from "node:test";
 
 const ORCA = join(import.meta.dirname, "..", "bin", "orca.mjs");
@@ -23,6 +24,7 @@ function orca(box, args) {
 // herdr is a PATH stub: logs every call, answers agent get / pane read from files in the box.
 function scratch() {
   const base = mkdtempSync(join(tmpdir(), "orca-int-"));
+  process.on("exit", () => rmScratch(base, { recursive: true, force: true }));
   const repo = join(base, "repo");
   const bin = join(base, "bin");
   for (const d of [repo, bin, join(base, "run")]) mkdirSync(d, { recursive: true });
@@ -46,7 +48,7 @@ esac`,
   );
   stub("agent-browser", `case "$*" in *"session list"*) echo '{"success":true,"data":{"sessions":[]}}';; esac`);
   execFileSync("git", ["init", "-q"], { cwd: repo });
-  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "" };
+  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORCA_NO_WATCH: "1" };
   execFileSync(process.execPath, [ORCA, "init", "--cwd", repo], { env: { ...process.env, ...env } });
   return { base, repo, env, calls: () => readFileSync(log, "utf8").trim().split("\n").filter(Boolean), set: (f, v) => writeFileSync(join(base, f), v) };
 }

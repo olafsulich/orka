@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { rmSync as rmScratch } from "node:fs";
 import test from "node:test";
 
 const root = join(import.meta.dirname, "..");
@@ -12,7 +13,7 @@ const ORCA = join(root, "bin", "orca.mjs");
 function orca(repo, args, env = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [ORCA, ...args, "--cwd", repo], {
-      env: { ...process.env, ...env },
+      env: { ...process.env, ORCA_NO_WATCH: "1", ...env },
     });
     let stdout = "";
     let stderr = "";
@@ -32,6 +33,7 @@ function git(repo, args) {
 
 async function scratch() {
   const repo = mkdtempSync(join(tmpdir(), "orca-finish-"));
+  process.on("exit", () => rmScratch(repo, { recursive: true, force: true }));
   git(repo, ["init", "-q"]);
   const init = await orca(repo, ["init"]);
   assert.equal(init.status, 0, init.stderr);
@@ -313,6 +315,7 @@ test("unknown acceptance is not retried unless forced", async () => {
 
 async function piJob(args = []) {
   const repo = mkdtempSync(join(tmpdir(), "orca-pi-"));
+  process.on("exit", () => rmScratch(repo, { recursive: true, force: true }));
   git(repo, ["init", "-q"]);
   assert.equal((await orca(repo, ["init"])).status, 0);
   const created = await orca(repo, ["new", "--kind", "pi", "--title", "pi", "--goal", "do the thing", ...args]);
