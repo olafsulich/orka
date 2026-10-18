@@ -1,6 +1,6 @@
 # 01 · Patch-id guard on verifier verdicts
 
-Status: todo · Source: pstack · Doc: [#1](../research/IMPROVEMENTS-pstack-limen.md#3-combined-ranking)
+Status: done · Source: pstack · Doc: [#1](../research/IMPROVEMENTS-pstack-limen.md#3-combined-ranking)
 
 ## Why
 Builders share one worktree. If anyone edits code after the verifier passed, `orca done` still reports "verified" and the finish webhook repeats it. The CLI should refuse a verdict that no longer describes the code.
@@ -24,3 +24,6 @@ Builders share one worktree. If anyone edits code after the verifier passed, `or
 
 ## Olaf's notes
 - "Yes let's do it."
+
+## Done note
+`codeSnapshot` in bin/orca.mjs has orca compute `head` and `patchId` itself (throwaway index, so dirty-tree and untracked files count; `orca.verify.json` excluded). `computeVerifier` records them on first read of a round's result and marks `stale` when they later differ. `status` shows `verifier: pass (STALE, code changed since round N)`. `done` on a stale pass refuses: non-zero exit, job stays running, no wake or webhook. `--give-up` is unaffected. Results with no patchId behave as before. Decision: refuse, not a `verifier: stale` payload. README documents it. Tests: 6 new in test/verifier.test.mjs; `npm test` 127 pass, 0 fail. Commit: see `git log` on the job branch.

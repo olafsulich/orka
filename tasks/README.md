@@ -6,7 +6,7 @@ Source-ref paths: `pstack/…` = `/home/olaf/projects/cursor-plugins/pstack/…`
 
 | id | title | status | source | doc # |
 |----|-------|--------|--------|-------|
-| [01](01-patch-id-guard.md) | Patch-id guard on verifier verdicts | todo | pstack | 1 |
+| [01](01-patch-id-guard.md) | Patch-id guard on verifier verdicts | done | pstack | 1 |
 | [02](02-verifier-upgrade.md) | Verifier upgrade: evidence standard, own prompt, cheaper model | todo | pstack + Olaf | 2 |
 | [03](03-structured-worker-brief.md) | Structured worker brief | todo | pstack | 3 |
 | [04](04-decision-log.md) | Decision log (`orca log`) | todo | pstack | 6 |

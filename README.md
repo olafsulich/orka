@@ -253,6 +253,8 @@ The job record carries the outcome:
 
 `orca done` records the verdict and history for the latest round. A final `fail` marks the job `failed` (`verifier failed after N rounds: <blocking checks>`); otherwise `done`. With no verifier run, behaviour is unchanged. The finish wake line and `orca status` report `verified by verifier: pass, round 2` (or `verifier: fail, round 3`), and nothing when no verifier ran. The same text is the `verifier` field of the finish wake payload, alongside the `verification` object.
 
+**Patch-id guard.** When orca first reads a round's `results/verifier.json` it records `head` (SHA) and `patchId` on `job.verifier`: `git diff <baseCommit>` of the worktree (dirty tree and untracked files included, `orca.verify.json` excluded) through `git patch-id --stable`. orca computes both itself; a value in the agent's file is ignored. Every later `status`/`done` compares the current patch id with the stored one. If a `pass` no longer matches, `orca status` shows `verifier: pass (STALE, code changed since round N)`, and `orca done` refuses: it prints a message telling the orchestrator to re-run the verifier, exits non-zero, leaves the job running and sends no wake or webhook. `orca done --give-up` is unaffected. A pass with no later edit, and results from before this check (or a job with no `baseCommit`/worktree), behave as before. The baseline is taken when orca first reads the result, so run `orca status` right after the verifier reports.
+
 ## Cleanup
 
 Finished jobs must not pile up stale panes, but you may still want to give feedback to the orchestrator after `orca done`. So cleanup is delayed and split in two.

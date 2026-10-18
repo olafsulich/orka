@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, readdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -370,4 +370,80 @@ test("help drops the 3-round cap and documents max-rounds, strategy, give-up and
   assert.match(out, /--give-up/);
   assert.match(out, /verify <id> \[--base\]/);
   assert.match(out, /"verification"/);
+});
+
+// Patch-id guard: a real worktree repo with a base commit, so orca can fingerprint the code.
+function guardJob(t) {
+  const wt = join(t.repo, "wt");
+  mkdirSync(wt, { recursive: true });
+  const g = (...a) => execFileSync("git", a, { cwd: wt, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+  g("init", "-q");
+  writeFileSync(join(wt, "a.txt"), "one\n");
+  g("add", "-A");
+  g("commit", "-qm", "base");
+  const base = g("rev-parse", "HEAD").trim();
+  const j = makeJob(t, { worktree: wt, baseCommit: base, verifier: { rounds: 1, verdict: null, history: [] } });
+  writeFileSync(join(wt, "a.txt"), "two\n");
+  writeFileSync(join(j.results, "verifier.json"), verdict(1, "pass"));
+  return { ...j, wt };
+}
+
+test("a pass with no later edit is not stale and done reports verified", () => {
+  const t = scratch();
+  const j = guardJob(t);
+  assert.match(t.orca(["status", j.id]).stdout, /verified by verifier: pass, round 1/);
+  const v = j.read().verifier;
+  assert.ok(v.patchId && v.head);
+  assert.equal(v.stale, false);
+  const r = t.orca(["done", j.id, "--keep"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /verified by verifier: pass, round 1/);
+  assert.equal(j.read().status, "done");
+});
+
+for (const [label, edit] of [
+  ["tracked dirty-tree edit", (wt) => writeFileSync(join(wt, "a.txt"), "three\n")],
+  ["untracked file", (wt) => writeFileSync(join(wt, "new.txt"), "x\n")],
+  ["commit", (wt) => { writeFileSync(join(wt, "a.txt"), "four\n"); execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "c"], { cwd: wt }); }],
+]) {
+  test(`pass then ${label} is stale in status and done refuses`, () => {
+    const t = scratch();
+    const j = guardJob(t);
+    t.orca(["status", j.id]);
+    edit(j.wt);
+    const st = t.orca(["status", j.id]);
+    assert.match(st.stdout, /verifier: pass \(STALE, code changed since round 1\)/);
+    assert.doesNotMatch(st.stdout, /verified by verifier/);
+    const r = t.orca(["done", j.id, "--keep"]);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /Re-run the verifier/);
+    assert.doesNotMatch(r.stdout + r.stderr, /verified by verifier: pass/);
+    assert.equal(j.read().status, "running");
+  });
+}
+
+test("a stale pass can still be given up, and reverting the edit clears stale", () => {
+  const t = scratch();
+  const j = guardJob(t);
+  t.orca(["status", j.id]);
+  writeFileSync(join(j.wt, "new.txt"), "x\n");
+  assert.match(t.orca(["status", j.id]).stdout, /STALE/);
+  rmSync(join(j.wt, "new.txt"));
+  assert.doesNotMatch(t.orca(["status", j.id]).stdout, /STALE/);
+  writeFileSync(join(j.wt, "new.txt"), "x\n");
+  const r = t.orca(["done", j.id, "--give-up", "out of time", "--keep"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(j.read().status, "failed");
+});
+
+test("an agent-supplied patchId is ignored and old results without one are not stale", () => {
+  const t = scratch();
+  const j = guardJob(t);
+  writeFileSync(join(j.results, "verifier.json"), JSON.stringify({ round: 1, verdict: "pass", failures: [], patchId: "fake" }));
+  t.orca(["status", j.id]);
+  assert.notEqual(j.read().verifier.patchId, "fake");
+  const t2 = scratch();
+  const j2 = makeJob(t2, { verifier: { rounds: 1, verdict: null, history: [] } });
+  writeFileSync(join(j2.results, "verifier.json"), verdict(1, "pass"));
+  assert.match(t2.orca(["status", j2.id]).stdout, /verified by verifier: pass/);
 });

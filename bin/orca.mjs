@@ -5,8 +5,8 @@
 // if <repo>/.orca/secrets/finish-webhook.env exists. Never a home path.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
@@ -1022,6 +1022,7 @@ function verifierLine(job) {
   const v = job.verifier;
   if (!v || !v.verdict) return "";
   const round = Number(v.rounds) || 0;
+  if (v.verdict === "pass" && v.stale) return `verifier: pass (STALE, code changed since round ${round})`;
   return v.verdict === "pass" ? `verified by verifier: pass, round ${round}` : `verifier: ${v.verdict}, round ${round}`;
 }
 
@@ -1135,6 +1136,30 @@ function stallOf(history, round) {
   return checks.length ? { checks, rounds: [round - 1, round] } : null;
 }
 
+// Head SHA and patch id of the job's code as it is right now: the diff against baseCommit with the
+// dirty tree and untracked files folded in (via a throwaway index), so no real index is touched.
+// orca computes this itself; a value the agent wrote is never used. Null when it cannot be computed.
+function codeSnapshot(job) {
+  const wt = job.worktree;
+  if (!wt || !job.baseCommit || !existsSync(wt)) return null;
+  const head = git(wt, ["rev-parse", "--verify", "--quiet", "HEAD"]);
+  if (head.code !== 0) return null;
+  const tmp = mkdtempSync(join(tmpdir(), "orca-patch-"));
+  try {
+    const env = { ...process.env, GIT_INDEX_FILE: join(tmp, "index") };
+    const run = (args, input) => spawnSync("git", args, { cwd: wt, env, encoding: "utf8", input, maxBuffer: 256 * 1024 * 1024 });
+    if (run(["read-tree", job.baseCommit]).status !== 0) return null;
+    if (run(["add", "-A", "--", ".", `:(exclude)${VERIFY_FILE}`]).status !== 0) return null;
+    const diff = run(["diff", "--cached", "--binary", job.baseCommit, "--", ".", `:(exclude)${VERIFY_FILE}`]);
+    if (diff.status !== 0) return null;
+    const pid = run(["patch-id", "--stable"], diff.stdout);
+    if (pid.status !== 0) return null;
+    return { head: head.out, patchId: pid.stdout.trim().split(/\s+/)[0] || "empty" };
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 // Computes the verifier state with the latest results/verifier.json folded in. Does not save.
 function computeVerifier(repo, job) {
   const state = verifierState(job);
@@ -1155,6 +1180,12 @@ function computeVerifier(repo, job) {
   history.sort((a, b) => a.round - b.round);
   const next = { ...job.verifier, rounds: round, verdict: norm.verdict, history, stall: stallOf(history, round) };
   if (!Array.isArray(next.strategyChanges)) next.strategyChanges = [];
+  // The first time orca reads this round's result it records the code snapshot; later reads compare.
+  const snap = codeSnapshot(job);
+  if (snap) {
+    if (next.patchRound === round && next.patchId) next.stale = snap.patchId !== next.patchId;
+    else Object.assign(next, { head: snap.head, patchId: snap.patchId, patchRound: round, stale: false });
+  }
   return next;
 }
 
@@ -1598,7 +1629,8 @@ function cmdWorker(args) {
   });
   if (role === "verifier") {
     const state = verifierState(job);
-    job.verifier = { ...job.verifier, rounds: round, verdict: null, history: state.history, stall: null };
+    const { head, patchId, patchRound, stale, ...rest } = job.verifier || {};
+    job.verifier = { ...rest, rounds: round, verdict: null, history: state.history, stall: null };
   }
   save(repo, job);
   if (name !== String(requested)) console.log(`name ${requested} was taken, using ${name}`);
@@ -1901,6 +1933,10 @@ async function cmdDone(args) {
     const view = { ...job, verifier: next || job.verifier };
     if (giveUp) view.verifier = { ...(view.verifier || { rounds: 0 }), stopReason: giveUp.trim() };
     const failing = Boolean(giveUp) || view.verifier?.verdict === "fail";
+    if (!giveUp && view.verifier?.verdict === "pass" && view.verifier.stale) {
+      console.log(`dry-run done ${id}: REFUSED, ${verifierLine(view)}; re-run the verifier first`);
+      return;
+    }
     const detail = verificationDetail(repo, view);
     const why = giveUp ? giveUp.trim() : failing ? verifierFailReason(view.verifier.rounds, detail.blocking) : reason;
     console.log(`dry-run done ${id}: running -> ${failing ? "failed" : "done"}`);
@@ -1916,6 +1952,11 @@ async function cmdDone(args) {
     return;
   }
   const verifier = recordVerifier(repo, job);
+  if (!giveUp && verifier?.verdict === "pass" && verifier.stale) {
+    console.error(`orca done: ${id} not marked done. ${verifierLine(job)}; the verifier pass no longer describes the code. Re-run the verifier (orca worker --job ${id} --name ${VERIFIER_NAME} --role verifier --task "..."), then run orca done again. To stop without a verified result: orca done ${id} --give-up "<reason>".`);
+    process.exitCode = 1;
+    return;
+  }
   let failed = verifier?.verdict === "fail";
   let why = failed ? verifierFailReason(verifier.rounds, verificationDetail(repo, job).blocking) : reason;
   if (giveUp) {
