@@ -151,3 +151,38 @@ test("verifier prompt carries the evidence standard", () => {
   assert.match(log, /Save proof under .*results\/ \(screenshots, command output\)/);
   assert.match(log, /"Inconclusive" or "could not test" is a fail, not a pass/);
 });
+
+test("orchestrator prompt requires the structured worker brief", () => {
+  const t = scratch();
+  const id = t.mk().stdout.trim();
+  const r = t.orca(["run", id]);
+  assert.equal(r.status, 0, r.stderr);
+  const log = t.calls();
+  assert.match(log, /GOAL \/ SCOPE \(files it owns\) \/ CONTEXT \(file pointers, not pasted text\) \/ ACCEPTANCE \/ VERIFY \/ TIMEBOX \/ FORBIDDEN \/ REPORT/);
+  assert.match(log, /collapses to GOAL \+ ACCEPTANCE/);
+  assert.match(log, /Build the verifier --task from the builders' ACCEPTANCE lines/);
+});
+
+test("worker prompt footer covers a missing SCOPE or ACCEPTANCE", () => {
+  const t = scratch();
+  const id = t.mk().stdout.trim();
+  running(t, id);
+  const r = t.orca(["worker", "--job", id, "--name", "w1", "--pane", "p-9", "--task", "do it"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(t.calls(), /If SCOPE or ACCEPTANCE is missing from the task above, do the narrowest reading of it and say so in the result/);
+});
+
+test("cmdWorker warns, without failing, when a builder task lacks SCOPE: or ACCEPTANCE:", () => {
+  const t = scratch();
+  const id = t.mk().stdout.trim();
+  running(t, id);
+  const bare = t.orca(["worker", "--job", id, "--name", "w1", "--task", "do it", "--dry-run"]);
+  assert.equal(bare.status, 0, bare.stderr);
+  assert.match(bare.stderr, /warning: worker task has no SCOPE: or ACCEPTANCE:/);
+  const partial = t.orca(["worker", "--job", id, "--name", "w2", "--task", "GOAL: x\nSCOPE: a.js", "--dry-run"]);
+  assert.match(partial.stderr, /no ACCEPTANCE:/);
+  const full = t.orca(["worker", "--job", id, "--name", "w3", "--task", "GOAL: x\nSCOPE: a.js\nACCEPTANCE: y", "--dry-run"]);
+  assert.equal(full.stderr, "");
+  const verifier = t.orca(["worker", "--job", id, "--name", "verifier", "--role", "verifier", "--task", "check", "--dry-run"]);
+  assert.equal(verifier.stderr, "");
+});

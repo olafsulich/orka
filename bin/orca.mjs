@@ -1012,6 +1012,8 @@ function workerPrompt(job, name, task, alias) {
     `If that prompt is rejected because the orchestrator is busy, the files are enough.`,
     `The note and the herdr prompt are one line, at most 200 characters. Do not paste logs, diffs, or the job file. The orchestrator will run orca digest.`,
     ``,
+    `If SCOPE or ACCEPTANCE is missing from the task above, do the narrowest reading of it and say so in the result.`,
+    ``,
     `Never close panes (yours or anyone's, no herdr pane close): orca frees them when the job is done or stopped.`,
     `Finish wake is automatic from the orca CLI when it marks the job done, failed, or stopped. That is not your job. Do not run herdr-finish-watch. Do not run orca stop or orca webhook. Do not start another agent.`,
   ].join("\n");
@@ -1307,6 +1309,8 @@ function orchestratorPrompt(job) {
     `Start each worker with orca, which opens a Herdr pane in this same worktree:`,
     `  orca worker --job ${job.id} --name <worker> --task "<task>"`,
     `If orca is not on PATH, run ${ORCA} instead. The binary is the same file.`,
+    `Write every worker --task as this brief, one labelled section per line: GOAL / SCOPE (files it owns) / CONTEXT (file pointers, not pasted text) / ACCEPTANCE / VERIFY / TIMEBOX / FORBIDDEN / REPORT. Workers cannot ask questions, so a vague task fails quietly.`,
+    `For a one-command task the brief collapses to GOAL + ACCEPTANCE. orca warns when a builder task has no SCOPE: or ACCEPTANCE:.`,
     `Worker names must match [a-z][a-z0-9_-]{0,31}. If a name is already taken (by an earlier worker, even a finished one) orca appends -2, -3... and prints the real name.`,
     `Never close worker or verifier panes (no herdr pane close): finished panes stay open, and orca frees them when the job is done or stopped.`,
     `When a worker or the verifier has finished, run orca reap ${job.id} --worker <name> to close its browsers (its pane stays open).`,
@@ -1325,6 +1329,7 @@ function orchestratorPrompt(job) {
     ``,
     `When every builder has reported, start ONE verifier. It has fresh context and checks the work against the goal. Every round uses the same command; orca names the panes verifier, verifier-2, verifier-3... and each round overwrites ${dir}/results/${VERIFIER_NAME}.json (the previous one is kept as verifier.round-N.json):`,
     `  orca worker --job ${job.id} --name ${VERIFIER_NAME} --role verifier --task "<what was built and the acceptance criteria>"`,
+    `Build the verifier --task from the builders' ACCEPTANCE lines (copy them in, one per builder), plus the job goal.`,
     `The verifier runs orca verify, the project's own checks and targeted agent-browser checks, and may extend ${VERIFY_FILE} only to cover the acceptance criteria.`,
     `It writes ${dir}/results/${VERIFIER_NAME}.json: "verdict" pass or fail, "failures" (blocking: what this job changed, each with its evidence) and "warnings" (pre-existing failures the verifier showed also fail on the base commit; they never block a pass).`,
     `If the verdict is fail, read ${dir}/results/${VERIFIER_NAME}.json and route each blocking failure WITH its evidence to the builder that owns those files (a new or resumed builder worker). Ignore warnings for routing. Wait for their reports, then start the verifier again.`,
@@ -1608,6 +1613,10 @@ function cmdWorker(args) {
   const round = verifierState(job).rounds + 1;
   const alias = workerAlias(job, args, role);
   const kind = job.kind === "pi" ? "pi" : "claude";
+  if (role !== "verifier") {
+    const missing = ["SCOPE", "ACCEPTANCE"].filter((k) => !new RegExp(`${k}:`).test(String(task)));
+    if (missing.length) console.error(`warning: worker task has no ${missing.map((k) => `${k}:`).join(" or ")} (brief template: GOAL / SCOPE / CONTEXT / ACCEPTANCE / VERIFY / TIMEBOX / FORBIDDEN / REPORT); starting anyway`);
+  }
   if (args["dry-run"]) {
     const wt = job.worktree || worktreePath(repo, job.id);
     console.log(`dry-run worker ${first} job=${job.id} kind=${kind}${alias ? ` model=${alias}` : ""} role=${role}${role === "verifier" ? ` round=${round}` : ""}`);
