@@ -1090,6 +1090,15 @@ function startWatcher(repo, job) {
   }
 }
 
+// Appended by the orchestrator to the brief of a research or investigation worker. Deliberately no line or character cap.
+const RESEARCH_REPORT = [
+  `RESEARCH REPORT FORMAT (for your result and note):`,
+  `- Lead with the answer.`,
+  `- Label each claim Observed or Guessed.`,
+  `- For each Observed claim give "Verified: <cmd> -> <real output line>", or "Verified: none".`,
+  `- Cut narration. Stay compact.`,
+].join("\n");
+
 function workerPrompt(job, name, task, alias) {
   const dir = jobDir(job.repo, job.id);
   const result = join(dir, "results", `${name}.json`);
@@ -1414,6 +1423,7 @@ function orchestratorPrompt(job) {
     `If orca is not on PATH, run ${ORCA} instead. The binary is the same file.`,
     `Write every worker --task as this brief, one labelled section per line: GOAL / SCOPE (files it owns) / CONTEXT (file pointers, not pasted text) / ACCEPTANCE / VERIFY / TIMEBOX / FORBIDDEN / REPORT. Workers cannot ask questions, so a vague task fails quietly.`,
     `For a one-command task the brief collapses to GOAL + ACCEPTANCE. orca warns when a builder task has no SCOPE: or ACCEPTANCE:.`,
+    `When a worker's task is research or investigation, append this block verbatim to its --task (after REPORT):\n${RESEARCH_REPORT}`,
     `Worker names must match [a-z][a-z0-9_-]{0,31}. If a name is already taken (by an earlier worker, even a finished one) orca appends -2, -3... and prints the real name.`,
     `Never close worker or verifier panes (no herdr pane close): finished panes stay open, and orca frees them when the job is done or stopped.`,
     `When a worker or the verifier has finished, run orca reap ${job.id} --worker <name> to close its browsers (its pane stays open).`,
