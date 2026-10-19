@@ -1355,6 +1355,8 @@ function verificationOf(repo, job) {
   return out;
 }
 
+const FEATURE_MAP_FILE = "orca.features.md";
+
 function verifierPrompt(job, name, task, alias, round) {
   const dir = jobDir(job.repo, job.id);
   const result = verifierResultPath(job.repo, job.id);
@@ -1379,6 +1381,10 @@ function verifierPrompt(job, name, task, alias, round) {
     `- Suspect the observation method first: when a check fails or looks odd, ask whether the check itself is wrong (wrong URL, stale server, wrong directory, cached output) before blaming or clearing the code.`,
     `- Save proof under ${join(dir, "results")}/ (screenshots, command output) and name the file in the check notes or failure evidence.`,
     `- "Inconclusive" or "could not test" is a fail, not a pass. If you cannot show it works, the verdict is fail.`,
+    ``,
+    `Feature map: before running checks, read ${FEATURE_MAP_FILE} at the worktree root. Per feature it records how to reach it (URL or command), how to drive it, how to prove it works, and when it was last verified (date + commit). Use it to start faster and check consistently.`,
+    `Staleness guard: each entry carries the commit it was last proven at. If that commit is older than HEAD (git rev-parse HEAD) and the feature could be touched by this job, re-prove the entry yourself instead of trusting it.`,
+    `If ${FEATURE_MAP_FILE} is missing, that is fine: create it with one entry per feature you check. On a pass, update the entries you touched (reach, drive, prove, last-verified date and HEAD commit). Editing ${FEATURE_MAP_FILE} is allowed even though you do not edit product code. On a fail, do not mark entries as proven.`,
     ``,
     `Run these checks:`,
     `1. orca verify ${job.id} (if orca is not on PATH, run ${ORCA} verify ${job.id}).`,
@@ -1428,6 +1434,7 @@ function orchestratorPrompt(job) {
     `  orca worker --job ${job.id} --name <worker> --task "<task>"`,
     `If orca is not on PATH, run ${ORCA} instead. The binary is the same file.`,
     `Write every worker --task as this brief, one labelled section per line: GOAL / SCOPE (files it owns) / CONTEXT (file pointers, not pasted text) / ACCEPTANCE / VERIFY / TIMEBOX / FORBIDDEN / REPORT. Workers cannot ask questions, so a vague task fails quietly.`,
+    `When orca.features.md exists at the repo root, point workers at it in CONTEXT.`,
     `For a one-command task the brief collapses to GOAL + ACCEPTANCE. orca warns when a builder task has no SCOPE: or ACCEPTANCE:.`,
     `When a worker's task is research or investigation, append this block verbatim to its --task (after REPORT):\n${RESEARCH_REPORT}`,
     `Worker names must match [a-z][a-z0-9_-]{0,31}. If a name is already taken (by an earlier worker, even a finished one) orca appends -2, -3... and prints the real name.`,

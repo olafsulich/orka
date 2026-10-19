@@ -1,6 +1,6 @@
 # 09 · Feature map as cross-job memory
 
-Status: todo · Source: pstack · Doc: [#17](../research/IMPROVEMENTS-pstack-limen.md#3-combined-ranking)
+Status: done · Source: pstack · Doc: [#17](../research/IMPROVEMENTS-pstack-limen.md#3-combined-ranking)
 
 ## Why
 Every verifier rediscovers how to start, reach and prove each feature of a repo. A small committed map shortens verifier startup and makes checks consistent across jobs. It complements `orca.verify.json`.
@@ -27,3 +27,6 @@ Every verifier rediscovers how to start, reach and prove each feature of a repo.
 
 ## Olaf's notes
 - "Yes."
+
+## Done
+`verifierPrompt` now has the verifier read `orca.features.md` first, re-prove entries whose commit is older than HEAD, create the map when missing, and update touched entries (reach, drive, prove, date + commit) on a pass. The orchestrator prompt got one pointer line for worker CONTEXT. Added `examples/orca.features.md` and `test/feature-map.test.mjs`. `npm test`: 204 pass, 0 fail.
