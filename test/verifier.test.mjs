@@ -186,7 +186,7 @@ test("finish payload adds verifier only when a verifier has a verdict", () => {
   const t = scratch();
   const none = makeJob(t);
   const plain = t.orca(["done", none.id, "--dry-run", "--keep"]).stdout;
-  assert.deepEqual(payloadOf(plain), { job: none.id, status: "done", branch: `orca/${none.id}` });
+  assert.deepEqual(payloadOf(plain), { job: none.id, status: "done", branch: `orca/${none.id}`, playbook: "feature" });
 
   const pass = makeJob(t, { verifier: { rounds: 2, verdict: null, history: [] } });
   writeFileSync(join(pass.results, "verifier.json"), verdict(2, "pass"));
@@ -194,6 +194,7 @@ test("finish payload adds verifier only when a verifier has a verdict", () => {
     job: pass.id,
     status: "done",
     branch: `orca/${pass.id}`,
+    playbook: "feature",
     verifier: "verified by verifier: pass, round 2",
     verification: { verdict: "pass", rounds: 2, strategyChanges: [], blocking: [], warnings: [] },
   });

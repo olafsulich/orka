@@ -15,7 +15,7 @@ Source-ref paths: `pstack/…` = `/home/olaf/projects/cursor-plugins/pstack/…`
 | [07](07-shared-prompt-rules.md) | Small shared prompt rules | done | pstack | 9 |
 | [08](08-repro-first-bug-jobs.md) | Repro-first for bug jobs | done | pstack | 14 |
 | [09](09-feature-map.md) | Feature map as cross-job memory | done | pstack | 17 |
-| [10](10-playbooks.md) | Playbooks by job type | todo | pstack | 18 |
+| [10](10-playbooks.md) | Playbooks by job type | done | pstack | 18 |
 | [11](11-worker-prompt-delivery.md) | Reliable worker prompt delivery (wait for ready, verify start, retry) | done | incident 2026-10-18 | - |
 | [12](12-tests-leak-watchers.md) | Tests leak `orca watch` processes: kill in teardown, self-exit guard, reaper | done | incident 2026-10-18 | - |
 | [13](13-verifier-default-by-job-type.md) | Verifier model default by job type (haiku for CLI, sonnet for UI) | done | Olaf | - |

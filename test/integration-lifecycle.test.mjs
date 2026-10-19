@@ -126,7 +126,7 @@ test("done twice (follow-up round) sends the webhook twice, marked followUp on t
     patch(job.path, { status: "running", workspace: "w-1", pane: "p-lead", agent: "lead" });
     assert.equal((await orca(box, ["done", job.id])).status, 0);
     assert.equal(hits.length, 1);
-    assert.deepEqual(hits[0], { job: job.id, status: "done", branch: `orca/${job.id}` });
+    assert.deepEqual(hits[0], { job: job.id, status: "done", branch: `orca/${job.id}`, playbook: "feature" });
     // done again without a steer is still a no-op
     assert.match((await orca(box, ["done", job.id])).stdout, /already done/);
     assert.equal(hits.length, 1);
@@ -148,7 +148,7 @@ test("done twice (follow-up round) sends the webhook twice, marked followUp on t
     assert.equal(again.status, 0, again.stderr);
     assert.match(again.stdout, /finish webhook: accepted/);
     assert.equal(hits.length, 2);
-    assert.deepEqual(hits[1], { job: job.id, status: "done", branch: `orca/${job.id}`, round: 2, followUp: true });
+    assert.deepEqual(hits[1], { job: job.id, status: "done", branch: `orca/${job.id}`, playbook: "feature", round: 2, followUp: true });
     const record = read(job.record);
     assert.deepEqual(record.rounds.map((r) => [r.round, r.followUp]), [[1, false], [2, true]]);
     assert.deepEqual(record.attempts.map((a) => a.round), [1, 2]);
