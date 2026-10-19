@@ -60,6 +60,7 @@ const VALUE_FLAGS = new Set([
   "give-up",
   "premise",
   "older-than",
+  "orphan-hours",
   "worker",
 ]);
 const BOOL_FLAGS = new Set(["dry-run", "help", "force", "keep", "base", "ui"]);
@@ -255,6 +256,9 @@ function hasBrowserSteps(path) {
   }
 }
 
+const BROWSER_CLOSE_TIMEOUT_MS = 20000;
+const CLEANUP_BUDGET_MS = 120000;
+const ORPHAN_BROWSER_HOURS = 2;
 const UI_GOAL_RE = /agent-browser|\b(ui|browser|visual)\s+(verification|check|checks|test|tests|testing)\b|\b(verify|check|test)\s+(the\s+)?(ui|user interface|user flows?)\b/i;
 
 // A job is ui when --ui is set, a playbook implies it, the checks file has browser steps, or the goal asks for browser/UI verification.
@@ -701,18 +705,25 @@ function legacyVerifySession(job) {
   return `orca-verify-${clean || "job"}`;
 }
 
+// Session names agent-browser keeps state for. Read from its state dir: asking
+// the CLI could start a daemon.
 function browserList() {
-  const r = spawnSync("agent-browser", ["session", "list", "--json"], {
-    encoding: "utf8",
-    timeout: 20000,
-    env: { ...process.env, PATH: pathPrefix() },
-  });
-  try {
-    const names = JSON.parse((r.stdout || "").trim())?.data?.sessions;
-    return Array.isArray(names) ? names.map(String) : [];
-  } catch {
-    return [];
-  }
+  return browsers.stateSessions(browserStateDir());
+}
+
+// Job id of the verify run in this process, so every agent-browser it starts carries ORCA_JOB.
+let verifyJobId = null;
+
+// Env for any agent-browser orca launches: the daemon passes it on to Chrome, so
+// the process is findable by ORCA_JOB / ORCA_WORKER even when it is orphaned.
+function browserEnv(session, jobId = null) {
+  const prefix = /^(orca-[0-9a-f]{8})-(.+)$/.exec(session);
+  const env = { ...process.env, PATH: pathPrefix(), AGENT_BROWSER_SESSION: session };
+  const job = jobId || verifyJobId || process.env.ORCA_JOB;
+  if (job) env.ORCA_JOB = String(job);
+  const worker = process.env.ORCA_WORKER || prefix?.[2];
+  if (worker) env.ORCA_WORKER = worker;
+  return env;
 }
 
 // Sessions agent-browser still lists, plus the ones this job recorded.
@@ -754,13 +765,34 @@ function orphanSessions() {
   return out;
 }
 
-function closeBrowser(session) {
-  const r = spawnSync("agent-browser", ["--session", session, "close"], {
-    encoding: "utf8",
-    timeout: 20000,
-    env: { ...process.env, PATH: pathPrefix(), AGENT_BROWSER_SESSION: session },
-  });
-  return !r.error && (r.status ?? 1) === 0;
+// True when something of this session still runs (daemon or Chrome, found by
+// session name in env/cmdline/process tree), or its pid file names a live process.
+function sessionLive(session, procs = browsers.scanBrowsers()) {
+  return procs.some((p) => p.session === session) || browsers.sessionPidAlive(browserStateDir(), session, pidAlive);
+}
+
+// Closes a session without ever starting a browser: a session with no live
+// daemon or Chrome only has its state files deleted (agent-browser close would
+// launch a fresh daemon + Chrome for it). A live one is closed, then anything of
+// it that survives is killed. force: the caller just used the session, so close
+// it for real even when it cannot be attributed.
+function closeBrowser(session, { jobId = null, force = false, dry = false } = {}) {
+  const procs = browsers.scanBrowsers();
+  const live = force || sessionLive(session, procs);
+  if (dry) return true;
+  let ok = true;
+  if (live) {
+    const r = spawnSync("agent-browser", ["--session", session, "close"], {
+      encoding: "utf8",
+      timeout: BROWSER_CLOSE_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+      env: browserEnv(session, jobId),
+    });
+    ok = !r.error && (r.status ?? 1) === 0;
+    killBrowserProcs(browsers.scanBrowsers().filter((p) => p.session === session), false);
+  }
+  browsers.deleteSessionState(browserStateDir(), session);
+  return ok || !live;
 }
 
 // Frees what a finished job no longer needs, right away: its agent-browser
@@ -777,7 +809,7 @@ function releaseJob(repo, job, opts = {}) {
   const closed = { at: new Date().toISOString(), round: roundOf(job), browsers: [], servers: [], panes: [] };
   for (const s of jobSessions(job)) {
     if (dry) console.log(`cleanup: would close browser ${s}`);
-    else if (closeBrowser(s)) {
+    else if (closeBrowser(s, { jobId: job.id })) {
       console.log(`cleanup: closed browser ${s}`);
       closed.browsers.push(s);
     } else console.log(`cleanup: browser ${s} not closed`);
@@ -1064,14 +1096,22 @@ function jobEnvArgs(job, worker) {
   return ["--env", `ORCA_JOB=${job.id}`, ...(worker ? ["--env", `ORCA_WORKER=${worker}`] : [])];
 }
 
-// Kills the tagged browser processes of one job (or one worker of it).
-function reapBrowsers(job, { worker = null, dry = false } = {}) {
-  const procs = browsers.selectReap(browsers.findTaggedBrowsers(), { jobId: job.id, worker });
+// Kills the browser processes of one job (or of some of its workers): those
+// tagged ORCA_JOB, and untagged ones whose agent-browser session is
+// orca-<sha8>-<worker>.
+function reapBrowsers(job, { worker = null, workers = null, dry = false } = {}) {
+  const procs = browsers.selectReap(browsers.scanBrowsers(), { jobId: job.id, worker, workers, prefix: browserPrefix(job) });
   return killBrowserProcs(procs, dry);
 }
 
 function killBrowserProcs(procs, dry) {
-  for (const p of procs) console.log(`cleanup: ${dry ? "would kill" : "killed"} browser pid ${p.pid} (${p.job}${p.worker ? ` ${p.worker}` : ""}: ${p.cmdline.slice(0, 80)})`);
+  const pids = new Set(procs.map((p) => p.pid));
+  for (const p of procs) {
+    if (pids.has(p.ppid)) continue; // listed under its parent
+    const kids = procs.filter((c) => c.ppid === p.pid).length;
+    const who = [p.job, p.worker].filter(Boolean).join(" ");
+    console.log(`cleanup: ${dry ? "would kill" : "killed"} browser pid ${p.pid} (${who || p.session || "untagged"}: ${p.cmdline.slice(0, 80)})${kids ? ` and ${procs.length - 1} child process(es)` : ""}`);
+  }
   if (!dry && procs.length) {
     try {
       lifecycle.killProcesses(procs.map((p) => p.pid), { graceMs: 3000 });
@@ -1906,7 +1946,10 @@ function cmdWorker(args) {
   if (!job.pane || !job.agent || !job.worktree) fail("orchestrator is not running");
   if (job.status !== "running") fail(`job ${id} is ${job.status}, not running`);
   ensureJobDir(repo, job.id);
-  if (role === "verifier") archiveVerifierResult(repo, job, round - 1);
+  if (role === "verifier") {
+    archiveVerifierResult(repo, job, round - 1);
+    reapPreviousVerifier(job);
+  }
   const ownPane = !args.pane;
   const pane = args.pane ? String(args.pane) : splitPane(job.pane, job.worktree, job, first);
   let name = first;
@@ -1954,6 +1997,18 @@ function cmdWorker(args) {
   save(repo, job);
   if (name !== String(requested)) console.log(`name ${requested} was taken, using ${name}`);
   console.log(`${id} worker ${name} pane=${pane} kind=${kind}${alias ? ` model=${alias}` : ""}${role === "verifier" ? ` role=verifier round=${round}` : ""} worktree=${job.worktree}`);
+}
+
+// A new verifier round starts clean: the previous verifier's sessions are closed
+// and any Chrome left from them (tagged or by session name) is killed.
+function reapPreviousVerifier(job) {
+  const prefix = browserPrefix(job);
+  const names = [...new Set([...(job.workers || []).filter((w) => w.role === "verifier").map((w) => w.name), "verify", "verify-base"])];
+  for (const n of names) {
+    const s = `${prefix}-${n}`;
+    if (closeBrowser(s, { jobId: job.id })) console.log(`cleanup: closed previous verifier browser ${s}`);
+  }
+  reapBrowsers(job, { workers: names });
 }
 
 function summaryOf(repo, job) {
@@ -2608,7 +2663,8 @@ function browser(session, args, cwd) {
     cwd,
     encoding: "utf8",
     timeout: VERIFY_STEP_TIMEOUT_MS,
-    env: { ...process.env, PATH: pathPrefix(), AGENT_BROWSER_SESSION: session },
+    killSignal: "SIGKILL",
+    env: browserEnv(session),
   });
   if (r.error && r.error.code === "ENOENT") fail("agent-browser is not on PATH");
   if (r.error && r.error.code === "ETIMEDOUT") fail(`timed out after ${VERIFY_STEP_TIMEOUT_MS}ms: agent-browser ${args.join(" ")}`);
@@ -2687,14 +2743,11 @@ function runPlans(session, plans, cwd, logPath) {
   });
 }
 
-function closeSession(session, cwd) {
+// started: this run used the session, so close it for real. Otherwise (a reset
+// before the run) a session with nothing alive is only cleaned, never launched.
+function closeSession(session, cwd, { started = false } = {}) {
   try {
-    spawnSync("agent-browser", ["--session", session, "close"], {
-      cwd,
-      encoding: "utf8",
-      timeout: 20000,
-      env: { ...process.env, PATH: pathPrefix(), AGENT_BROWSER_SESSION: session },
-    });
+    closeBrowser(session, { force: started });
   } catch {
     // a missing browser should not hide the verify result
   }
@@ -2730,6 +2783,7 @@ function runScript(path, cwd, session, logPath, job) {
       PATH: pathPrefix(),
       AGENT_BROWSER_SESSION: session,
       ORCA_JOB: job.id,
+      ORCA_WORKER: process.env.ORCA_WORKER || session.replace(/^orca-[0-9a-f]{8}-/, ""),
       ORCA_REPO: job.repo,
       ORCA_WORKTREE: job.worktree,
       ORCA_BRANCH: job.branch || "",
@@ -2828,6 +2882,7 @@ function cmdVerifyBase(repo, job, args) {
   const added = git(repo, ["worktree", "add", "--detach", tmp, base]);
   if (added.code !== 0) fail(added.err || added.out || "git worktree add failed");
   const session = `${verifySession(job)}-base`;
+  verifyJobId = job.id;
   const logPath = join(ensureJobDir(repo, id), "verify-base.log");
   writeFileSync(logPath, `verify --base ${id}\nbase ${base}\nfile ${checks.path}\n`);
   const steps = [];
@@ -2863,7 +2918,7 @@ function cmdVerifyBase(repo, job, args) {
       steps.push({ index: 1, name: rel, outcome });
     }
   } finally {
-    closeSession(session, tmp);
+    closeSession(session, tmp, { started: true });
     git(repo, ["worktree", "remove", "--force", tmp]);
     rmSync(tmp, { recursive: true, force: true });
     git(repo, ["worktree", "prune"]);
@@ -2915,6 +2970,7 @@ function cmdVerify(args) {
     return;
   }
   const session = verifySession(job);
+  verifyJobId = job.id;
   noteSession(repo, job, session);
   const logPath = join(ensureJobDir(repo, id), "verify.log");
   const file = relTo(job.worktree, checks.path);
@@ -2955,7 +3011,7 @@ function cmdVerify(args) {
     }
     fail(`verify failed ${id}: ${withLog}`);
   } finally {
-    if (started) closeSession(session, job.worktree);
+    if (started) closeSession(session, job.worktree, { started: true });
   }
 }
 
@@ -2988,7 +3044,7 @@ function reapWatchers(repo, jobs, dry) {
 
 // Closes the workspace of finished jobs idle longer than the threshold. Browsers
 // first, then workspaces. Returns what it did. quiet: no "nothing to close" line.
-function sweep(repo, { dry = false, thresholdMs, orphans = true, quiet = false } = {}) {
+function sweep(repo, { dry = false, thresholdMs, orphans = true, quiet = false, orphanMinAgeMs = ORPHAN_BROWSER_HOURS * 3600000 } = {}) {
   const verb = dry ? "would close" : "closed";
   const jobs = loadAllJobs(repo);
   const live = jobs.filter((j) => j.status === "running");
@@ -3002,16 +3058,34 @@ function sweep(repo, { dry = false, thresholdMs, orphans = true, quiet = false }
       if (owner && !live.includes(owner) && !owner.keep) names.add(s);
     }
     for (const s of orphanSessions()) names.add(s);
+    const deadline = Date.now() + CLEANUP_BUDGET_MS;
     for (const s of names) {
+      if (Date.now() > deadline) {
+        console.log(`cleanup: time budget spent, skipping browser ${s}`);
+        continue;
+      }
       if (dry || closeBrowser(s)) {
         console.log(`cleanup: ${verb} browser ${s}`);
         count++;
       }
     }
-    // Leftover browser processes of this repo's finished jobs (tagged ORCA_JOB).
-    const finished = jobs.filter((j) => j.status !== "running" && j.status !== "queued" && !j.keep).map((j) => j.id);
-    const procs = browsers.selectReap(browsers.findTaggedBrowsers(), { finishedJobIds: finished });
+    // Leftover browser processes of this repo's finished jobs (tagged ORCA_JOB,
+    // or named by session), then orphan agent-browser Chrome nobody owns.
+    const finished = jobs.filter((j) => j.status !== "running" && j.status !== "queued" && !j.keep);
+    const scan = browsers.scanBrowsers();
+    const doomed = new Set();
+    const procs = [
+      ...browsers.selectReap(scan, { finishedJobIds: finished.map((j) => j.id) }),
+      ...finished.flatMap((j) => browsers.selectReap(scan, { prefix: browserPrefix(j) })),
+    ].filter((p) => !doomed.has(p.pid) && doomed.add(p.pid));
     count += killBrowserProcs(procs, dry).length;
+    const orphanProcs = browsers.selectOrphans(scan.filter((p) => !doomed.has(p.pid)), {
+      minAgeMs: orphanMinAgeMs,
+      liveJobIds: live.map((j) => j.id),
+      livePrefixes: live.map(browserPrefix),
+    });
+    if (orphanProcs.length) console.log(`cleanup: ${orphanProcs.filter((p) => p.chromeRoot).length} orphan agent-browser Chrome root(s) older than ${orphanMinAgeMs / 3600000}h, no running job`);
+    count += killBrowserProcs(orphanProcs, dry).length;
     count += reapWatchers(repo, jobs, dry);
   }
   for (const j of workspaces) {
@@ -3057,15 +3131,21 @@ function cmdReap(args) {
   const worker = args.worker ? String(args.worker) : null;
   const dry = Boolean(args["dry-run"]);
   const sessions = jobSessions(job).filter((s) => !worker || s === `${browserPrefix(job)}-${worker}`);
-  for (const s of sessions) if (dry || closeBrowser(s)) console.log(`cleanup: ${dry ? "would close" : "closed"} browser ${s}`);
+  for (const s of sessions) if (dry || closeBrowser(s, { jobId: job.id })) console.log(`cleanup: ${dry ? "would close" : "closed"} browser ${s}`);
   const pids = reapBrowsers(job, { worker, dry });
   if (!pids.length) console.log("reap: no browser processes left");
 }
 
 function cmdCleanup(args) {
-  allowFlags(args, ["cwd", "dry-run", "older-than"]);
+  allowFlags(args, ["cwd", "dry-run", "older-than", "orphan-hours"]);
   const repo = requireRepo(args.cwd || process.cwd());
-  sweep(repo, { dry: Boolean(args["dry-run"]), thresholdMs: staleThreshold(repo, args["older-than"]) });
+  let orphanMinAgeMs = (Number(process.env.ORCA_ORPHAN_BROWSER_HOURS) || ORPHAN_BROWSER_HOURS) * 3600000;
+  if (args["orphan-hours"] !== undefined) {
+    const hours = Number(args["orphan-hours"]);
+    if (!Number.isFinite(hours) || hours < 0) fail("--orphan-hours needs a number of hours, such as 2");
+    orphanMinAgeMs = hours * 3600000;
+  }
+  sweep(repo, { dry: Boolean(args["dry-run"]), thresholdMs: staleThreshold(repo, args["older-than"]), orphanMinAgeMs });
 }
 
 // Hidden: runs detached from orca run. Posts needs-input to the finish webhook until the job is terminal.
@@ -3133,7 +3213,7 @@ function help() {
   orca strategy <id> [--premise "<shared premise>"] "<what changed>"
   orca log <id> <phase> <decision> <why> <evidence> <result>   (appends a row to .orca/jobs/<id>/decisions.tsv)
   orca done <id> [reason] [--give-up "<reason>"] [--dry-run] [--keep] [--cwd <repo>]
-  orca cleanup [--dry-run] [--older-than <12h>] [--cwd <repo>]
+  orca cleanup [--dry-run] [--older-than <12h>] [--orphan-hours <2>] [--cwd <repo>]
   orca reap <id> [--worker <name>] [--dry-run] [--cwd <repo>]   (closes browsers only; panes stay)
   orca watch <id> [--dry-run] [--cwd <repo>]   (started by orca run; not for hand use)
   orca webhook <id> [--dry-run] [--force] [--cwd <repo>]
@@ -3227,6 +3307,9 @@ cleanup (delayed, not close-everything)
   stopped) and idle longer than the threshold (default 12h; or "staleAfter": "<duration>" in .orca/config.json).
   Idle is measured from the latest of finished, steer, verifier and follow-up round times. A job is only closed once.
   It also closes orca- browser sessions of jobs that are not running and agent-browser sessions whose pid file names a dead process.
+  Closing a session never launches a browser: a session with no live daemon or Chrome only has its state deleted.
+  Browsers are found by ORCA_JOB tag and by session name (AGENT_BROWSER_SESSION / --session in the process tree).
+  It also kills orphan agent-browser-chrome-* roots (parent init, older than --orphan-hours, default 2, owned by no running job).
   The same stale sweep runs quietly at the start of orca new and orca run (stderr, one line, only if it closed something).
   No cron, no polling. --keep on new, run, done or stop opts out of everything. --dry-run lists "would close" lines.
 
