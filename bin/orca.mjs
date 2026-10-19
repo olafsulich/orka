@@ -57,6 +57,7 @@ const VALUE_FLAGS = new Set([
   "role",
   "max-rounds",
   "give-up",
+  "premise",
   "older-than",
   "worker",
 ]);
@@ -1436,8 +1437,9 @@ function orchestratorPrompt(job) {
     `It writes ${dir}/results/${VERIFIER_NAME}.json: "verdict" pass or fail, "failures" (blocking: what this job changed, each with its evidence) and "warnings" (pre-existing failures the verifier showed also fail on the base commit; they never block a pass).`,
     `If the verdict is fail, read ${dir}/results/${VERIFIER_NAME}.json and route each blocking failure WITH its evidence to the builder that owns those files (a new or resumed builder worker). Ignore warnings for routing. Wait for their reports, then start the verifier again.`,
     `Run orca status ${job.id} after each verifier round. If it reports a stall (the same check failing two rounds in a row), do NOT repeat the same instruction.`,
+    `Before changing strategy, attack the premise: write in one sentence the premise the failed fixes share, list what else could explain the failure (a census), and pick the strategy that drops that premise.`,
     `Change strategy instead: rewrite the worker prompt using the verifier's evidence verbatim, split the work differently, start a fresh worker instead of resuming one, or take a different approach.`,
-    `Record the change with: orca strategy ${job.id} "<what you changed>", then re-verify.`,
+    `Record the change with: orca strategy ${job.id} --premise "<the shared premise you dropped>" "<what you changed>", then re-verify.`,
     `Log every split, routing and strategy decision so it survives compaction: orca log ${job.id} <phase> "<decision>" "<why>" "<evidence>" "<result>" (phase: split, routing or strategy). orca strategy logs its own row.`,
     job.maxRounds
       ? `There is a round ceiling of ${job.maxRounds} verifier rounds (--max-rounds). orca refuses a round beyond it; say so in the summary and run orca done.`
@@ -1913,9 +1915,9 @@ function printVerifierDetail(job) {
   if (last?.failing?.length) console.log(`  last failing: ${last.failing.join(", ")}`);
   if (last?.warnings?.length) console.log(`  warnings (non-blocking): ${last.warnings.join(", ")}`);
   if (v.stall) {
-    console.log(`  stall: ${v.stall.checks.join(", ")} failed in rounds ${v.stall.rounds[0]} and ${v.stall.rounds[1]}; change strategy, then run orca strategy ${job.id} "<what changed>"`);
+    console.log(`  stall: ${v.stall.checks.join(", ")} failed in rounds ${v.stall.rounds[0]} and ${v.stall.rounds[1]}; change strategy, then run orca strategy ${job.id} --premise "<shared premise>" "<what changed>"`);
   }
-  for (const c of v.strategyChanges || []) console.log(`  strategy change (round ${c.round}): ${c.change}`);
+  for (const c of v.strategyChanges || []) console.log(`  strategy change (round ${c.round}): ${c.premise ? `premise: ${c.premise} | change: ` : ""}${c.change}`);
   if (v.stopReason) console.log(`  verifier stop: ${v.stopReason}`);
 }
 
@@ -1957,18 +1959,19 @@ function cmdLog(args) {
 }
 
 function cmdStrategy(args) {
-  allowFlags(args, ["cwd"]);
+  allowFlags(args, ["cwd", "premise"]);
   const id = args._[1];
+  const premise = "premise" in args ? flagValue(args, "premise") : "";
   const change = args._.slice(2).join(" ").trim();
   if (!id || !change) fail('need id and what changed: orca strategy <id> "<what changed>"');
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, id);
   const v = job.verifier || {};
   const list = Array.isArray(v.strategyChanges) ? v.strategyChanges.slice() : [];
-  list.push({ round: Number(v.rounds) || 0, change, at: new Date().toISOString() });
+  list.push({ round: Number(v.rounds) || 0, change, ...(premise ? { premise } : {}), at: new Date().toISOString() });
   job.verifier = { rounds: Number(v.rounds) || 0, verdict: v.verdict ?? null, history: Array.isArray(v.history) ? v.history : [], ...v, strategyChanges: list };
   save(repo, job);
-  appendDecision(repo, id, ["strategy", change, "", "", ""]);
+  appendDecision(repo, id, ["strategy", premise ? `premise: ${premise} | change: ${change}` : change, "", "", ""]);
   console.log(`strategy change ${list.length} recorded for ${id}`);
 }
 
@@ -3021,7 +3024,7 @@ function help() {
   orca digest <id> [--cwd <repo>]
   orca steer <id> "message"   (also on a finished job whose orchestrator pane is still open: starts a follow-up round)
   orca stop <id> [reason] [--dry-run] [--keep]
-  orca strategy <id> "<what changed>"
+  orca strategy <id> [--premise "<shared premise>"] "<what changed>"
   orca log <id> <phase> <decision> <why> <evidence> <result>   (appends a row to .orca/jobs/<id>/decisions.tsv)
   orca done <id> [reason] [--give-up "<reason>"] [--dry-run] [--keep] [--cwd <repo>]
   orca cleanup [--dry-run] [--older-than <12h>] [--cwd <repo>]
