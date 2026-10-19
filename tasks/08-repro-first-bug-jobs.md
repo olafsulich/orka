@@ -1,6 +1,6 @@
 # 08 · Repro-first for bug jobs
 
-Status: todo · Source: pstack · Doc: [#14](../research/IMPROVEMENTS-pstack-limen.md#3-combined-ranking)
+Status: done · Source: pstack · Doc: [#14](../research/IMPROVEMENTS-pstack-limen.md#3-combined-ranking)
 
 ## Why
 A check that never failed proves nothing. For bug-fix jobs, the bug should be reproduced and recorded failing before the fix. The verifier then confirms the same reproduction now passes.
@@ -23,3 +23,6 @@ A check that never failed proves nothing. For bug-fix jobs, the bug should be re
 
 ## Olaf's notes
 - "OK." Best done after or together with 10 (playbooks).
+
+## Done
+Added opt-in `orca new|run --playbook feature|bug-fix` (stored as `job.playbook`, default feature, invalid value fails listing the valid ones). With bug-fix, `orchestratorPrompt` requires a repro worker first that saves failing evidence to `results/repro.json` (ideally a failing test committed before the fix) and no fix worker before it exists; `verifierPrompt` re-runs the repro, which must now pass, and a missing or irreproducible repro is a blocking failure. Feature prompts are unchanged byte for byte. New `test/repro-first.test.mjs` (6 tests); `npm test`: 210 pass, 0 fail.

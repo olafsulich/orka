@@ -13,7 +13,7 @@ Source-ref paths: `pstack/…` = `/home/olaf/projects/cursor-plugins/pstack/…`
 | [05](05-attack-the-premise.md) | Attack the premise at a stall | done | pstack | 8 |
 | [06](06-compact-research-summary.md) | Compact research summary prompt (no hard cap) | done | Limen (modified) | 7 |
 | [07](07-shared-prompt-rules.md) | Small shared prompt rules | done | pstack | 9 |
-| [08](08-repro-first-bug-jobs.md) | Repro-first for bug jobs | todo | pstack | 14 |
+| [08](08-repro-first-bug-jobs.md) | Repro-first for bug jobs | done | pstack | 14 |
 | [09](09-feature-map.md) | Feature map as cross-job memory | done | pstack | 17 |
 | [10](10-playbooks.md) | Playbooks by job type | todo | pstack | 18 |
 | [11](11-worker-prompt-delivery.md) | Reliable worker prompt delivery (wait for ready, verify start, retry) | done | incident 2026-10-18 | - |

@@ -56,6 +56,7 @@ const VALUE_FLAGS = new Set([
   "model",
   "role",
   "max-rounds",
+  "playbook",
   "give-up",
   "premise",
   "older-than",
@@ -1357,6 +1358,26 @@ function verificationOf(repo, job) {
 
 const FEATURE_MAP_FILE = "orca.features.md";
 
+const PLAYBOOKS = ["feature", "bug-fix"];
+const REPRO_FILE = "results/repro.json";
+
+function parsePlaybook(args) {
+  if (!("playbook" in args)) return "";
+  const value = flagValue(args, "playbook");
+  if (!PLAYBOOKS.includes(value)) fail(`--playbook must be one of: ${PLAYBOOKS.join(", ")}`);
+  return value;
+}
+
+// Bug-fix jobs only: the bug is reproduced and recorded failing before any fix starts.
+const REPRO_ORCHESTRATOR_LINES = (dir) => [
+  `Playbook bug-fix (repro first): the FIRST worker must be a repro worker. It reproduces the bug and saves the failing evidence to ${dir}/${REPRO_FILE} as JSON: the command or steps, plus the real failing output. Ideally it also adds a failing test and commits it before the fix.`,
+  `No fix worker starts before ${REPRO_FILE} exists. Include the repro command in the fix worker task and in the verifier --task.`,
+];
+const REPRO_VERIFIER_LINES = (dir) => [
+  `Playbook bug-fix (repro first): re-run the repro from ${dir}/${REPRO_FILE}; it must now pass.`,
+  `A missing ${REPRO_FILE}, or a repro you cannot reproduce or re-run, is a blocking failure (check name "repro"). Never pass it silently.`,
+];
+
 function verifierPrompt(job, name, task, alias, round) {
   const dir = jobDir(job.repo, job.id);
   const result = verifierResultPath(job.repo, job.id);
@@ -1375,6 +1396,7 @@ function verifierPrompt(job, name, task, alias, round) {
     `What was built and the acceptance criteria:`,
     String(task).trim(),
     ``,
+    ...(job.playbook === "bug-fix" ? [...REPRO_VERIFIER_LINES(dir), ``] : []),
     `Evidence standard (a pass needs proof, not a claim):`,
     `- Test the real user path: run the feature the way a user would (the real command, page or API), not only unit tests or a private helper.`,
     `- Check side effects (files written, network calls, state changed), not just the exit code.`,
@@ -1435,6 +1457,7 @@ function orchestratorPrompt(job) {
     `If orca is not on PATH, run ${ORCA} instead. The binary is the same file.`,
     `Write every worker --task as this brief, one labelled section per line: GOAL / SCOPE (files it owns) / CONTEXT (file pointers, not pasted text) / ACCEPTANCE / VERIFY / TIMEBOX / FORBIDDEN / REPORT. Workers cannot ask questions, so a vague task fails quietly.`,
     `When orca.features.md exists at the repo root, point workers at it in CONTEXT.`,
+    ...(job.playbook === "bug-fix" ? REPRO_ORCHESTRATOR_LINES(dir) : []),
     `For a one-command task the brief collapses to GOAL + ACCEPTANCE. orca warns when a builder task has no SCOPE: or ACCEPTANCE:.`,
     `When a worker's task is research or investigation, append this block verbatim to its --task (after REPORT):\n${RESEARCH_REPORT}`,
     `Worker names must match [a-z][a-z0-9_-]{0,31}. If a name is already taken (by an earlier worker, even a finished one) orca appends -2, -3... and prints the real name.`,
@@ -1549,7 +1572,7 @@ function assignClaudeModels(job, args) {
 
 async function cmdNew(args) {
   if ("model" in args) fail("use --worker-model on orca new, not --model");
-  allowFlags(args, ["cwd", "title", "goal", "kind", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds", "ui"]);
+  allowFlags(args, ["cwd", "title", "goal", "kind", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds", "ui", "playbook"]);
   const title = args.title;
   const goal = args.goal;
   const kind = args.kind || "claude";
@@ -1571,6 +1594,7 @@ async function cmdNew(args) {
   if (check.code !== 0) fail(`refused branch name ${branch}`);
   if (existsSync(jobPath(repo, id))) fail(`job ${id} already exists`);
   const maxRounds = parseMaxRounds(args);
+  const playbook = parsePlaybook(args) || "feature";
   const job = {
     v: 1,
     id,
@@ -1590,6 +1614,7 @@ async function cmdNew(args) {
     orchestratorModel,
     workerModel,
     ...(verifierModel ? { verifierModel, verifierSource: verifier.source } : {}),
+    playbook,
     jobType: detected.jobType,
     ...(detected.reason ? { jobTypeReason: detected.reason } : {}),
     workers: [],
@@ -1672,13 +1697,15 @@ function startLead(job) {
 
 async function cmdRun(args) {
   if ("model" in args) fail("use --orchestrator-model and --worker-model on orca run, not --model");
-  allowFlags(args, ["cwd", "dry-run", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds", "ui"]);
+  allowFlags(args, ["cwd", "dry-run", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds", "ui", "playbook"]);
   const id = args._[1];
   if (!id) fail("need id");
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, id);
   if (job.status !== "queued") fail(`job ${id} is ${job.status}, not queued`);
   assignClaudeModels(job, args);
+  const playbook = parsePlaybook(args);
+  if (playbook) job.playbook = playbook;
   if (!args["dry-run"]) sweepQuietly(repo);
   if (!args["dry-run"] || job.port == null) await assignPorts(repo, job);
   if (args.keep) job.keep = true;
