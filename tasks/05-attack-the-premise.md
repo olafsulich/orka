@@ -1,6 +1,6 @@
 # 05 · Attack the premise at a stall
 
-Status: todo · Source: pstack · Doc: [#8](../research/IMPROVEMENTS-pstack-limen.md#3-combined-ranking)
+Status: done · Source: pstack · Doc: [#8](../research/IMPROVEMENTS-pstack-limen.md#3-combined-ranking)
 
 ## Why
 When a stall is flagged (the same check fails two rounds in a row, `stallOf`, bin/orca.mjs:1129), the prompt lists tactics to try. It never says "question the assumption all the failed fixes share".
@@ -23,3 +23,6 @@ When a stall is flagged (the same check fails two rounds in a row, `stallOf`, bi
 
 ## Olaf's notes
 - "Sounds good."
+
+## Done
+Stall paragraph of `orchestratorPrompt` now requires the shared premise (one sentence), a census of other explanations, and a strategy that drops the premise; prompt tells the orchestrator to pass `--premise`. `orca strategy` takes optional `--premise`, stored on the strategy change, rendered `premise: … | change: …` in `orca status`, and written into the decision-log row. New `test/attack-premise.test.mjs` (3 tests); `npm test`: 192 pass, 0 fail.
