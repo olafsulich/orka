@@ -9,7 +9,7 @@ Source-ref paths: `pstack/…` = `/home/olaf/projects/cursor-plugins/pstack/…`
 | [01](01-patch-id-guard.md) | Patch-id guard on verifier verdicts | done | pstack | 1 |
 | [02](02-verifier-upgrade.md) | Verifier upgrade: evidence standard, own prompt, cheaper model | done | pstack + Olaf | 2 |
 | [03](03-structured-worker-brief.md) | Structured worker brief | done | pstack | 3 |
-| [04](04-decision-log.md) | Decision log (`orca log`) | todo | pstack | 6 |
+| [04](04-decision-log.md) | Decision log (`orca log`) | done | pstack | 6 |
 | [05](05-attack-the-premise.md) | Attack the premise at a stall | todo | pstack | 8 |
 | [06](06-compact-research-summary.md) | Compact research summary prompt (no hard cap) | todo | Limen (modified) | 7 |
 | [07](07-shared-prompt-rules.md) | Small shared prompt rules | todo | pstack | 9 |

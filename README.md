@@ -104,6 +104,7 @@ orca steer <id> "message"
 orca stop <id> [reason] [--dry-run] [--keep]
 orca done <id> [reason] [--give-up "<reason>"] [--dry-run] [--keep] [--cwd <repo>]
 orca strategy <id> "<what changed>"
+orca log <id> <phase> <decision> <why> <evidence> <result>
 orca cleanup [--dry-run] [--older-than 12h] [--cwd <repo>]
 orca watch <id> [--dry-run] [--cwd <repo>]   # started by orca run, not for hand use
 orca webhook <id> [--dry-run] [--force] [--cwd <repo>]
@@ -143,7 +144,9 @@ If the lead (or a worker) is still `idle` about 8 seconds after the prompt, orca
 
 `done` marks a running job `done` (reason defaults to `completed`) and sends the finish wake once, then frees what the job no longer needs (see Cleanup): browser sessions, worktree dev servers and finished worker panes. The orchestrator pane and the workspace stay open so you can still give feedback. A queued job is refused with exit 1, since nothing ran. If a verifier ran, `done` reads `results/verifier.json` and records the verdict on `job.verifier`; a final verdict of `fail` marks the job `failed` (reason `verifier failed after N rounds: <blocking checks>`) instead of `done`. `--give-up "<reason>"` marks the job `failed` with that reason and stores it as `job.verifier.stopReason`; the orchestrator uses it only when it cannot progress. An already `done`, `failed`, or `stopped` job prints that status, exits 0, and sends nothing. `--dry-run` prints the plan and the finish payload, and does not change status or send.
 
-`strategy` appends `<what changed>` to `job.verifier.strategyChanges` for the current round and prints the count. The orchestrator runs it after changing approach on a stall.
+`log` appends a TSV row (timestamp, phase, decision, why, evidence, result) to `.orca/jobs/<id>/decisions.tsv`; tabs and newlines in arguments are escaped. The orchestrator logs each split, routing and strategy decision. `status <id>` shows the row count and `digest` the last 3 rows.
+
+`strategy` also logs a row (phase `strategy`) and appends `<what changed>` to `job.verifier.strategyChanges` for the current round and prints the count. The orchestrator runs it after changing approach on a stall.
 
 `webhook` previews or retries that POST. It does not change job status.
 

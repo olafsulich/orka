@@ -10,7 +10,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
-import { DIGEST_MAX, FILE_READ_MAX, SUMMARY_MAX, VERIFIER_JSON_MAX, renderDigest, steerText } from "../lib/digest.mjs";
+import { DECISION_ROWS, DIGEST_MAX, FILE_READ_MAX, SUMMARY_MAX, VERIFIER_JSON_MAX, renderDigest, steerText } from "../lib/digest.mjs";
 import * as browsers from "../lib/browsers.mjs";
 import * as lifecycle from "../lib/lifecycle.mjs";
 import * as ports from "../lib/ports.mjs";
@@ -1438,6 +1438,7 @@ function orchestratorPrompt(job) {
     `Run orca status ${job.id} after each verifier round. If it reports a stall (the same check failing two rounds in a row), do NOT repeat the same instruction.`,
     `Change strategy instead: rewrite the worker prompt using the verifier's evidence verbatim, split the work differently, start a fresh worker instead of resuming one, or take a different approach.`,
     `Record the change with: orca strategy ${job.id} "<what you changed>", then re-verify.`,
+    `Log every split, routing and strategy decision so it survives compaction: orca log ${job.id} <phase> "<decision>" "<why>" "<evidence>" "<result>" (phase: split, routing or strategy). orca strategy logs its own row.`,
     job.maxRounds
       ? `There is a round ceiling of ${job.maxRounds} verifier rounds (--max-rounds). orca refuses a round beyond it; say so in the summary and run orca done.`
       : `There is no round limit. Keep going until the verdict is pass.`,
@@ -1884,6 +1885,7 @@ function cmdStatus(args) {
     if (job.stopReason) console.log(`  stop: ${job.stopReason}`);
     console.log(`  ${finishStatusLine(repo, job)}`);
     printVerifyStatus(repo, job);
+    console.log(`  decisions: ${decisionRows(repo, job.id).length}`);
     if (job.verifier?.rounds && job.status === "running") recordVerifier(repo, job);
     if (verifierLine(job)) console.log(`  ${verifierLine(job)}`);
     printVerifierDetail(job);
@@ -1917,6 +1919,43 @@ function printVerifierDetail(job) {
   if (v.stopReason) console.log(`  verifier stop: ${v.stopReason}`);
 }
 
+const DECISION_HEADER = "ts\tphase\tdecision\twhy\tevidence\tresult\n";
+
+function decisionsPath(repo, id) {
+  return join(jobDir(repo, id), "decisions.tsv");
+}
+
+function tsvCell(value) {
+  return String(value ?? "").replace(/\r\n|\r|\n/g, "\\n").replace(/\t/g, "\\t");
+}
+
+function appendDecision(repo, id, cells) {
+  const path = decisionsPath(repo, id);
+  mkdirSync(dirname(path), { recursive: true });
+  if (!existsSync(path)) writeFileSync(path, DECISION_HEADER);
+  appendFileSync(path, `${[new Date().toISOString(), ...cells].map(tsvCell).join("\t")}\n`);
+}
+
+function decisionRows(repo, id) {
+  const path = decisionsPath(repo, id);
+  if (!existsSync(path)) return [];
+  try {
+    return readFileSync(path, "utf8").split("\n").slice(1).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function cmdLog(args) {
+  allowFlags(args, ["cwd"]);
+  const [, id, phase, decision, why, evidence, result] = args._;
+  if (args._.length !== 7) fail('need: orca log <id> <phase> <decision> <why> <evidence> <result> (quote each argument)');
+  const repo = requireRepo(args.cwd || process.cwd());
+  load(repo, id);
+  appendDecision(repo, id, [phase, decision, why, evidence, result]);
+  console.log(`decision ${decisionRows(repo, id).length} logged for ${id}`);
+}
+
 function cmdStrategy(args) {
   allowFlags(args, ["cwd"]);
   const id = args._[1];
@@ -1929,6 +1968,7 @@ function cmdStrategy(args) {
   list.push({ round: Number(v.rounds) || 0, change, at: new Date().toISOString() });
   job.verifier = { rounds: Number(v.rounds) || 0, verdict: v.verdict ?? null, history: Array.isArray(v.history) ? v.history : [], ...v, strategyChanges: list };
   save(repo, job);
+  appendDecision(repo, id, ["strategy", change, "", "", ""]);
   console.log(`strategy change ${list.length} recorded for ${id}`);
 }
 
@@ -1985,6 +2025,8 @@ function collectDigestFiles(repo, job) {
   } else if (job.summary) {
     files.summary = String(job.summary).slice(0, SUMMARY_MAX);
   }
+  const decisions = decisionRows(repo, job.id);
+  if (decisions.length) files.decisions = { count: decisions.length, rows: decisions.slice(-DECISION_ROWS) };
   const verifierPath = join(dir, "results", `${VERIFIER_NAME}.json`);
   if (existsSync(verifierPath)) {
     try {
@@ -2980,6 +3022,7 @@ function help() {
   orca steer <id> "message"   (also on a finished job whose orchestrator pane is still open: starts a follow-up round)
   orca stop <id> [reason] [--dry-run] [--keep]
   orca strategy <id> "<what changed>"
+  orca log <id> <phase> <decision> <why> <evidence> <result>   (appends a row to .orca/jobs/<id>/decisions.tsv)
   orca done <id> [reason] [--give-up "<reason>"] [--dry-run] [--keep] [--cwd <repo>]
   orca cleanup [--dry-run] [--older-than <12h>] [--cwd <repo>]
   orca reap <id> [--worker <name>] [--dry-run] [--cwd <repo>]   (closes browsers only; panes stay)
@@ -3119,6 +3162,7 @@ async function main() {
   else if (cmd === "digest") cmdDigest(args);
   else if (cmd === "steer") cmdSteer(args);
   else if (cmd === "strategy") cmdStrategy(args);
+  else if (cmd === "log") cmdLog(args);
   else if (cmd === "stop") await cmdStop(args);
   else if (cmd === "done") await cmdDone(args);
   else if (cmd === "webhook") await cmdWebhook(args);
