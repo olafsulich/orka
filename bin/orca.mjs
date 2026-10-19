@@ -1380,10 +1380,9 @@ const REPRO_VERIFIER_LINES = (dir) => [
 ];
 
 // Per-playbook orchestrator blocks, all in one place. feature adds nothing; bug-fix is the repro-first lines above.
-const INVESTIGATION_ORCHESTRATOR_LINES = (dir) => [
-  `Playbook investigation: this job needs findings, not a browser check. Do NOT start a verifier; the verifier instructions below do not apply, and there is no verifier verdict to wait for.`,
+const INVESTIGATION_ORCHESTRATOR_LINES = () => [
+  `Playbook investigation: this job needs findings, not a browser check. Nothing is built, so you check the research yourself; no separate checker runs.`,
   `Workers write research summaries in the RESEARCH REPORT FORMAT, with a citation (file:line, URL or command output) for every Observed claim.`,
-  `Before orca done, check the citations yourself: open each cited file or re-run each cited command and confirm it says what the summary claims. Send a worker back for any claim that fails; write ${dir}/summary.txt only from claims that held.`,
 ];
 const HILLCLIMB_ORCHESTRATOR_LINES = (dir) => [
   `Playbook hillclimb: first fix ONE metric, the command that prints it, and whether higher or lower is better. A worker records the baseline value in ${dir}/results/baseline.json before any change.`,
@@ -1452,9 +1451,66 @@ function verifierPrompt(job, name, task, alias, round) {
   ].join("\n");
 }
 
+// The verifier and finish section of the orchestrator prompt. Every playbook but investigation uses this one.
+const FEATURE_FLOW = (job, dir) => ({
+  reap: `When a worker or the verifier has finished, run orca reap ${job.id} --worker <name> to close its browsers (its pane stays open).`,
+  modelNote: [`The verifier (--role verifier) uses the job's verifier model, ${verifierLabel(job)}, not the worker model, unless you pass --model.`],
+  digest: `When a worker note arrives, run orca digest ${job.id} and trust it over memory after compaction. Do not read the job JSON, verify.log, or a pane transcript. Open results/<name>.json only if the digest says the note is missing or ok is not true. When routing a verifier failure, use the evidence already in the digest. Do not paste a longer excerpt into the next worker task.`,
+  digestUse: "test counts and status",
+  summaryFrom: "from the git diff",
+  verify: [
+    `When every builder has reported, start ONE verifier. It has fresh context and checks the work against the goal. Every round uses the same command; orca names the panes verifier, verifier-2, verifier-3... and each round overwrites ${dir}/results/${VERIFIER_NAME}.json (the previous one is kept as verifier.round-N.json):`,
+    `  orca worker --job ${job.id} --name ${VERIFIER_NAME} --role verifier --task "<what was built and the acceptance criteria>"`,
+    `Build the verifier --task from the builders' ACCEPTANCE lines (copy them in, one per builder), plus the job goal.`,
+    `The verifier runs orca verify, the project's own checks and targeted agent-browser checks, and may extend ${VERIFY_FILE} only to cover the acceptance criteria.`,
+    `It writes ${dir}/results/${VERIFIER_NAME}.json: "verdict" pass or fail, "failures" (blocking: what this job changed, each with its evidence) and "warnings" (pre-existing failures the verifier showed also fail on the base commit; they never block a pass).`,
+    `If the verdict is fail, read ${dir}/results/${VERIFIER_NAME}.json and route each blocking failure WITH its evidence to the builder that owns those files (a new or resumed builder worker). Ignore warnings for routing. Wait for their reports, then start the verifier again.`,
+    `Run orca status ${job.id} after each verifier round. If it reports a stall (the same check failing two rounds in a row), do NOT repeat the same instruction.`,
+    `Before changing strategy, attack the premise: write in one sentence the premise the failed fixes share, list what else could explain the failure (a census), and pick the strategy that drops that premise.`,
+    `Change strategy instead: rewrite the worker prompt using the verifier's evidence verbatim, split the work differently, start a fresh worker instead of resuming one, or take a different approach.`,
+    `Record the change with: orca strategy ${job.id} --premise "<the shared premise you dropped>" "<what you changed>", then re-verify.`,
+    `Log every split, routing and strategy decision so it survives compaction: orca log ${job.id} <phase> "<decision>" "<why>" "<evidence>" "<result>" (phase: split, routing or strategy). orca strategy logs its own row.`,
+    job.maxRounds
+      ? `There is a round ceiling of ${job.maxRounds} verifier rounds (--max-rounds). orca refuses a round beyond it; say so in the summary and run orca done.`
+      : `There is no round limit. Keep going until the verdict is pass.`,
+    `Stop only when you genuinely cannot progress: the same failure survived 3 different strategy changes, or the fix needs a human decision or a secret. Then run: orca done ${job.id} --give-up "<plain reason>".`,
+    `You never run orca verify yourself and never edit ${VERIFY_FILE} or any check. You may only run trivial read-only commands to read results.`,
+    `Do not invent a URL or a checks file unless the goal asked for checks.`,
+  ],
+  done: [
+    `Keep every other field, including verify.`,
+    `Do not change verify or verifier; the verifier and orca done write those.`,
+    `Then mark the job done, which sends the finish wake and records the verifier verdict (a fail verdict marks the job failed):`,
+    `  orca done ${job.id}`,
+    `If orca is not on PATH, run ${ORCA} done ${job.id}.`,
+  ],
+});
+// Investigation swaps the verifier and finish section for a citation check by the orchestrator: no verifier runs, no verdict is waited for.
+const INVESTIGATION_FLOW = (job, dir) => ({
+  reap: `When a worker has finished, run orca reap ${job.id} --worker <name> to close its browsers (its pane stays open).`,
+  modelNote: [],
+  digest: `When a worker note arrives, run orca digest ${job.id} and trust it over memory after compaction. Do not read the job JSON, verify.log, or a pane transcript. Open results/<name>.json only if the digest says the note is missing or ok is not true.`,
+  digestUse: "status",
+  summaryFrom: "only from the claims whose citations held",
+  verify: [
+    `When every worker has reported, check the research summaries yourself. Open each cited file or re-run each cited command and confirm it says what the summary claims. Send a worker back for any claim that fails, then check again.`,
+    `You may only run trivial read-only commands to read results and check citations.`,
+    `Log every split and routing decision so it survives compaction: orca log ${job.id} <phase> "<decision>" "<why>" "<evidence>" "<result>" (phase: split or routing).`,
+    `Stop only when you genuinely cannot progress: the question needs a human decision or a secret. Then run: orca done ${job.id} --give-up "<plain reason>".`,
+  ],
+  done: [
+    `Keep every other field.`,
+    `Then mark the job done, which sends the finish wake:`,
+    `  orca done ${job.id}`,
+    `If orca is not on PATH, run ${ORCA} done ${job.id}.`,
+  ],
+});
+const PLAYBOOK_FLOW = { investigation: INVESTIGATION_FLOW };
+
 function orchestratorPrompt(job) {
   const dir = jobDir(job.repo, job.id);
   const pi = job.kind === "pi";
+  const flow = (PLAYBOOK_FLOW[job.playbook] || FEATURE_FLOW)(job, dir);
   return [
     `You are the orchestrator for orca job ${job.id}, not the implementer.`,
     `Do not implement the goal yourself. Do not edit the repo to satisfy the goal.`,
@@ -1480,45 +1536,25 @@ function orchestratorPrompt(job) {
     `When a worker's task is research or investigation, append this block verbatim to its --task (after REPORT):\n${RESEARCH_REPORT}`,
     `Worker names must match [a-z][a-z0-9_-]{0,31}. If a name is already taken (by an earlier worker, even a finished one) orca appends -2, -3... and prints the real name.`,
     NEVER_CLOSE_PANES,
-    `When a worker or the verifier has finished, run orca reap ${job.id} --worker <name> to close its browsers (its pane stays open).`,
+    flow.reap,
     ...(pi
       ? [`Workers are Pi agents (kind pi). Do not pass --model; pi workers have no model flag.`, `Pane command: ${paneCommand("")}`]
       : [
           `That uses this job's worker model (${job.workerModel}). Pass --model <alias> only to override one worker.`,
           `Pane command: ${paneCommand(job.workerModel)}`,
-          `The verifier (--role verifier) uses the job's verifier model, ${verifierLabel(job)}, not the worker model, unless you pass --model.`,
+          ...flow.modelNote,
         ]),
     ``,
     `Each worker writes ${dir}/results/<name>.json and a one-line note at ${dir}/notes/<name>.txt,`,
     `then prompts you with that note. Do not trust a worker that skipped them.`,
-    `When a worker note arrives, run orca digest ${job.id} and trust it over memory after compaction. Do not read the job JSON, verify.log, or a pane transcript. Open results/<name>.json only if the digest says the note is missing or ok is not true. When routing a verifier failure, use the evidence already in the digest. Do not paste a longer excerpt into the next worker task.`,
+    flow.digest,
     `The finish wake is sent by the orca CLI when orca done marks the job done (or when the job goes failed or stopped). Do not run herdr-finish-watch. Do not run orca stop or orca webhook.`,
     ``,
-    `When every builder has reported, start ONE verifier. It has fresh context and checks the work against the goal. Every round uses the same command; orca names the panes verifier, verifier-2, verifier-3... and each round overwrites ${dir}/results/${VERIFIER_NAME}.json (the previous one is kept as verifier.round-N.json):`,
-    `  orca worker --job ${job.id} --name ${VERIFIER_NAME} --role verifier --task "<what was built and the acceptance criteria>"`,
-    `Build the verifier --task from the builders' ACCEPTANCE lines (copy them in, one per builder), plus the job goal.`,
-    `The verifier runs orca verify, the project's own checks and targeted agent-browser checks, and may extend ${VERIFY_FILE} only to cover the acceptance criteria.`,
-    `It writes ${dir}/results/${VERIFIER_NAME}.json: "verdict" pass or fail, "failures" (blocking: what this job changed, each with its evidence) and "warnings" (pre-existing failures the verifier showed also fail on the base commit; they never block a pass).`,
-    `If the verdict is fail, read ${dir}/results/${VERIFIER_NAME}.json and route each blocking failure WITH its evidence to the builder that owns those files (a new or resumed builder worker). Ignore warnings for routing. Wait for their reports, then start the verifier again.`,
-    `Run orca status ${job.id} after each verifier round. If it reports a stall (the same check failing two rounds in a row), do NOT repeat the same instruction.`,
-    `Before changing strategy, attack the premise: write in one sentence the premise the failed fixes share, list what else could explain the failure (a census), and pick the strategy that drops that premise.`,
-    `Change strategy instead: rewrite the worker prompt using the verifier's evidence verbatim, split the work differently, start a fresh worker instead of resuming one, or take a different approach.`,
-    `Record the change with: orca strategy ${job.id} --premise "<the shared premise you dropped>" "<what you changed>", then re-verify.`,
-    `Log every split, routing and strategy decision so it survives compaction: orca log ${job.id} <phase> "<decision>" "<why>" "<evidence>" "<result>" (phase: split, routing or strategy). orca strategy logs its own row.`,
-    job.maxRounds
-      ? `There is a round ceiling of ${job.maxRounds} verifier rounds (--max-rounds). orca refuses a round beyond it; say so in the summary and run orca done.`
-      : `There is no round limit. Keep going until the verdict is pass.`,
-    `Stop only when you genuinely cannot progress: the same failure survived 3 different strategy changes, or the fix needs a human decision or a secret. Then run: orca done ${job.id} --give-up "<plain reason>".`,
-    `You never run orca verify yourself and never edit ${VERIFY_FILE} or any check. You may only run trivial read-only commands to read results.`,
-    `Do not invent a URL or a checks file unless the goal asked for checks.`,
+    ...flow.verify,
     ``,
     SUMMARY_FROM_DIFF(job),
-    `Before orca done, run orca digest ${job.id}, use it only for test counts and status; write ${dir}/summary.txt from the git diff (per the rule above), and set the summary field. Do not load the job JSON into the turn to copy fields.`,
-    `Keep every other field, including verify.`,
-    `Do not change verify or verifier; the verifier and orca done write those.`,
-    `Then mark the job done, which sends the finish wake and records the verifier verdict (a fail verdict marks the job failed):`,
-    `  orca done ${job.id}`,
-    `If orca is not on PATH, run ${ORCA} done ${job.id}.`,
+    `Before orca done, run orca digest ${job.id}, use it only for ${flow.digestUse}; write ${dir}/summary.txt ${flow.summaryFrom} (per the rule above), and set the summary field. Do not load the job JSON into the turn to copy fields.`,
+    ...flow.done,
     `Then stop working. Your pane stays open after orca done, so Olaf can still give feedback with orca steer; a follow-up message starts a new round, and you run orca done ${job.id} again when that round is finished (the finish wake is sent again, marked followUp).`,
     `If you stop and wait on a question, orca's watcher tells Olaf you need input, so ask only the genuine human questions described above.`,
   ].join("\n");

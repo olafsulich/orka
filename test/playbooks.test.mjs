@@ -84,17 +84,27 @@ function orchestratorLog(...flags) {
   return { t, id, prompt: promptOf(t, id) };
 }
 
+const lines = (name) => orchestratorLog(...(name ? ["--playbook", name] : [])).prompt.split("\n");
+
+// Lines of the playbook prompt that are not in the feature prompt, and the other way round, as multisets.
+function diffLines(name) {
+  const plain = lines();
+  const other = lines(name);
+  const minus = (a, b) => {
+    const rest = [...b];
+    return a.filter((l) => {
+      const i = rest.indexOf(l);
+      if (i < 0) return true;
+      rest.splice(i, 1);
+      return false;
+    });
+  };
+  return { added: minus(other, plain), removed: minus(plain, other) };
+}
+
 const added = (name) => {
-  const plain = orchestratorLog().prompt.split("\n");
-  const other = orchestratorLog("--playbook", name).prompt.split("\n");
-  // every line of the feature prompt survives, in order; the rest is the playbook block
-  let i = 0;
-  const extra = [];
-  for (const l of other) {
-    if (i < plain.length && l === plain[i]) i++;
-    else extra.push(l);
-  }
-  assert.equal(i, plain.length, `${name} prompt dropped or changed a feature line`);
+  const { added: extra, removed } = diffLines(name);
+  assert.deepEqual(removed, [], `${name} prompt dropped or changed a feature line`);
   return extra;
 };
 
@@ -128,26 +138,52 @@ test("each non-default playbook adds only its own block to the feature prompt", 
   const bug = added("bug-fix");
   assert.equal(bug.length, 2);
   assert.match(bug.join("\n"), /Playbook bug-fix \(repro first\)/);
-  const inv = added("investigation");
-  assert.equal(inv.length, 3);
-  assert.match(inv.join("\n"), /Playbook investigation/);
-  assert.match(inv.join("\n"), /Do NOT start a verifier/);
-  assert.match(inv.join("\n"), /RESEARCH REPORT FORMAT/);
-  assert.match(inv.join("\n"), /citation/);
-  assert.match(inv.join("\n"), /check the citations yourself/);
   const hill = added("hillclimb");
   assert.equal(hill.length, 2);
   assert.match(hill.join("\n"), /Playbook hillclimb/);
   assert.match(hill.join("\n"), /metric/);
   assert.match(hill.join("\n"), /baseline/);
   assert.match(hill.join("\n"), /only when the metric improves/);
-  for (const block of [bug, inv, hill]) assert.doesNotMatch(block.join("\n"), /Playbook feature/);
+  for (const block of [bug, hill]) assert.doesNotMatch(block.join("\n"), /Playbook feature/);
 });
 
 test("playbook blocks do not leak into other playbooks", () => {
-  assert.doesNotMatch(added("hillclimb").join("\n"), /repro|Do NOT start a verifier/);
-  assert.doesNotMatch(added("investigation").join("\n"), /repro|baseline/);
-  assert.doesNotMatch(added("bug-fix").join("\n"), /baseline|Do NOT start a verifier/);
+  assert.doesNotMatch(added("hillclimb").join("\n"), /repro|citation/);
+  assert.doesNotMatch(diffLines("investigation").added.join("\n"), /repro|baseline/);
+  assert.doesNotMatch(added("bug-fix").join("\n"), /baseline|citation/);
+});
+
+test("the investigation prompt has no verifier flow: no verifier worker, no rounds, no verdict", () => {
+  const prompt = lines("investigation").join("\n");
+  assert.match(prompt, /Playbook investigation/);
+  assert.match(prompt, /RESEARCH REPORT FORMAT/);
+  assert.match(prompt, /check the research summaries yourself/);
+  assert.match(prompt, /re-run each cited command/);
+  assert.match(prompt, /orca done /);
+  assert.doesNotMatch(prompt, /--role verifier/);
+  assert.doesNotMatch(prompt, /verifier|verdict|verifier round|round ceiling|stall/i);
+  assert.doesNotMatch(prompt, /start ONE verifier|orca strategy/);
+});
+
+test("a non-feature prompt differs from the feature prompt only in its playbook section", () => {
+  const plain = lines();
+  const verifyStart = plain.findIndex((l) => l.startsWith("When every builder has reported"));
+  const stop = plain.findIndex((l) => l.startsWith("Then stop working."));
+  for (const name of ["bug-fix", "hillclimb"]) assert.deepEqual(diffLines(name).removed, [], name);
+  // investigation swaps only the verifier-and-finish section: every removed line sits between the
+  // worker setup and "Then stop working", and the lines around it are unchanged
+  const inv = lines("investigation");
+  const head = plain.findIndex((l) => l.startsWith("Worker names must match"));
+  assert.deepEqual(inv.slice(0, 1), plain.slice(0, 1));
+  assert.deepEqual(inv.slice(-(plain.length - stop)), plain.slice(stop));
+  const removed = diffLines("investigation").removed;
+  assert.ok(removed.length > 0);
+  for (const l of removed) {
+    const at = plain.indexOf(l);
+    assert.ok(at > head - 1 || /^Start each worker|^Write every|^When orca.features/.test(l) === false, `unexpected removal: ${l}`);
+    assert.ok(at >= head && at < stop, `removed line outside the verifier/finish section: ${l}`);
+  }
+  assert.ok(verifyStart > head && verifyStart < stop);
 });
 
 test("orca done on an investigation job with no verifier round marks it done", () => {
@@ -157,6 +193,33 @@ test("orca done on an investigation job with no verifier round marks it done", (
   const r = t.orca(["done", id, "--dry-run"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /running -> done/);
+});
+
+test("a real orca done on an investigation job with no verifier.json marks it done, not failed", () => {
+  const t = scratch();
+  const id = t.mk("--playbook", "investigation").stdout.trim();
+  running(t, id);
+  const r = t.orca(["done", id]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^done /);
+  const job = t.read(id);
+  assert.equal(job.status, "done");
+  assert.ok(!job.verifier || job.verifier.verdict == null);
+});
+
+test("a feature job with a failing verifier.json still ends failed", () => {
+  const t = scratch();
+  const id = t.mk().stdout.trim();
+  running(t, id);
+  const job = t.read(id);
+  job.verifier = { rounds: 1, verdict: null, history: [] };
+  writeFileSync(t.jobFile(id), JSON.stringify(job));
+  const dir = join(t.repo, ".orca", "jobs", id, "results");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "verifier.json"), JSON.stringify({ name: "verifier", role: "verifier", round: 1, verdict: "fail", checks: [], failures: [{ check: "x", evidence: "boom" }], summary: "no" }));
+  const r = t.orca(["done", id]);
+  assert.match(r.stdout, /^failed /);
+  assert.equal(t.read(id).status, "failed");
 });
 
 test("status and the finish payload show the playbook", () => {
