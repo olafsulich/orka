@@ -1,6 +1,6 @@
 # 04 · Decision log
 
-Status: todo · Source: pstack · Doc: [#6](../research/IMPROVEMENTS-pstack-limen.md#3-combined-ranking)
+Status: done · Source: pstack · Doc: [#6](../research/IMPROVEMENTS-pstack-limen.md#3-combined-ranking)
 
 ## Why
 The orchestrator's reasoning is lost when its context compacts, and after `done` there's no reviewable record of why things went the way they did.
@@ -25,3 +25,6 @@ The orchestrator's reasoning is lost when its context compacts, and after `done`
 
 ## Olaf's notes
 - "Sounds good."
+
+## Done
+Added `orca log` (escaped TSV rows with timestamp in `.orca/jobs/<id>/decisions.tsv`), a row from `orca strategy`, a `decisions: N` line in `status <id>`, the last 3 rows in `renderDigest` (capped by `DIGEST_MAX`), an orchestrator prompt line, help text and README. New `test/decision-log.test.mjs`. `npm test`: 189 pass, 0 fail.
