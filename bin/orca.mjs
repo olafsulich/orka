@@ -1037,6 +1037,11 @@ async function assignPorts(repo, job) {
   job.ports = got.ports;
 }
 
+// Shared prompt rules: each literal lives here once and is interpolated into the prompts that use it.
+const REVERSIBLE_RULE = `Reversible work never waits on a human. Irreversible actions (push, delete outside the worktree, external sends, purchases) stop and ask.`;
+const NEVER_CLOSE_PANES = `Never close panes (yours or anyone's, no herdr pane close): finished panes stay open, and orca frees them when the job is done or stopped.`;
+const SUMMARY_FROM_DIFF = (job) => `Before orca done, run git diff ${job.baseCommit} (--stat plus a skim) and write summary.txt from the diff, not from the workers' claims.`;
+
 function portPromptLines(job) {
   const list = Array.isArray(job.ports) && job.ports.length ? job.ports : job.port != null ? [job.port] : [];
   const lines = [];
@@ -1047,6 +1052,7 @@ function portPromptLines(job) {
   lines.push(
     `Decide operational questions yourself by choosing the safe recommended option instead of asking. Examples: stop a stale server left by a finished orca job, or pick your own job port when one is busy.`,
     `Only ask when a genuine human decision or a secret is required. A question nobody sees leaves the job stuck.`,
+    REVERSIBLE_RULE,
   );
   return lines;
 }
@@ -1126,7 +1132,7 @@ function workerPrompt(job, name, task, alias) {
     ``,
     `If SCOPE or ACCEPTANCE is missing from the task above, do the narrowest reading of it and say so in the result.`,
     ``,
-    `Never close panes (yours or anyone's, no herdr pane close): orca frees them when the job is done or stopped.`,
+    NEVER_CLOSE_PANES,
     `Finish wake is automatic from the orca CLI when it marks the job done, failed, or stopped. That is not your job. Do not run herdr-finish-watch. Do not run orca stop or orca webhook. Do not start another agent.`,
   ].join("\n");
 }
@@ -1395,7 +1401,7 @@ function verifierPrompt(job, name, task, alias, round) {
     `herdr agent prompt ${job.agent} "<the one-line note>"`,
     `If that prompt is rejected because the orchestrator is busy, the files are enough.`,
     ``,
-    `Never close panes (yours or anyone's, no herdr pane close): orca frees them when the job is done or stopped.`,
+    NEVER_CLOSE_PANES,
     `Finish wake is automatic from the orca CLI when it marks the job done, failed, or stopped. That is not your job. Do not run herdr-finish-watch. Do not run orca stop, orca done or orca webhook. Do not start another agent.`,
   ].join("\n");
 }
@@ -1425,7 +1431,7 @@ function orchestratorPrompt(job) {
     `For a one-command task the brief collapses to GOAL + ACCEPTANCE. orca warns when a builder task has no SCOPE: or ACCEPTANCE:.`,
     `When a worker's task is research or investigation, append this block verbatim to its --task (after REPORT):\n${RESEARCH_REPORT}`,
     `Worker names must match [a-z][a-z0-9_-]{0,31}. If a name is already taken (by an earlier worker, even a finished one) orca appends -2, -3... and prints the real name.`,
-    `Never close worker or verifier panes (no herdr pane close): finished panes stay open, and orca frees them when the job is done or stopped.`,
+    NEVER_CLOSE_PANES,
     `When a worker or the verifier has finished, run orca reap ${job.id} --worker <name> to close its browsers (its pane stays open).`,
     ...(pi
       ? [`Workers are Pi agents (kind pi). Do not pass --model; pi workers have no model flag.`, `Pane command: ${paneCommand("")}`]
@@ -1458,6 +1464,7 @@ function orchestratorPrompt(job) {
     `You never run orca verify yourself and never edit ${VERIFY_FILE} or any check. You may only run trivial read-only commands to read results.`,
     `Do not invent a URL or a checks file unless the goal asked for checks.`,
     ``,
+    SUMMARY_FROM_DIFF(job),
     `Before orca done, run orca digest ${job.id}, write a short summary to ${dir}/summary.txt from that digest and what you already know, and set the summary field. Do not load the job JSON into the turn to copy fields.`,
     `Keep every other field, including verify.`,
     `Do not change verify or verifier; the verifier and orca done write those.`,

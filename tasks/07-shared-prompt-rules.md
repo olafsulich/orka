@@ -1,6 +1,6 @@
 # 07 · Small shared prompt rules
 
-Status: todo · Source: pstack · Doc: [#9](../research/IMPROVEMENTS-pstack-limen.md#3-combined-ranking)
+Status: done · Source: pstack · Doc: [#9](../research/IMPROVEMENTS-pstack-limen.md#3-combined-ranking)
 
 ## Why
 Three small gaps:
@@ -24,3 +24,6 @@ Three small gaps:
 
 ## Olaf's notes
 - "OK."
+
+## Done
+Added shared constants REVERSIBLE_RULE (via portPromptLines), NEVER_CLOSE_PANES (one wording, used by worker, verifier, orchestrator) and SUMMARY_FROM_DIFF (orchestrator, before orca done, uses job.baseCommit). New test/shared-prompt-rules.test.mjs (4 tests); test/naming.test.mjs updated for the new wording. npm test: 198 pass, 0 fail.
