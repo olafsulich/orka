@@ -1,7 +1,7 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rmSync as rmScratch } from "node:fs";
@@ -75,7 +75,8 @@ test("done closes browsers and worker panes, keeps the workspace and orchestrato
   const calls = t.calls();
   assert.ok(calls.includes("herdr pane close p-w1"));
   assert.ok(calls.includes("herdr pane close p-v"));
-  assert.ok(calls.includes(`agent-browser --session ${j.prefix}-w1 close`));
+  // The session has no live daemon or Chrome: its state is deleted, agent-browser is not run.
+  assert.ok(!calls.some((c) => c.startsWith("agent-browser")));
   assert.ok(!calls.some((c) => c.startsWith("herdr workspace close")));
   assert.ok(!calls.includes("herdr pane close p-lead"));
   const job = read(j);
@@ -206,8 +207,11 @@ test("a closed workspace is recorded and a second cleanup leaves it alone", () =
 test("cleanup closes a legacy orca-verify session of a finished job", () => {
   const t = scratch();
   const j = makeJob(t, "done");
-  writeFileSync(join(t.bin, "agent-browser"), `#!/bin/sh\necho "agent-browser $*" >> "${t.log}"\ncase "$*" in *"session list"*) echo '{"success":true,"data":{"sessions":["orca-verify-${j.id}"]}}';; esac\n`);
+  const state = join(t.run, "agent-browser", `orca-verify-${j.id}.config`);
+  writeFileSync(state, "{}");
   assert.match(t.orca(["cleanup"]).stdout, new RegExp(`closed browser orca-verify-${j.id}`));
+  assert.ok(!existsSync(state));
+  assert.ok(!t.calls().some((c) => c.startsWith("agent-browser")));
 });
 
 // Fake process lists: nothing is really killed (ORCA_FAKE_WATCHERS makes cleanup only report).
