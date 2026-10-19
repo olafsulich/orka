@@ -12,7 +12,7 @@ Source-ref paths: `pstack/…` = `/home/olaf/projects/cursor-plugins/pstack/…`
 | [04](04-decision-log.md) | Decision log (`orca log`) | done | pstack | 6 |
 | [05](05-attack-the-premise.md) | Attack the premise at a stall | done | pstack | 8 |
 | [06](06-compact-research-summary.md) | Compact research summary prompt (no hard cap) | done | Limen (modified) | 7 |
-| [07](07-shared-prompt-rules.md) | Small shared prompt rules | todo | pstack | 9 |
+| [07](07-shared-prompt-rules.md) | Small shared prompt rules | done | pstack | 9 |
 | [08](08-repro-first-bug-jobs.md) | Repro-first for bug jobs | todo | pstack | 14 |
 | [09](09-feature-map.md) | Feature map as cross-job memory | todo | pstack | 17 |
 | [10](10-playbooks.md) | Playbooks by job type | todo | pstack | 18 |

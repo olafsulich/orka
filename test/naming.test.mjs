@@ -146,8 +146,8 @@ test("builders cannot take verifier or verifier-N", () => {
 
 test("orchestrator, worker and verifier prompts all say never to close panes", () => {
   const src = readFileSync(ORCA, "utf8");
-  assert.match(src, /Never close worker or verifier panes/);
-  assert.equal((src.match(/Never close panes \(yours or anyone's/g) || []).length, 2);
+  assert.equal((src.match(/Never close panes \(yours or anyone's/g) || []).length, 1);
+  assert.equal((src.match(/NEVER_CLOSE_PANES,/g) || []).length, 3);
 });
 
 test("a name used by an agent in another workspace is skipped", () => {
