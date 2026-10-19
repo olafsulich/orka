@@ -34,7 +34,6 @@ test("only the orchestrator gets the diff-based summary rule, before the digest 
   const orch = fn("orchestratorPrompt");
   assert.equal(count(orch, "SUMMARY_FROM_DIFF(job)"), 1);
   assert.ok(orch.indexOf("SUMMARY_FROM_DIFF(job)") < orch.indexOf("Before orca done, run orca digest"));
-  assert.match(src, /git diff \$\{job\.baseCommit \|\| "git merge-base <branch> main"\} \(--stat plus a skim\)/);
   assert.doesNotMatch(fn("workerPrompt"), /SUMMARY_FROM_DIFF/);
   assert.doesNotMatch(fn("verifierPrompt"), /SUMMARY_FROM_DIFF/);
 });
@@ -44,7 +43,10 @@ test("orchestrator summary line follows the diff rule and a job without baseComm
   assert.match(fn("orchestratorPrompt"), /set the summary field\. Do not load the job JSON into the turn to copy fields/);
   const line = src.split("\n").find((l) => l.startsWith("const SUMMARY_FROM_DIFF"));
   const render = new Function("job", `return (${line.slice(line.indexOf("=") + 1).replace(/;\s*$/, "")})(job);`);
-  assert.doesNotMatch(render({}), /undefined/);
-  assert.match(render({}), /git merge-base <branch> main/);
-  assert.match(render({ baseCommit: "abc123" }), /git diff abc123 /);
+  assert.doesNotMatch(render({ id: "j0" }), /undefined/);
+  const noBase = render({ id: "j1", branch: "orca/j1-x" });
+  assert.match(noBase, /git diff \$\(git merge-base orca\/j1-x main\)/);
+  assert.doesNotMatch(noBase, /<branch>|undefined/);
+  assert.match(render({ id: "j2" }), /git diff \$\(git merge-base orca\/j2 main\)/);
+  assert.match(render({ baseCommit: "abc123" }), /git diff abc123 \(--stat plus a skim\)/);
 });
