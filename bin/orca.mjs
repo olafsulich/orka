@@ -1435,6 +1435,16 @@ const PLAYBOOK_ORCHESTRATOR_LINES = {
   hillclimb: HILLCLIMB_ORCHESTRATOR_LINES,
 };
 
+// UI jobs only. The skill itself is linked, not copied: `agent-browser skills get core` serves the text for the installed version, so it follows upgrades.
+const browserVerifierLines = (session, dir) => [
+  `Browser checks (agent-browser). Load its guide first: agent-browser skills get core (served by the installed version).`,
+  `- Session: use only --session ${session}, and close it as your last browser command.`,
+  `- Snapshot (agent-browser --session ${session} snapshot -i), then act on the @eN refs it returns. Do not guess selectors.`,
+  `- Wait explicitly after any page-changing action: wait @ref, wait --text "...", wait --url "...", or wait --load networkidle. No sleeps and no bare wait <ms>.`,
+  `- Evidence: save screenshots under ${join(dir, "results")}/ (agent-browser --session ${session} screenshot <path>) and name them in the check notes.`,
+  `- Console and network: run console and network requests before the verdict; an error caused by this job is a failure.`,
+];
+
 function verifierPrompt(job, name, task, alias, round) {
   const dir = jobDir(job.repo, job.id);
   const result = verifierResultPath(job.repo, job.id);
@@ -1477,6 +1487,7 @@ function verifierPrompt(job, name, task, alias, round) {
     `Use this project's URL. Do not copy a host or port from another repo.`,
     ...portPromptLines(job),
     `Use exactly one agent-browser session, named ${session} (agent-browser --session ${session}). Reuse it for every check. Never spawn a fresh session per check. When done, close it: agent-browser --session ${session} close`,
+    ...(job.jobType === "ui" ? browserVerifierLines(session, dir) : []),
     ``,
     `When finished, write ${result} as JSON:`,
     `{"name":"${name}","role":"verifier","round":${round},"verdict":"pass"|"fail","checks":[{"name":"...","outcome":"pass"|"fail"|"skipped","scope":"job"|"preexisting","notes":"..."}],"failures":[{"check":"<stable check name>","evidence":"<exact error, step, url, command output>"}],"warnings":[{"check":"...","evidence":"...","base":"<sha>","proof":"<how it was shown pre-existing, e.g. fails on base via orca verify --base>"}],"summary":"..."}`,

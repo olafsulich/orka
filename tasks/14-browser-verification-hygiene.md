@@ -1,6 +1,6 @@
 # 14 · Browser verification hygiene + agent-browser upgrade
 
-Status: todo · Source: Olaf 2026-10-18
+Status: done · Source: Olaf 2026-10-18
 
 ## Why
 Verification leaves Chrome behind, and the verifier uses agent-browser without the practices its own skill recommends. That costs RAM on a tight VPS and makes UI verdicts weaker.
@@ -58,3 +58,20 @@ Verification leaves Chrome behind, and the verifier uses agent-browser without t
 ## Found 2026-10-19 (night)
 
 `orca cleanup` "close browser orca-*" for stale agent-browser sessions *starts* a fresh agent-browser daemon + Chrome per session and then hangs: one cleanup on motion-lab spawned ~11 untagged Chromes (~3 GB RAM) and never exited. Closing a stale session must never launch a browser (check whether its daemon/Chrome is alive first; otherwise just delete its state), cleanup must have a timeout, and every browser orca starts must carry ORCA_JOB so orphans are findable.
+
+## Done
+
+**Audit (which close paths kill Chrome), from the hygiene audit:**
+- Prompt `agent-browser --session X close`: only if the agent obeys; the daemon may leave Chrome. Unchanged.
+- `orca verify` close at start/end: before, the pre-run close on a dead session launched daemon + Chrome (the 2026-10-19 bug); now the pre-run close only deletes dead state and the final close is real plus a kill of session leftovers.
+- `orca reap [--worker]`, `releaseJob` (done/stop/fail): before, killed Chrome only if it carried `ORCA_JOB` (the daemon drops env, so untagged Chrome survived) and could spawn browsers; now tag + session-name process tree, no spawn.
+- New verifier round: before, nothing; now reaps the previous verifier/verify sessions.
+- `orca cleanup`: before, "close" per stale session spawned ~11 Chromes and hung; now dead sessions are only state-deleted, 120s budget, tag + session reap, plus an orphan sweep (`--dry-run`).
+
+**(a)** `lib/browsers.mjs` attributes daemon/Chrome to `orca-<sha8>-<worker>`; tests in `test/browser-hygiene.test.mjs` (commit d01d4b9).
+
+**(b)** UI-job verifier prompt (`job.jobType === "ui"`) gets a 6-line block (`browserVerifierLines` in `bin/orca.mjs`): own session closed last, snapshot then act on `@eN` refs, explicit waits (no sleeps), screenshots under `results/`, console and network checked. CLI prompt is byte-identical to before.
+- **Link, not ship.** The installed `skills/agent-browser/SKILL.md` is only a stub that says to run `agent-browser skills get core`, so the prompt points at that command. It serves text matching the installed version, so it follows upgrades; a copied excerpt (540-line core skill) would go stale and bloat the prompt.
+- **No new `orca verify` steps.** The step runner is open/visible/text; a wait-for or screenshot-on-fail step is not a clear win yet (verifiers can wait and screenshot via agent-browser directly), so it is left out.
+- Tests: `test/verifier-browser-prompt.test.mjs` (UI prompt has the practices; CLI prompt has none of it and equals the UI prompt minus the block).
+- `npm test`: 232 pass, 0 fail
