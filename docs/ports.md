@@ -1,0 +1,5 @@
+# Ports
+
+`orca new` allocates a block of 4 ports for the job with `lib/ports.mjs` (derived from the job id, checked free, never shared with another unfinished job) and stores `job.port` (the first) and `job.ports`. They are exported as `ORCA_PORT`, `ORCA_PORTS` and `PORT` into the orchestrator and worker panes (the Herdr workspace and pane split `--env`) and into `orca verify` scripts. Herdr's `agent start` has no env option, so every prompt also states the ports. In `orca.verify.json`, `${ORCA_PORT}`, `${ORCA_PORT_2}` (the second port, and so on) and `{{port}}` expand in every url and command. `orca status` prints the port. Jobs created before this have no port and keep working (`orca run` allocates one).
+
+The orchestrator, worker and verifier prompts say: use your job port(s) for any dev or preview server; decide operational questions yourself by taking the safe recommended option (stop a stale server left by a finished orca job, or pick your own port) instead of asking; ask only when a genuine human decision or a secret is required.
