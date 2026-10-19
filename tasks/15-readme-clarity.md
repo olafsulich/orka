@@ -1,6 +1,6 @@
 # 15 · README clarity: how orca works and what you can use, with diagrams
 
-Status: todo · Source: Olaf + Limen · Doc: [#20](../research/IMPROVEMENTS-pstack-limen.md#3-combined-ranking) (expanded)
+Status: done · Source: Olaf + Limen · Doc: [#20](../research/IMPROVEMENTS-pstack-limen.md#3-combined-ranking) (expanded)
 
 ## Why
 The README is a 316-line reference that mixes concepts, flags and edge cases. It should be a clear front door: how orca works, and what is available to use. The detail moves to `docs/`.
@@ -41,3 +41,6 @@ The README is a 316-line reference that mixes concepts, flags and edge cases. It
 ## Olaf's notes
 - "Improve the README and explain every piece of this workflow (OK, not in too much detail, but pretty clear). Use our diagram-framework to generate images for the README."
 - "Add a task for making the README more clear (do not store tasks there). It has a lot of info now; we want to focus on how it works and what things are available to use, leveraging diagram-framework for graphs."
+
+## Done
+README.md is now an intro plus two sections (How orca works, What you can use) with short tables and the 3 diagrams (`docs/orca-how-it-works.png`, `orca-loop.png`, `orca-context-injection.png`; clip sources in diagram-framework `clips`, commit abb09c8). 91 lines, 47 outside tables. All long detail moved to `docs/` (commands, models, verify, verifier, webhooks, needs-input, follow-up, cleanup, ports, layout, comparisons, diagrams), with `--ui`, `--playbook`, `--premise`, `orca reap` and `--orphan-hours` added. New `test/readme-docs.test.mjs` (5 tests). `npm test`: 237 pass, 0 fail.

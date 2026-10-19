@@ -20,7 +20,7 @@ Source-ref paths: `pstack/…` = `/home/olaf/projects/cursor-plugins/pstack/…`
 | [12](12-tests-leak-watchers.md) | Tests leak `orca watch` processes: kill in teardown, self-exit guard, reaper | done | incident 2026-10-18 | - |
 | [13](13-verifier-default-by-job-type.md) | Verifier model default by job type (haiku for CLI, sonnet for UI) | done | Olaf | - |
 | [14](14-browser-verification-hygiene.md) | Browser verification hygiene + agent-browser upgrade | done | Olaf | - |
-| [15](15-readme-clarity.md) | README clarity: how it works and what you can use, with diagram-framework graphs | todo | Limen + Olaf | 20 |
+| [15](15-readme-clarity.md) | README clarity: how it works and what you can use, with diagram-framework graphs | done | Limen + Olaf | 20 |
 
 ## Skipped
 
