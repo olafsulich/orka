@@ -1040,7 +1040,7 @@ async function assignPorts(repo, job) {
 // Shared prompt rules: each literal lives here once and is interpolated into the prompts that use it.
 const REVERSIBLE_RULE = `Reversible work never waits on a human. Irreversible actions (push, delete outside the worktree, external sends, purchases) stop and ask.`;
 const NEVER_CLOSE_PANES = `Never close panes (yours or anyone's, no herdr pane close): finished panes stay open, and orca frees them when the job is done or stopped.`;
-const SUMMARY_FROM_DIFF = (job) => `Before orca done, run git diff ${job.baseCommit} (--stat plus a skim) and write summary.txt from the diff, not from the workers' claims.`;
+const SUMMARY_FROM_DIFF = (job) => `Before orca done, run git diff ${job.baseCommit || "git merge-base <branch> main"} (--stat plus a skim) and write summary.txt from the diff, not from the workers' claims.`;
 
 function portPromptLines(job) {
   const list = Array.isArray(job.ports) && job.ports.length ? job.ports : job.port != null ? [job.port] : [];
@@ -1465,7 +1465,7 @@ function orchestratorPrompt(job) {
     `Do not invent a URL or a checks file unless the goal asked for checks.`,
     ``,
     SUMMARY_FROM_DIFF(job),
-    `Before orca done, run orca digest ${job.id}, write a short summary to ${dir}/summary.txt from that digest and what you already know, and set the summary field. Do not load the job JSON into the turn to copy fields.`,
+    `Before orca done, run orca digest ${job.id}, use it only for test counts and status; write ${dir}/summary.txt from the git diff (per the rule above), and set the summary field. Do not load the job JSON into the turn to copy fields.`,
     `Keep every other field, including verify.`,
     `Do not change verify or verifier; the verifier and orca done write those.`,
     `Then mark the job done, which sends the finish wake and records the verifier verdict (a fail verdict marks the job failed):`,

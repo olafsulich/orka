@@ -26,4 +26,4 @@ Three small gaps:
 - "OK."
 
 ## Done
-Added shared constants REVERSIBLE_RULE (via portPromptLines), NEVER_CLOSE_PANES (one wording, used by worker, verifier, orchestrator) and SUMMARY_FROM_DIFF (orchestrator, before orca done, uses job.baseCommit). New test/shared-prompt-rules.test.mjs (4 tests); test/naming.test.mjs updated for the new wording. npm test: 198 pass, 0 fail.
+Added shared constants REVERSIBLE_RULE (via portPromptLines), NEVER_CLOSE_PANES (one wording, used by worker, verifier, orchestrator) and SUMMARY_FROM_DIFF (orchestrator, before orca done, uses job.baseCommit). New test/shared-prompt-rules.test.mjs (5 tests); test/naming.test.mjs updated for the new wording. npm test: 199 pass, 0 fail. Follow-up: orchestrator summary line now follows the diff rule; SUMMARY_FROM_DIFF falls back to "git merge-base <branch> main".
