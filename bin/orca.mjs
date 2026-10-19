@@ -567,6 +567,7 @@ function payloadOf(job, status = job.status) {
     payload.round = roundOf(job);
     payload.followUp = true;
   }
+  if (job.playbook) payload.playbook = job.playbook;
   const verifier = verifierLine(job);
   if (verifier) payload.verifier = verifier;
   const verification = verificationOf(job.repo, job);
@@ -1358,7 +1359,7 @@ function verificationOf(repo, job) {
 
 const FEATURE_MAP_FILE = "orca.features.md";
 
-const PLAYBOOKS = ["feature", "bug-fix"];
+const PLAYBOOKS = ["feature", "bug-fix", "investigation", "hillclimb"];
 const REPRO_FILE = "results/repro.json";
 
 function parsePlaybook(args) {
@@ -1377,6 +1378,23 @@ const REPRO_VERIFIER_LINES = (dir) => [
   `Playbook bug-fix (repro first): re-run the repro from ${dir}/${REPRO_FILE}; it must now pass.`,
   `A missing ${REPRO_FILE}, or a repro you cannot reproduce or re-run, is a blocking failure (check name "repro"). Never pass it silently.`,
 ];
+
+// Per-playbook orchestrator blocks, all in one place. feature adds nothing; bug-fix is the repro-first lines above.
+const INVESTIGATION_ORCHESTRATOR_LINES = (dir) => [
+  `Playbook investigation: this job needs findings, not a browser check. Do NOT start a verifier; the verifier instructions below do not apply, and there is no verifier verdict to wait for.`,
+  `Workers write research summaries in the RESEARCH REPORT FORMAT, with a citation (file:line, URL or command output) for every Observed claim.`,
+  `Before orca done, check the citations yourself: open each cited file or re-run each cited command and confirm it says what the summary claims. Send a worker back for any claim that fails; write ${dir}/summary.txt only from claims that held.`,
+];
+const HILLCLIMB_ORCHESTRATOR_LINES = (dir) => [
+  `Playbook hillclimb: first fix ONE metric, the command that prints it, and whether higher or lower is better. A worker records the baseline value in ${dir}/results/baseline.json before any change.`,
+  `Then iterate: each worker iteration changes one thing, re-measures, and keeps the change only when the metric improves on the best value so far; otherwise it reverts the change. Log every iteration (change, metric, kept or reverted).`,
+];
+const PLAYBOOK_ORCHESTRATOR_LINES = {
+  feature: () => [],
+  "bug-fix": REPRO_ORCHESTRATOR_LINES,
+  investigation: INVESTIGATION_ORCHESTRATOR_LINES,
+  hillclimb: HILLCLIMB_ORCHESTRATOR_LINES,
+};
 
 function verifierPrompt(job, name, task, alias, round) {
   const dir = jobDir(job.repo, job.id);
@@ -1457,7 +1475,7 @@ function orchestratorPrompt(job) {
     `If orca is not on PATH, run ${ORCA} instead. The binary is the same file.`,
     `Write every worker --task as this brief, one labelled section per line: GOAL / SCOPE (files it owns) / CONTEXT (file pointers, not pasted text) / ACCEPTANCE / VERIFY / TIMEBOX / FORBIDDEN / REPORT. Workers cannot ask questions, so a vague task fails quietly.`,
     `When orca.features.md exists at the repo root, point workers at it in CONTEXT.`,
-    ...(job.playbook === "bug-fix" ? REPRO_ORCHESTRATOR_LINES(dir) : []),
+    ...(PLAYBOOK_ORCHESTRATOR_LINES[job.playbook] || PLAYBOOK_ORCHESTRATOR_LINES.feature)(dir),
     `For a one-command task the brief collapses to GOAL + ACCEPTANCE. orca warns when a builder task has no SCOPE: or ACCEPTANCE:.`,
     `When a worker's task is research or investigation, append this block verbatim to its --task (after REPORT):\n${RESEARCH_REPORT}`,
     `Worker names must match [a-z][a-z0-9_-]{0,31}. If a name is already taken (by an earlier worker, even a finished one) orca appends -2, -3... and prints the real name.`,
@@ -1923,6 +1941,7 @@ function cmdStatus(args) {
     console.log(`  branch: ${job.branch || `orca/${job.id}`}`);
     console.log(`  worktree: ${job.worktree || "(not created)"}`);
     console.log(`  layout: ${job.workerLayout || "shared-worktree"}`);
+    console.log(`  playbook: ${job.playbook || "feature"}`);
     if (job.port != null) console.log(`  port: ${job.port}${Array.isArray(job.ports) && job.ports.length > 1 ? ` ports=${job.ports.join(",")}` : ""}`);
     if (roundOf(job) > 1) console.log(`  round: ${roundOf(job)} (follow-up)`);
     if (job.watcherPid && job.status === "running") console.log(`  watcher: pid ${job.watcherPid}`);

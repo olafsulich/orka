@@ -1,6 +1,6 @@
 # 10 · Playbooks by job type
 
-Status: todo · Source: pstack · Doc: [#18](../research/IMPROVEMENTS-pstack-limen.md#3-combined-ranking)
+Status: done · Source: pstack · Doc: [#18](../research/IMPROVEMENTS-pstack-limen.md#3-combined-ranking)
 
 ## Why
 Every job runs the same build → verify loop. A research job doesn't need a browser verifier; it needs citations. A bug fix needs a repro first. An explicit playbook flag picks the right loop with no auto-routing.
@@ -18,6 +18,9 @@ Every job runs the same build → verify loop. A research job doesn't need a bro
 - An invalid playbook value fails with the list of valid ones.
 - Each playbook changes only its block of the prompt. Tests cover all four.
 - `status` and the finish payload show the playbook.
+
+## Done
+`--playbook` now takes feature|bug-fix|investigation|hillclimb (stored as `job.playbook`, default feature). Orchestrator blocks live in `PLAYBOOK_ORCHESTRATOR_LINES` (bug-fix reuses the repro lines; investigation says no verifier and citation checks before done; hillclimb says metric, baseline, keep only improvements). `orca status` prints `playbook:` and the finish payload carries `playbook`. `orca done` never required a verifier, so it needed no change. New `test/playbooks.test.mjs` (8 tests, diffs each prompt against feature). npm test: 218 tests, 218 pass, 0 fail. Payload asserts in finish-webhook, integration-lifecycle and verifier tests gained `playbook: "feature"`.
 
 ## Source refs
 - `pstack/skills/poteto-mode/playbooks/investigation.md`

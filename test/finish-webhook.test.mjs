@@ -157,7 +157,7 @@ test("stop posts once and a failed send does not flip status", async () => {
     assert.equal(hits.length, 1);
     assert.equal(hits[0].headers.authorization, "Bearer test-key");
     assert.equal(hits[0].headers["x-automation-key"], "test-key");
-    assert.deepEqual(JSON.parse(hits[0].body), { job: box.id, status: "stopped", branch: `orca/${box.id}` });
+    assert.deepEqual(JSON.parse(hits[0].body), { job: box.id, status: "stopped", branch: `orca/${box.id}`, playbook: "feature" });
     const record = JSON.parse(readFileSync(box.recordPath, "utf8"));
     assert.equal(record.attempts.length, 1);
     assert.equal(record.attempts[0].outcome, "accepted");
@@ -252,7 +252,7 @@ test("webhook retries a rejected POST and records the attempt", async () => {
     assert.deepEqual(record.attempts.map((item) => item.outcome), ["failed", "accepted"]);
     assert.equal(hits.length, 2);
     assert.equal(hits[1].url, "/ok");
-    assert.deepEqual(JSON.parse(hits[1].body), { job: box.id, status: "stopped", branch: `orca/${box.id}` });
+    assert.deepEqual(JSON.parse(hits[1].body), { job: box.id, status: "stopped", branch: `orca/${box.id}`, playbook: "feature" });
   } finally {
     receiver.close();
     rmSync(box.repo, { recursive: true, force: true });
@@ -272,7 +272,7 @@ test("a job already marked done can POST that status", async () => {
     const sent = await orca(box.repo, ["webhook", box.id], tls);
     assert.equal(sent.status, 0, sent.stderr);
     assert.equal(job(box.jobPath).status, "done");
-    assert.deepEqual(JSON.parse(hits[0].body), { job: box.id, status: "done", branch: `orca/${box.id}` });
+    assert.deepEqual(JSON.parse(hits[0].body), { job: box.id, status: "done", branch: `orca/${box.id}`, playbook: "feature" });
   } finally {
     receiver.close();
     rmSync(box.repo, { recursive: true, force: true });
@@ -372,7 +372,7 @@ test("done on a running job marks done and posts once", async () => {
     assert.equal(job(box.jobPath).status, "done");
     assert.equal(existsSync(box.recordPath), true);
     assert.equal(hits.length, 1);
-    assert.deepEqual(JSON.parse(hits[0].body), { job: box.id, status: "done", branch: `orca/${box.id}` });
+    assert.deepEqual(JSON.parse(hits[0].body), { job: box.id, status: "done", branch: `orca/${box.id}`, playbook: "feature" });
   } finally {
     receiver.close();
     rmSync(box.repo, { recursive: true, force: true });
