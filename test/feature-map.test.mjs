@@ -26,7 +26,10 @@ test("verifier prompt creates the map when missing", () => {
 test("verifier prompt has the staleness guard", () => {
   assert.match(verifier, /Staleness guard/);
   assert.match(verifier, /older than HEAD/);
-  assert.match(verifier, /re-prove the entry/);
+  assert.match(verifier, /Every entry whose commit is older than HEAD/);
+  assert.match(verifier, /re-proved by you before you rely on it or mark it verified, never trusted/);
+  assert.match(verifier, /whether or not this job touched the feature/);
+  assert.doesNotMatch(verifier, /could be touched by this job/);
 });
 
 test("sample map carries the per-feature fields", () => {

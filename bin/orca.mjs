@@ -1383,7 +1383,7 @@ function verifierPrompt(job, name, task, alias, round) {
     `- "Inconclusive" or "could not test" is a fail, not a pass. If you cannot show it works, the verdict is fail.`,
     ``,
     `Feature map: before running checks, read ${FEATURE_MAP_FILE} at the worktree root. Per feature it records how to reach it (URL or command), how to drive it, how to prove it works, and when it was last verified (date + commit). Use it to start faster and check consistently.`,
-    `Staleness guard: each entry carries the commit it was last proven at. If that commit is older than HEAD (git rev-parse HEAD) and the feature could be touched by this job, re-prove the entry yourself instead of trusting it.`,
+    `Staleness guard: each entry carries the commit it was last proven at. Every entry whose commit is older than HEAD (git rev-parse HEAD) must be re-proved by you before you rely on it or mark it verified, never trusted, whether or not this job touched the feature.`,
     `If ${FEATURE_MAP_FILE} is missing, that is fine: create it with one entry per feature you check. On a pass, update the entries you touched (reach, drive, prove, last-verified date and HEAD commit). Editing ${FEATURE_MAP_FILE} is allowed even though you do not edit product code. On a fail, do not mark entries as proven.`,
     ``,
     `Run these checks:`,
