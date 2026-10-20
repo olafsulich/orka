@@ -1,5 +1,7 @@
 node_modules/
 .DS_Store
 
-# orca: job state, worktrees, and secrets
+# orca (old name of orka): job state, worktrees, and secrets
 .orca/
+# orka: job state, worktrees, and secrets (.orca/ above is the pre-rename name; this repo still uses it)
+.orka/

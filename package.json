@@ -1,10 +1,11 @@
 {
-  "name": "orca",
+  "name": "orka",
   "version": "0.0.1",
   "private": true,
   "type": "module",
   "description": "Local job CLI: one linked worktree, an orchestrator pane, workers on request, optional agent-browser checks.",
   "bin": {
+    "orka": "./bin/orka.mjs",
     "orca": "./bin/orca.mjs"
   },
   "scripts": {
