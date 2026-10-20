@@ -1080,18 +1080,18 @@ async function assignPorts(repo, job) {
 
 // Shared prompt rules: each literal lives here once and is interpolated into the prompts that use it.
 const REVERSIBLE_RULE = `Reversible work never waits on a human. Irreversible actions (push, delete outside the worktree, external sends, purchases) stop and ask.`;
-const NEVER_CLOSE_PANES = `Never close panes (yours or anyone's, no herdr pane close): finished panes stay open, and orca frees them when the job is done or stopped.`;
-const SUMMARY_FROM_DIFF = (job) => `Before orca done, run git diff ${job.baseCommit || `$(git merge-base ${brand.jobBranch(job)} main)`} (--stat plus a skim) and write summary.txt from the diff, not from the workers' claims.`;
+const NEVER_CLOSE_PANES = `Never close panes (yours or anyone's, no herdr pane close): finished panes stay open, and orka frees them when the job is done or stopped.`;
+const SUMMARY_FROM_DIFF = (job) => `Before orka done, run git diff ${job.baseCommit || `$(git merge-base ${brand.jobBranch(job)} main)`} (--stat plus a skim) and write summary.txt from the diff, not from the workers' claims.`;
 
 function portPromptLines(job) {
   const list = Array.isArray(job.ports) && job.ports.length ? job.ports : job.port != null ? [job.port] : [];
   const lines = [];
   if (list.length) {
-    lines.push(`Your job port${list.length > 1 ? "s" : ""}: ${list.join(", ")} (env ORCA_PORT=${job.port ?? list[0]}${list.length > 1 ? `, ORCA_PORTS=${list.join(",")}` : ""}).`);
-    lines.push(`Use your job port(s) ($ORCA_PORT / the ports listed above) for any dev or preview server, never a fixed default like 3000 or 5173, so concurrent orca jobs never collide.`);
+    lines.push(`Your job port${list.length > 1 ? "s" : ""}: ${list.join(", ")} (env ORKA_PORT=${job.port ?? list[0]}${list.length > 1 ? `, ORKA_PORTS=${list.join(",")}` : ""}).`);
+    lines.push(`Use your job port(s) ($ORKA_PORT / the ports listed above) for any dev or preview server, never a fixed default like 3000 or 5173, so concurrent orka jobs never collide.`);
   }
   lines.push(
-    `Decide operational questions yourself by choosing the safe recommended option instead of asking. Examples: stop a stale server left by a finished orca job, or pick your own job port when one is busy.`,
+    `Decide operational questions yourself by choosing the safe recommended option instead of asking. Examples: stop a stale server left by a finished orka job, or pick your own job port when one is busy.`,
     `Only ask when a genuine human decision or a secret is required. A question nobody sees leaves the job stuck.`,
     REVERSIBLE_RULE,
   );
@@ -1160,13 +1160,13 @@ function workerPrompt(job, name, task, alias) {
   const result = join(dir, "results", `${name}.json`);
   const note = join(dir, "notes", `${name}.txt`);
   return [
-    `You are a worker for orca job ${job.id} (${paneCommand(alias)}). Do this task and stop.`,
+    `You are a worker for orka job ${job.id} (${paneCommand(alias)}). Do this task and stop.`,
     `Work only in this shared checkout: ${job.worktree}`,
     `Branch: ${job.branch}`,
     `Other workers share this worktree. Do not revert their files. Do not create a branch, worktree, or push.`,
     `Browser checks, if this task needs them, go in ${verifyFile(job.worktree)} at the worktree root, or the path in ${configPath(job.repo)} "verify".`,
     `Shape: {"steps":[["open","http://HOST:PORT/"],{"visible":"SELECTOR"},{"text":"SELECTOR","includes":"EXPECTED"}]}`,
-    `Use this project's URL. Do not copy a host or port from another repo. Do not run orca verify unless the task says so.`,
+    `Use this project's URL. Do not copy a host or port from another repo. Do not run orka verify unless the task says so.`,
     ...portPromptLines(job),
     `Use exactly one agent-browser session, named ${browserPrefix(job)}-${name} (agent-browser --session ${browserPrefix(job)}-${name}). Reuse it for every check. Never spawn a fresh session per check. When the task is done, close it: agent-browser --session ${browserPrefix(job)}-${name} close`,
     ``,
@@ -1178,12 +1178,12 @@ function workerPrompt(job, name, task, alias) {
     `Then send that line to the orchestrator:`,
     `herdr agent prompt ${job.agent} "<the one-line note>"`,
     `If that prompt is rejected because the orchestrator is busy, the files are enough.`,
-    `The note and the herdr prompt are one line, at most 200 characters. Do not paste logs, diffs, or the job file. The orchestrator will run orca digest.`,
+    `The note and the herdr prompt are one line, at most 200 characters. Do not paste logs, diffs, or the job file. The orchestrator will run orka digest.`,
     ``,
     `If SCOPE or ACCEPTANCE is missing from the task above, do the narrowest reading of it and say so in the result.`,
     ``,
     NEVER_CLOSE_PANES,
-    `Finish wake is automatic from the orca CLI when it marks the job done, failed, or stopped. That is not your job. Do not run herdr-finish-watch. Do not run orca stop or orca webhook. Do not start another agent.`,
+    `Finish wake is automatic from the orka CLI when it marks the job done, failed, or stopped. That is not your job. Do not run herdr-finish-watch. Do not run orka stop or orka webhook. Do not start another agent.`,
   ].join("\n");
 }
 
@@ -1216,7 +1216,7 @@ function parseRole(args) {
 
 const isVerifierName = (name) => name === VERIFIER_NAME || /^verifier-[0-9]+$/.test(name);
 
-// Names are never reused: a finished pane keeps its name until orca frees it on done/stop.
+// Names are never reused: a finished pane keeps its name until orka frees it on done/stop.
 // herdr agent names are global across workspaces and jobs, so ask for every agent, not just ours.
 function herdrAgentNames() {
   const got = herdr(["agent", "list"]);
@@ -1363,7 +1363,7 @@ function computeVerifier(repo, job) {
   history.sort((a, b) => a.round - b.round);
   const next = { ...job.verifier, rounds: round, verdict: norm.verdict, history, stall: stallOf(history, round) };
   if (!Array.isArray(next.strategyChanges)) next.strategyChanges = [];
-  // The first time orca reads this round's result it records the code snapshot; later reads compare.
+  // The first time orka reads this round's result it records the code snapshot; later reads compare.
   const snap = codeSnapshot(job);
   if (snap) {
     if (next.patchRound === round && next.patchId) next.stale = snap.patchId !== next.patchId;
@@ -1462,7 +1462,7 @@ function verifierPrompt(job, name, task, alias, round) {
   const note = join(dir, "notes", `${name}.txt`);
   const session = `${browserPrefix(job)}-${name}`;
   return [
-    `You are the verifier for orca job ${job.id} (${paneCommand(alias)}), round ${round}${job.maxRounds ? ` of ${job.maxRounds}` : ""}. Do this task and stop.`,
+    `You are the verifier for orka job ${job.id} (${paneCommand(alias)}), round ${round}${job.maxRounds ? ` of ${job.maxRounds}` : ""}. Do this task and stop.`,
     `You start with fresh context. You did not build this. Judge it against the goal, not against what the builders say.`,
     `Work only in this shared checkout: ${job.worktree}`,
     `Branch: ${job.branch}`,
@@ -1487,10 +1487,10 @@ function verifierPrompt(job, name, task, alias, round) {
     `If ${featureMapFile(job.worktree)} is missing, that is fine: create it with one entry per feature you check. On a pass, update the entries you touched (reach, drive, prove, last-verified date and HEAD commit). Editing ${featureMapFile(job.worktree)} is allowed even though you do not edit product code. On a fail, do not mark entries as proven.`,
     ``,
     `Run these checks:`,
-    `1. orca verify ${job.id} (if orca is not on PATH, run ${ORKA} verify ${job.id}).`,
+    `1. orka verify ${job.id} (if orka is not on PATH, run ${ORKA} verify ${job.id}).`,
     `2. The project's own checks: npm test and npm run check, each only when package.json has that script.`,
     `3. Targeted agent-browser checks against the acceptance criteria above, when the goal has a UI.`,
-    `For every check that fails, test mechanically whether it is pre-existing: run orca verify ${job.id} --base (runs the same checks file on the base commit and writes results/verify-base.json), or re-run the same project command at the base commit (${job.baseCommit || "git merge-base <branch> main"}).`,
+    `For every check that fails, test mechanically whether it is pre-existing: run orka verify ${job.id} --base (runs the same checks file on the base commit and writes results/verify-base.json), or re-run the same project command at the base commit (${job.baseCommit || "git merge-base <branch> main"}).`,
     `A failure that also fails on the base commit is a warning (non-blocking), with the proof. Anything else, including anything you could not test on the base, is a blocking failure. Never edit product code. Never weaken or remove a check.`,
     `You may author or extend ${verifyFile(job.worktree)} (at the worktree root, or the path in ${configPath(job.repo)} "verify") only to cover the acceptance criteria.`,
     `Never weaken, loosen or delete a check to make it pass. Never skip a failing check.`,
@@ -1501,7 +1501,7 @@ function verifierPrompt(job, name, task, alias, round) {
     ...(job.jobType === "ui" ? browserVerifierLines(session, dir) : []),
     ``,
     `When finished, write ${result} as JSON:`,
-    `{"name":"${name}","role":"verifier","round":${round},"verdict":"pass"|"fail","checks":[{"name":"...","outcome":"pass"|"fail"|"skipped","scope":"job"|"preexisting","notes":"..."}],"failures":[{"check":"<stable check name>","evidence":"<exact error, step, url, command output>"}],"warnings":[{"check":"...","evidence":"...","base":"<sha>","proof":"<how it was shown pre-existing, e.g. fails on base via orca verify --base>"}],"summary":"..."}`,
+    `{"name":"${name}","role":"verifier","round":${round},"verdict":"pass"|"fail","checks":[{"name":"...","outcome":"pass"|"fail"|"skipped","scope":"job"|"preexisting","notes":"..."}],"failures":[{"check":"<stable check name>","evidence":"<exact error, step, url, command output>"}],"warnings":[{"check":"...","evidence":"...","base":"<sha>","proof":"<how it was shown pre-existing, e.g. fails on base via orka verify --base>"}],"summary":"..."}`,
     `verdict is "pass" when failures is empty, even if warnings are present. failures are blocking and cover what this job changed; warnings are pre-existing or unrelated failures proven on the base commit. Use the same check name for the same check every round. Evidence must be concrete: the exact error, step, url or command output.`,
     `Also write one line at ${note}.`,
     `Then send that line to the orchestrator:`,
@@ -1509,62 +1509,62 @@ function verifierPrompt(job, name, task, alias, round) {
     `If that prompt is rejected because the orchestrator is busy, the files are enough.`,
     ``,
     NEVER_CLOSE_PANES,
-    `Finish wake is automatic from the orca CLI when it marks the job done, failed, or stopped. That is not your job. Do not run herdr-finish-watch. Do not run orca stop, orca done or orca webhook. Do not start another agent.`,
+    `Finish wake is automatic from the orka CLI when it marks the job done, failed, or stopped. That is not your job. Do not run herdr-finish-watch. Do not run orka stop, orka done or orka webhook. Do not start another agent.`,
   ].join("\n");
 }
 
 // The verifier and finish section of the orchestrator prompt. Every playbook but investigation uses this one.
 const FEATURE_FLOW = (job, dir) => ({
-  reap: `When a worker or the verifier has finished, run orca reap ${job.id} --worker <name> to close its browsers (its pane stays open).`,
+  reap: `When a worker or the verifier has finished, run orka reap ${job.id} --worker <name> to close its browsers (its pane stays open).`,
   modelNote: [`The verifier (--role verifier) uses the job's verifier model, ${verifierLabel(job)}, not the worker model, unless you pass --model.`],
-  digest: `When a worker note arrives, run orca digest ${job.id} and trust it over memory after compaction. Do not read the job JSON, verify.log, or a pane transcript. Open results/<name>.json only if the digest says the note is missing or ok is not true. When routing a verifier failure, use the evidence already in the digest. Do not paste a longer excerpt into the next worker task.`,
+  digest: `When a worker note arrives, run orka digest ${job.id} and trust it over memory after compaction. Do not read the job JSON, verify.log, or a pane transcript. Open results/<name>.json only if the digest says the note is missing or ok is not true. When routing a verifier failure, use the evidence already in the digest. Do not paste a longer excerpt into the next worker task.`,
   digestUse: "test counts and status",
   summaryFrom: "from the git diff",
   verify: [
-    `When every builder has reported, start ONE verifier. It has fresh context and checks the work against the goal. Every round uses the same command; orca names the panes verifier, verifier-2, verifier-3... and each round overwrites ${dir}/results/${VERIFIER_NAME}.json (the previous one is kept as verifier.round-N.json):`,
-    `  orca worker --job ${job.id} --name ${VERIFIER_NAME} --role verifier --task "<what was built and the acceptance criteria>"`,
+    `When every builder has reported, start ONE verifier. It has fresh context and checks the work against the goal. Every round uses the same command; orka names the panes verifier, verifier-2, verifier-3... and each round overwrites ${dir}/results/${VERIFIER_NAME}.json (the previous one is kept as verifier.round-N.json):`,
+    `  orka worker --job ${job.id} --name ${VERIFIER_NAME} --role verifier --task "<what was built and the acceptance criteria>"`,
     `Build the verifier --task from the builders' ACCEPTANCE lines (copy them in, one per builder), plus the job goal.`,
-    `The verifier runs orca verify, the project's own checks and targeted agent-browser checks, and may extend ${verifyFile(job.worktree)} only to cover the acceptance criteria.`,
+    `The verifier runs orka verify, the project's own checks and targeted agent-browser checks, and may extend ${verifyFile(job.worktree)} only to cover the acceptance criteria.`,
     `It writes ${dir}/results/${VERIFIER_NAME}.json: "verdict" pass or fail, "failures" (blocking: what this job changed, each with its evidence) and "warnings" (pre-existing failures the verifier showed also fail on the base commit; they never block a pass).`,
     `If the verdict is fail, read ${dir}/results/${VERIFIER_NAME}.json and route each blocking failure WITH its evidence to the builder that owns those files (a new or resumed builder worker). Ignore warnings for routing. Wait for their reports, then start the verifier again.`,
-    `Run orca status ${job.id} after each verifier round. If it reports a stall (the same check failing two rounds in a row), do NOT repeat the same instruction.`,
+    `Run orka status ${job.id} after each verifier round. If it reports a stall (the same check failing two rounds in a row), do NOT repeat the same instruction.`,
     `Before changing strategy, attack the premise: write in one sentence the premise the failed fixes share, list what else could explain the failure (a census), and pick the strategy that drops that premise.`,
     `Change strategy instead: rewrite the worker prompt using the verifier's evidence verbatim, split the work differently, start a fresh worker instead of resuming one, or take a different approach.`,
-    `Record the change with: orca strategy ${job.id} --premise "<the shared premise you dropped>" "<what you changed>", then re-verify.`,
-    `Log every split, routing and strategy decision so it survives compaction: orca log ${job.id} <phase> "<decision>" "<why>" "<evidence>" "<result>" (phase: split, routing or strategy). orca strategy logs its own row.`,
+    `Record the change with: orka strategy ${job.id} --premise "<the shared premise you dropped>" "<what you changed>", then re-verify.`,
+    `Log every split, routing and strategy decision so it survives compaction: orka log ${job.id} <phase> "<decision>" "<why>" "<evidence>" "<result>" (phase: split, routing or strategy). orka strategy logs its own row.`,
     job.maxRounds
-      ? `There is a round ceiling of ${job.maxRounds} verifier rounds (--max-rounds). orca refuses a round beyond it; say so in the summary and run orca done.`
+      ? `There is a round ceiling of ${job.maxRounds} verifier rounds (--max-rounds). orka refuses a round beyond it; say so in the summary and run orka done.`
       : `There is no round limit. Keep going until the verdict is pass.`,
-    `Stop only when you genuinely cannot progress: the same failure survived 3 different strategy changes, or the fix needs a human decision or a secret. Then run: orca done ${job.id} --give-up "<plain reason>".`,
-    `You never run orca verify yourself and never edit ${verifyFile(job.worktree)} or any check. You may only run trivial read-only commands to read results.`,
+    `Stop only when you genuinely cannot progress: the same failure survived 3 different strategy changes, or the fix needs a human decision or a secret. Then run: orka done ${job.id} --give-up "<plain reason>".`,
+    `You never run orka verify yourself and never edit ${verifyFile(job.worktree)} or any check. You may only run trivial read-only commands to read results.`,
     `Do not invent a URL or a checks file unless the goal asked for checks.`,
   ],
   done: [
     `Keep every other field, including verify.`,
-    `Do not change verify or verifier; the verifier and orca done write those.`,
+    `Do not change verify or verifier; the verifier and orka done write those.`,
     `Then mark the job done, which sends the finish wake and records the verifier verdict (a fail verdict marks the job failed):`,
-    `  orca done ${job.id}`,
-    `If orca is not on PATH, run ${ORKA} done ${job.id}.`,
+    `  orka done ${job.id}`,
+    `If orka is not on PATH, run ${ORKA} done ${job.id}.`,
   ],
 });
 // Investigation swaps the verifier and finish section for a citation check by the orchestrator: no verifier runs, no verdict is waited for.
 const INVESTIGATION_FLOW = (job, dir) => ({
-  reap: `When a worker has finished, run orca reap ${job.id} --worker <name> to close its browsers (its pane stays open).`,
+  reap: `When a worker has finished, run orka reap ${job.id} --worker <name> to close its browsers (its pane stays open).`,
   modelNote: [],
-  digest: `When a worker note arrives, run orca digest ${job.id} and trust it over memory after compaction. Do not read the job JSON, verify.log, or a pane transcript. Open results/<name>.json only if the digest says the note is missing or ok is not true.`,
+  digest: `When a worker note arrives, run orka digest ${job.id} and trust it over memory after compaction. Do not read the job JSON, verify.log, or a pane transcript. Open results/<name>.json only if the digest says the note is missing or ok is not true.`,
   digestUse: "status",
   summaryFrom: "only from the claims whose citations held",
   verify: [
     `When every worker has reported, check the research summaries yourself. Open each cited file or re-run each cited command and confirm it says what the summary claims. Send a worker back for any claim that fails, then check again.`,
     `You may only run trivial read-only commands to read results and check citations.`,
-    `Log every split and routing decision so it survives compaction: orca log ${job.id} <phase> "<decision>" "<why>" "<evidence>" "<result>" (phase: split or routing).`,
-    `Stop only when you genuinely cannot progress: the question needs a human decision or a secret. Then run: orca done ${job.id} --give-up "<plain reason>".`,
+    `Log every split and routing decision so it survives compaction: orka log ${job.id} <phase> "<decision>" "<why>" "<evidence>" "<result>" (phase: split or routing).`,
+    `Stop only when you genuinely cannot progress: the question needs a human decision or a secret. Then run: orka done ${job.id} --give-up "<plain reason>".`,
   ],
   done: [
     `Keep every other field.`,
     `Then mark the job done, which sends the finish wake:`,
-    `  orca done ${job.id}`,
-    `If orca is not on PATH, run ${ORKA} done ${job.id}.`,
+    `  orka done ${job.id}`,
+    `If orka is not on PATH, run ${ORKA} done ${job.id}.`,
   ],
 });
 const PLAYBOOK_FLOW = { investigation: INVESTIGATION_FLOW };
@@ -1574,10 +1574,10 @@ function orchestratorPrompt(job) {
   const pi = job.kind === "pi";
   const flow = (PLAYBOOK_FLOW[job.playbook] || FEATURE_FLOW)(job, dir);
   return [
-    `You are the orchestrator for orca job ${job.id}, not the implementer.`,
+    `You are the orchestrator for orka job ${job.id}, not the implementer.`,
     `Do not implement the goal yourself. Do not edit the repo to satisfy the goal.`,
     `Split the goal into the smallest set of worker tasks, then start one worker per task.`,
-    `When tasks are independent, start several workers in parallel (several orca worker calls, one per task) instead of one after another.`,
+    `When tasks are independent, start several workers in parallel (several orka worker calls, one per task) instead of one after another.`,
     `Workers share one worktree, so never give two workers the same files. Split by file or area so edits cannot clash.`,
     ``,
     `Worktree (shared by every worker): ${job.worktree}`,
@@ -1588,15 +1588,15 @@ function orchestratorPrompt(job) {
     `Goal:`,
     job.goal.trim(),
     ``,
-    `Start each worker with orca, which opens a Herdr pane in this same worktree:`,
-    `  orca worker --job ${job.id} --name <worker> --task "<task>"`,
-    `If orca is not on PATH, run ${ORKA} instead. The binary is the same file.`,
+    `Start each worker with orka, which opens a Herdr pane in this same worktree:`,
+    `  orka worker --job ${job.id} --name <worker> --task "<task>"`,
+    `If orka is not on PATH, run ${ORKA} instead. The binary is the same file.`,
     `Write every worker --task as this brief, one labelled section per line: GOAL / SCOPE (files it owns) / CONTEXT (file pointers, not pasted text) / ACCEPTANCE / VERIFY / TIMEBOX / FORBIDDEN / REPORT. Workers cannot ask questions, so a vague task fails quietly.`,
     `When ${featureMapFile(job.worktree)} exists at the repo root, point workers at it in CONTEXT.`,
     ...(PLAYBOOK_ORCHESTRATOR_LINES[job.playbook] || PLAYBOOK_ORCHESTRATOR_LINES.feature)(dir),
-    `For a one-command task the brief collapses to GOAL + ACCEPTANCE. orca warns when a builder task has no SCOPE: or ACCEPTANCE:.`,
+    `For a one-command task the brief collapses to GOAL + ACCEPTANCE. orka warns when a builder task has no SCOPE: or ACCEPTANCE:.`,
     `When a worker's task is research or investigation, append this block verbatim to its --task (after REPORT):\n${RESEARCH_REPORT}`,
-    `Worker names must match [a-z][a-z0-9_-]{0,31}. If a name is already taken (by an earlier worker, even a finished one) orca appends -2, -3... and prints the real name.`,
+    `Worker names must match [a-z][a-z0-9_-]{0,31}. If a name is already taken (by an earlier worker, even a finished one) orka appends -2, -3... and prints the real name.`,
     NEVER_CLOSE_PANES,
     flow.reap,
     ...(pi
@@ -1610,15 +1610,15 @@ function orchestratorPrompt(job) {
     `Each worker writes ${dir}/results/<name>.json and a one-line note at ${dir}/notes/<name>.txt,`,
     `then prompts you with that note. Do not trust a worker that skipped them.`,
     flow.digest,
-    `The finish wake is sent by the orca CLI when orca done marks the job done (or when the job goes failed or stopped). Do not run herdr-finish-watch. Do not run orca stop or orca webhook.`,
+    `The finish wake is sent by the orka CLI when orka done marks the job done (or when the job goes failed or stopped). Do not run herdr-finish-watch. Do not run orka stop or orka webhook.`,
     ``,
     ...flow.verify,
     ``,
     SUMMARY_FROM_DIFF(job),
-    `Before orca done, run orca digest ${job.id}, use it only for ${flow.digestUse}; write ${dir}/summary.txt ${flow.summaryFrom} (per the rule above), and set the summary field. Do not load the job JSON into the turn to copy fields.`,
+    `Before orka done, run orka digest ${job.id}, use it only for ${flow.digestUse}; write ${dir}/summary.txt ${flow.summaryFrom} (per the rule above), and set the summary field. Do not load the job JSON into the turn to copy fields.`,
     ...flow.done,
-    `Then stop working. Your pane stays open after orca done, so Olaf can still give feedback with orca steer; a follow-up message starts a new round, and you run orca done ${job.id} again when that round is finished (the finish wake is sent again, marked followUp).`,
-    `If you stop and wait on a question, orca's watcher tells Olaf you need input, so ask only the genuine human questions described above.`,
+    `Then stop working. Your pane stays open after orka done, so Olaf can still give feedback with orka steer; a follow-up message starts a new round, and you run orka done ${job.id} again when that round is finished (the finish wake is sent again, marked followUp).`,
+    `If you stop and wait on a question, orka's watcher tells Olaf you need input, so ask only the genuine human questions described above.`,
   ].join("\n");
 }
 
@@ -1641,27 +1641,27 @@ function printDryRun(repo, job) {
   console.log(`layout: shared worktree (workers do not get sibling checkouts)`);
   console.log(`git: git -C ${q(repo)} worktree add -b ${q(branch)} ${q(wt)} HEAD`);
   console.log(`workspace: herdr workspace create --cwd ${q(wt)} --label ${q(brand.workspaceLabel(job.id))} --no-focus --env PATH=<orka-bins>:$PATH${job.port != null ? ` ${portEnvArgs(job).map(q).join(" ")}` : " (+ ORKA_PORT/ORCA_PORT env, allocated at run)"}`);
-  console.log(`port: ${job.port != null ? (job.ports || [job.port]).join(",") : "allocated at run"} (ORCA_PORT in the panes and orca verify scripts; urls and commands in ${verifyFile(job.worktree)} expand \${ORCA_PORT})`);
+  console.log(`port: ${job.port != null ? (job.ports || [job.port]).join(",") : "allocated at run"} (ORKA_PORT in the panes and orka verify scripts; urls and commands in ${verifyFile(job.worktree)} expand \${ORKA_PORT})`);
   console.log(`lead: herdr ${sh(startArgs(name, "<pane>", kind, orchestratorModel))}`);
   if (kind === "claude") {
     const verifierModel = job.verifierModel || workerModel;
     console.log(`models: orchestrator=${orchestratorModel} worker=${workerModel} ${verifierLabel(job)}`);
     console.log(`pane: ${paneCommand(orchestratorModel)}`);
-    console.log(`worker: orca worker --job ${job.id} --name <worker> --task "<task>"`);
+    console.log(`worker: orka worker --job ${job.id} --name <worker> --task "<task>"`);
     console.log(`worker-pane: ${paneCommand(workerModel)}`);
     console.log(`worker-lead: herdr ${sh(startArgs("<worker>", "<pane>", "claude", workerModel))}`);
     console.log(`verifier-pane: ${paneCommand(verifierModel)}`);
   } else {
     console.log("role: orchestrator (pi)");
     console.log(`pane: ${paneCommand("")}`);
-    console.log(`worker: orca worker --job ${job.id} --name <worker> --task "<task>"`);
+    console.log(`worker: orka worker --job ${job.id} --name <worker> --task "<task>"`);
     console.log(`worker-pane: ${paneCommand("")}`);
     console.log(`worker-lead: herdr ${sh(startArgs("<worker>", "<pane>", "pi", ""))}`);
   }
   console.log("finish webhook: posts {job, status, branch} when the CLI marks done, failed, or stopped");
-  console.log("watcher: orca watch <id> (detached) posts {kind:needs-input, job, title, status, question, pane} when the orchestrator waits on a question");
-  console.log("cleanup on finish: browsers, worktree servers and worker panes close at once; the orchestrator pane and workspace stay until orca cleanup finds them idle");
-  console.log(`verify: orca verify ${job.id} (skips when the worktree has no checks file)`);
+  console.log("watcher: orka watch <id> (detached) posts {kind:needs-input, job, title, status, question, pane} when the orchestrator waits on a question");
+  console.log("cleanup on finish: browsers, worktree servers and worker panes close at once; the orchestrator pane and workspace stay until orka cleanup finds them idle");
+  console.log(`verify: orka verify ${job.id} (skips when the worktree has no checks file)`);
 }
 
 function assignClaudeModels(job, args) {
@@ -1687,7 +1687,7 @@ function assignClaudeModels(job, args) {
 }
 
 async function cmdNew(args) {
-  if ("model" in args) fail("use --worker-model on orca new, not --model");
+  if ("model" in args) fail("use --worker-model on orka new, not --model");
   allowFlags(args, ["cwd", "title", "goal", "kind", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds", "ui", "playbook"]);
   const title = args.title;
   const goal = args.goal;
@@ -1757,7 +1757,7 @@ function hasHead(repo) {
 }
 
 function addWorktree(repo, job) {
-  if (!hasHead(repo)) fail("target repo has no commits; commit once before orca run");
+  if (!hasHead(repo)) fail("target repo has no commits; commit once before orka run");
   const path = worktreePath(repo, job.id);
   const branch = brand.jobBranch(job);
   if (existsSync(path)) fail(`worktree path already exists: ${path}`);
@@ -1812,7 +1812,7 @@ function startLead(job) {
 }
 
 async function cmdRun(args) {
-  if ("model" in args) fail("use --orchestrator-model and --worker-model on orca run, not --model");
+  if ("model" in args) fail("use --orchestrator-model and --worker-model on orka run, not --model");
   allowFlags(args, ["cwd", "dry-run", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds", "ui", "playbook"]);
   const id = args._[1];
   if (!id) fail("need id");
@@ -1892,7 +1892,7 @@ function paneShowsActivity(paneText) {
   return String(paneText || "").split(/\r?\n/).some((l) => /^\s*[│|]?\s*(?:[⏺⎿●]|[❯>]\s+[^\s│|])/.test(l));
 }
 
-// A pane is provably unused when orca recorded delivery failed (a missing or ok delivery is never
+// A pane is provably unused when orka recorded delivery failed (a missing or ok delivery is never
 // proof), it wrote no results/notes file, and right now (re-issue time) agent get succeeds with
 // status exactly idle and the pane read shows no conversation activity, no prompt echo and an
 // empty input box. A recorded failure alone is not proof: a hand re-delivery makes the agent work.
@@ -2008,7 +2008,7 @@ function cmdWorker(args) {
   });
   if (!delivered.ok) {
     save(repo, job);
-    fail(`worker ${name} did not start: ${delivered.reason}. Delivery failed; re-issue the task (orca worker ...) instead of waiting for a note.`);
+    fail(`worker ${name} did not start: ${delivered.reason}. Delivery failed; re-issue the task (orka worker ...) instead of waiting for a note.`);
   }
   if (role === "verifier") {
     const state = verifierState(job);
@@ -2098,7 +2098,7 @@ function printVerifierDetail(job) {
   if (last?.failing?.length) console.log(`  last failing: ${last.failing.join(", ")}`);
   if (last?.warnings?.length) console.log(`  warnings (non-blocking): ${last.warnings.join(", ")}`);
   if (v.stall) {
-    console.log(`  stall: ${v.stall.checks.join(", ")} failed in rounds ${v.stall.rounds[0]} and ${v.stall.rounds[1]}; change strategy, then run orca strategy ${job.id} --premise "<shared premise>" "<what changed>"`);
+    console.log(`  stall: ${v.stall.checks.join(", ")} failed in rounds ${v.stall.rounds[0]} and ${v.stall.rounds[1]}; change strategy, then run orka strategy ${job.id} --premise "<shared premise>" "<what changed>"`);
   }
   for (const c of v.strategyChanges || []) console.log(`  strategy change (round ${c.round}): ${c.premise ? `premise: ${c.premise} | change: ` : ""}${c.change}`);
   if (v.stopReason) console.log(`  verifier stop: ${v.stopReason}`);
@@ -2134,7 +2134,7 @@ function decisionRows(repo, id) {
 function cmdLog(args) {
   allowFlags(args, ["cwd"]);
   const [, id, phase, decision, why, evidence, result] = args._;
-  if (args._.length !== 7) fail('need: orca log <id> <phase> <decision> <why> <evidence> <result> (quote each argument)');
+  if (args._.length !== 7) fail('need: orka log <id> <phase> <decision> <why> <evidence> <result> (quote each argument)');
   const repo = requireRepo(args.cwd || process.cwd());
   load(repo, id);
   appendDecision(repo, id, [phase, decision, why, evidence, result]);
@@ -2146,7 +2146,7 @@ function cmdStrategy(args) {
   const id = args._[1];
   const premise = "premise" in args ? flagValue(args, "premise") : "";
   const change = args._.slice(2).join(" ").trim();
-  if (!id || !change) fail('need id and what changed: orca strategy <id> "<what changed>"');
+  if (!id || !change) fail('need id and what changed: orka strategy <id> "<what changed>"');
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, id);
   const v = job.verifier || {};
@@ -2256,7 +2256,7 @@ function collectDigestFiles(repo, job) {
 function cmdDigest(args) {
   allowFlags(args, ["cwd"]);
   const id = args._[1];
-  if (!id) fail("need: orca digest <id>");
+  if (!id) fail("need: orka digest <id>");
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, id);
   const text = renderDigest(digestView(job), collectDigestFiles(repo, job));
@@ -2267,13 +2267,13 @@ function cmdSteer(args) {
   allowFlags(args, ["cwd"]);
   const id = args._[1];
   const message = args._.slice(2).join(" ").trim();
-  if (!id || !message) fail('need: orca steer <id> "message"');
+  if (!id || !message) fail('need: orka steer <id> "message"');
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, id);
   const finished = FINISH_STATUSES.has(job.status);
   if ((job.status !== "running" && !finished) || !job.agent) fail(`${id} is ${job.status}; not steered`);
   // A finished job can be steered while its orchestrator pane is still open:
-  // that starts a follow-up round, and the next orca done sends the wake again.
+  // that starts a follow-up round, and the next orka done sends the wake again.
   if (finished && (job.workspaceClosed || !agentExists(job.agent))) {
     fail(`${id} is ${job.status} and its orchestrator pane is gone; not steered`);
   }
@@ -2298,7 +2298,7 @@ function cmdSteer(args) {
   }
   save(repo, job);
   if (finished) startWatcher(repo, job);
-  console.log(finished ? `steered ${id} (follow-up round ${job.round}; run orca done ${id} when finished)` : `steered ${id}`);
+  console.log(finished ? `steered ${id} (follow-up round ${job.round}; run orka done ${id} when finished)` : `steered ${id}`);
 }
 
 function agentExists(name) {
@@ -2346,7 +2346,7 @@ async function cmdStop(args) {
         ok = true;
         how = "interrupted";
       } else if (!agentExists(job.agent)) {
-        // Nothing left to interrupt. The workspace stays for orca cleanup.
+        // Nothing left to interrupt. The workspace stays for orka cleanup.
         ok = true;
         how = "agent already gone";
       }
@@ -2372,11 +2372,11 @@ async function cmdDone(args) {
   const id = args._[1];
   if (!id) fail("need id");
   const giveUp = "give-up" in args ? args["give-up"] : null;
-  if (giveUp !== null && (typeof giveUp !== "string" || !giveUp.trim())) fail('--give-up needs a plain reason: orca done <id> --give-up "<reason>"');
+  if (giveUp !== null && (typeof giveUp !== "string" || !giveUp.trim())) fail('--give-up needs a plain reason: orka done <id> --give-up "<reason>"');
   const reason = args._.slice(2).join(" ").trim() || "completed";
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, id);
-  if (job.status === "queued") fail(`orca done: ${id} is queued, not running; nothing finished`);
+  if (job.status === "queued") fail(`orka done: ${id} is queued, not running; nothing finished`);
   const terminal = job.status !== "running";
   if (args["dry-run"]) {
     if (terminal) {
@@ -2407,7 +2407,7 @@ async function cmdDone(args) {
   }
   const verifier = recordVerifier(repo, job);
   if (!giveUp && verifier?.verdict === "pass" && verifier.stale) {
-    console.error(`orca done: ${id} not marked done. ${verifierLine(job)}; the verifier pass no longer describes the code. Re-run the verifier (orca worker --job ${id} --name ${VERIFIER_NAME} --role verifier --task "..."), then run orca done again. To stop without a verified result: orca done ${id} --give-up "<reason>".`);
+    console.error(`orka done: ${id} not marked done. ${verifierLine(job)}; the verifier pass no longer describes the code. Re-run the verifier (orka worker --job ${id} --name ${VERIFIER_NAME} --role verifier --task "..."), then run orka done again. To stop without a verified result: orka done ${id} --give-up "<reason>".`);
     process.exitCode = 1;
     return;
   }
@@ -2570,7 +2570,7 @@ function fillPair(value) {
 function planArgv(args) {
   if (!args.length || args.some((item) => typeof item !== "string" || item.trim() === "")) fail("argv step needs non-empty strings");
   if (args.some((item) => item === "--session" || item.startsWith("--session=") || item === "--json")) {
-    fail("argv step must not set --session or --json; orca sets those");
+    fail("argv step must not set --session or --json; orka sets those");
   }
   const plan = { argv: args };
   if (args[0] === "is" && (args[1] === "visible" || args[1] === "enabled" || args[1] === "checked")) {
@@ -3217,77 +3217,77 @@ async function cmdWatch(args) {
 }
 
 function help() {
-  console.log(`orca — one job in a linked worktree
+  console.log(`orka — one job in a linked worktree
 
-  orca init [--cwd <repo>]
-  orca new --title "..." --goal "..." [--cwd <repo>] [--kind claude|pi] [--keep]
+  orka init [--cwd <repo>]
+  orka new --title "..." --goal "..." [--cwd <repo>] [--kind claude|pi] [--keep]
            [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds <N>]
-  orca run <id> [--dry-run] [--cwd <repo>] [--keep]
+  orka run <id> [--dry-run] [--cwd <repo>] [--keep]
            [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds <N>]
-  orca worker --job <id> --name <agent> --task "..." [--model <alias>] [--role builder|verifier] [--dry-run]
+  orka worker --job <id> --name <agent> --task "..." [--model <alias>] [--role builder|verifier] [--dry-run]
            (--model is claude only; pi workers have no model flag; --role verifier defaults to the job's verifierModel)
            (--role verifier needs --name verifier; no round limit unless the job has --max-rounds)
            A name already used by a worker of this job, or by a herdr agent, gets -2, -3... appended and
            the real name is printed. Verifier rounds are verifier, verifier-2, verifier-3... Panes are
-           never closed while the job runs; orca frees them on done/stop.
-  orca status [id] [--cwd <repo>]
-  orca digest <id> [--cwd <repo>]
-  orca steer <id> "message"   (also on a finished job whose orchestrator pane is still open: starts a follow-up round)
-  orca stop <id> [reason] [--dry-run] [--keep]
-  orca strategy <id> [--premise "<shared premise>"] "<what changed>"
-  orca log <id> <phase> <decision> <why> <evidence> <result>   (appends a row to .orca/jobs/<id>/decisions.tsv)
-  orca done <id> [reason] [--give-up "<reason>"] [--dry-run] [--keep] [--cwd <repo>]
-  orca cleanup [--dry-run] [--older-than <12h>] [--orphan-hours <2>] [--cwd <repo>]
-  orca reap <id> [--worker <name>] [--dry-run] [--cwd <repo>]   (closes browsers only; panes stay)
-  orca watch <id> [--dry-run] [--cwd <repo>]   (started by orca run; not for hand use)
-  orca webhook <id> [--dry-run] [--force] [--cwd <repo>]
-  orca verify <id> [--base] [--dry-run] [--cwd <repo>]
-  orca help
+           never closed while the job runs; orka frees them on done/stop.
+  orka status [id] [--cwd <repo>]
+  orka digest <id> [--cwd <repo>]
+  orka steer <id> "message"   (also on a finished job whose orchestrator pane is still open: starts a follow-up round)
+  orka stop <id> [reason] [--dry-run] [--keep]
+  orka strategy <id> [--premise "<shared premise>"] "<what changed>"
+  orka log <id> <phase> <decision> <why> <evidence> <result>   (appends a row to .orka/jobs/<id>/decisions.tsv)
+  orka done <id> [reason] [--give-up "<reason>"] [--dry-run] [--keep] [--cwd <repo>]
+  orka cleanup [--dry-run] [--older-than <12h>] [--orphan-hours <2>] [--cwd <repo>]
+  orka reap <id> [--worker <name>] [--dry-run] [--cwd <repo>]   (closes browsers only; panes stay)
+  orka watch <id> [--dry-run] [--cwd <repo>]   (started by orka run; not for hand use)
+  orka webhook <id> [--dry-run] [--force] [--cwd <repo>]
+  orka verify <id> [--base] [--dry-run] [--cwd <repo>]
+  orka help
 
 digest prints a capped snapshot and does not change the job.
 
-Jobs: <repo>/.orca/jobs/<id>.json
-Worktree: <repo>/.orca/worktrees/<id> on branch orca/<id>
+Jobs: <repo>/.orka/jobs/<id>.json
+Worktree: <repo>/.orka/worktrees/<id> on branch orka/<id>
 Workers share that worktree. Sibling worktrees are not in v0.
 
 kind claude (default)
   Defaults: orchestrator ${DEFAULT_ORCHESTRATOR_MODEL} (Opus 5.5), worker ${DEFAULT_WORKER_MODEL} (Sonnet 5.5).
   The job stores orchestratorModel and workerModel. new sets them. run may replace them.
-  orca worker --model overrides one worker; the job default stays workerModel.
+  orka worker --model overrides one worker; the job default stays workerModel.
   Aliases are checked against claude --help. Unknown aliases fail. The error lists the aliases named there.
   A full model name (claude-…) is accepted when help says so.
   run starts the orchestrator (claude --model <orchestratorModel>) in a Herdr pane.
-  It does not implement the goal. It starts workers with orca worker
+  It does not implement the goal. It starts workers with orka worker
   (claude --model <workerModel>) in extra panes, same worktree.
   Herdr has no --model flag. The alias is an agent argument.
 
 kind pi
   run starts a Pi orchestrator (pi) in a Herdr pane. It does not implement the goal.
-  It starts Pi workers with orca worker (pi, no model flag) in extra panes, same worktree.
+  It starts Pi workers with orka worker (pi, no model flag) in extra panes, same worktree.
   No Opus or Sonnet. --orchestrator-model, --worker-model and worker --model are refused.
 
 Multi-worker (both kinds)
   The orchestrator splits the goal and starts one worker per task. Independent tasks
-  start in parallel (several orca worker calls). All workers share one worktree, so no
+  start in parallel (several orka worker calls). All workers share one worktree, so no
   two workers get the same files.
 
 Verifier (both kinds)
   After every builder reports, the orchestrator starts ONE verifier:
-    orca worker --job <id> --name verifier --role verifier --task "<what was built + acceptance criteria>"
-  Fresh context, same worktree, the job's worker model. It runs orca verify, npm test / npm run check when
+    orka worker --job <id> --name verifier --role verifier --task "<what was built + acceptance criteria>"
+  Fresh context, same worktree, the job's worker model. It runs orka verify, npm test / npm run check when
   package.json has them, and targeted agent-browser checks in one session (<prefix>-verifier). It does not
-  edit product code. It may extend orca.verify.json only to cover the acceptance criteria, never weaken a check.
+  edit product code. It may extend orka.verify.json only to cover the acceptance criteria, never weaken a check.
   It writes results/verifier.json {"verdict","failures":[{"check","evidence"}],"warnings":[{"check","evidence","base","proof"}],...}
-  and notes/verifier.txt. failures block; warnings (shown to fail on the base commit too, via orca verify <id> --base)
+  and notes/verifier.txt. failures block; warnings (shown to fail on the base commit too, via orka verify <id> --base)
   never do: the verdict is "pass" when failures is empty.
-  There is no round limit. orca new/run --max-rounds N sets an opt-in ceiling; a round beyond it is refused.
-  orca records every round in job.verifier.history {round,verdict,failing,warnings}. If the same blocking check
-  fails in two consecutive rounds, job.verifier.stall is set and orca status says so. The orchestrator must then
-  change strategy and record it with orca strategy <id> "<what changed>" before re-verifying.
-  The orchestrator never runs orca verify or edits checks. If it cannot progress (the same failure survived 3
-  strategy changes, or a human decision or secret is needed): orca done <id> --give-up "<reason>" marks the job failed.
+  There is no round limit. orka new/run --max-rounds N sets an opt-in ceiling; a round beyond it is refused.
+  orka records every round in job.verifier.history {round,verdict,failing,warnings}. If the same blocking check
+  fails in two consecutive rounds, job.verifier.stall is set and orka status says so. The orchestrator must then
+  change strategy and record it with orka strategy <id> "<what changed>" before re-verifying.
+  The orchestrator never runs orka verify or edits checks. If it cannot progress (the same failure survived 3
+  strategy changes, or a human decision or secret is needed): orka done <id> --give-up "<reason>" marks the job failed.
   Every round writes results/verifier.json; starting the next round moves the old one to verifier.round-N.json.
-  orca done reads results/verifier.json, records job.verifier {rounds,verdict,history,stall,strategyChanges},
+  orka done reads results/verifier.json, records job.verifier {rounds,verdict,history,stall,strategyChanges},
   and marks the job failed ("verifier failed after N rounds: <checks>") on a final fail. done and status print
   "verified by verifier: pass, round N" (or "verifier: fail, round N"). No verifier run: nothing changes.
   verify --base runs the same checks file in a temporary detached worktree at job.baseCommit (older jobs:
@@ -3303,60 +3303,67 @@ A failed run marks failed after the worktree or pane exists. Idle is not termina
 
 Finish wake is automatic from this CLI when it marks a job done, failed, or stopped.
 It POSTs {"job","status","branch"} once (plus "verifier": "verified by verifier: pass, round N" and a "verification" object
-{"verdict","rounds","strategyChanges","blocking":[{"check","evidence"}],"warnings":[...],"stopReason"?} when a verifier ran), using <repo>/.orca/secrets/finish-webhook.env (mode 600).
+{"verdict","rounds","strategyChanges","blocking":[{"check","evidence"}],"warnings":[...],"stopReason"?} when a verifier ran), using <repo>/.orka/secrets/finish-webhook.env (mode 600).
 Keys are WEBHOOK_URL and WEBHOOK_KEY, the same pair as herdr-finish-wake.env. Off if that file is missing.
 This CLI does not read a home path and does not run herdr-finish-watch. Agents must not either.
-A failed POST does not change job status. The attempt is <repo>/.orca/jobs/<id>.finish.json.
-orca webhook retries a failed attempt and records it. --dry-run prints the payload and does not send.
+A failed POST does not change job status. The attempt is <repo>/.orka/jobs/<id>.finish.json.
+orka webhook retries a failed attempt and records it. --dry-run prints the payload and does not send.
 Example (not a secret): examples/finish-webhook.env
 
 verify
   Runs project checks in the job worktree through agent-browser.
-  Default file: orca.verify.json at the worktree root. Commit it. It is not under .orca/.
-  Override: "verify" in <repo>/.orca/config.json, a path relative to the worktree, or false to disable.
+  Default file: orka.verify.json at the worktree root. Commit it. It is not under .orka/.
+  Override: "verify" in <repo>/.orka/config.json, a path relative to the worktree, or false to disable.
   No checks file skips (exit 0, verify.status skipped). That is not a pass.
   Invalid or failing checks fail closed (exit 1, verify.status failed).
   The checks file names the URL. This command does not assume a host, port, or app.
   agent-browser must be on PATH. This CLI does not install it.
   Example: {"steps":[["open","http://127.0.0.1:3000/"],{"visible":"h1"},{"text":"h1","includes":"Ready"}]}
-  See README. examples/orca.verify.json is an example only; orca does not run it.
+  See README. examples/orka.verify.json is an example only; orka does not run it.
 
 cleanup (delayed, not close-everything)
-  On done, stop or a failed run orca frees at once only: the job's agent-browser sessions (names start with
-  orca-<8 hex of sha1(id)>; workers use <prefix>-<worker>, verify <prefix>-verify), dev/preview servers whose
-  process cwd is inside the job worktree (never orca itself or its ancestors), and the panes of finished
+  On done, stop or a failed run orka frees at once only: the job's agent-browser sessions (names start with
+  orka-<8 hex of sha1(id)>; workers use <prefix>-<worker>, verify <prefix>-verify), dev/preview servers whose
+  process cwd is inside the job worktree (never orka itself or its ancestors), and the panes of finished
   workers and the verifier (herdr pane close). What was closed is stored in job.cleanup.
   The orchestrator pane and the Herdr workspace stay open so Olaf can still steer. The record, worktree and branch always stay.
-  orca cleanup [--dry-run] [--older-than 12h] closes the workspace of jobs that are finished (done, failed,
-  stopped) and idle longer than the threshold (default 12h; or "staleAfter": "<duration>" in .orca/config.json).
+  orka cleanup [--dry-run] [--older-than 12h] closes the workspace of jobs that are finished (done, failed,
+  stopped) and idle longer than the threshold (default 12h; or "staleAfter": "<duration>" in .orka/config.json).
   Idle is measured from the latest of finished, steer, verifier and follow-up round times. A job is only closed once.
-  It also closes orca- browser sessions of jobs that are not running and agent-browser sessions whose pid file names a dead process.
+  It also closes orka- (and orca-) browser sessions of jobs that are not running and agent-browser sessions whose pid file names a dead process.
   Closing a session never launches a browser: a session with no live daemon or Chrome only has its state deleted.
-  Browsers are found by ORCA_JOB tag and by session name (AGENT_BROWSER_SESSION / --session in the process tree).
+  Browsers are found by ORKA_JOB (or ORCA_JOB) tag and by session name (AGENT_BROWSER_SESSION / --session in the process tree).
   It also kills orphan agent-browser-chrome-* roots (parent init, older than --orphan-hours, default 2, owned by no running job).
-  The same stale sweep runs quietly at the start of orca new and orca run (stderr, one line, only if it closed something).
+  The same stale sweep runs quietly at the start of orka new and orka run (stderr, one line, only if it closed something).
   No cron, no polling. --keep on new, run, done or stop opts out of everything. --dry-run lists "would close" lines.
 
 Follow-up rounds
-  orca steer <id> "message" works on a done, failed or stopped job whose orchestrator pane still exists. It sets the job
+  orka steer <id> "message" works on a done, failed or stopped job whose orchestrator pane still exists. It sets the job
   back to running, bumps job.round, and updates the activity time so the job is not stale. When the orchestrator calls
-  orca done again the finish wake is sent again for that round: the payload adds "round": N and "followUp": true and
+  orka done again the finish wake is sent again for that round: the payload adds "round": N and "followUp": true and
   <id>.finish.json keeps a per-round record ("rounds" and a "round" on each attempt). Round 1 payloads are unchanged.
 
 Ports
-  orca new allocates a block of ports for the job (lib/ports.mjs), unique among the other unfinished jobs, and stores
-  job.port and job.ports. ORCA_PORT, ORCA_PORTS and PORT are exported into the orchestrator and worker panes and into
-  orca verify scripts; the prompts state them too. In orca.verify.json, \${ORCA_PORT}, \${ORCA_PORT_2} and {{port}} expand in
-  every url and command. orca status prints the port. Older jobs without a port keep working (run allocates one).
+  orka new allocates a block of ports for the job (lib/ports.mjs), unique among the other unfinished jobs, and stores
+  job.port and job.ports. ORKA_PORT, ORKA_PORTS and PORT (plus ORCA_PORT, ORCA_PORTS) are exported into the orchestrator and worker panes and into
+  orka verify scripts; the prompts state them too. In orka.verify.json, \${ORKA_PORT}, \${ORKA_PORT_2} (or the old \${ORCA_PORT}, \${ORCA_PORT_2}) and {{port}} expand in
+  every url and command. orka status prints the port. Older jobs without a port keep working (run allocates one).
   Prompts tell agents to use their job port for dev servers and to decide operational questions themselves
-  (stop a stale server from a finished orca job, pick their own port); they ask only for a human decision or a secret.
+  (stop a stale server from a finished orka job, pick their own port); they ask only for a human decision or a secret.
 
 Needs-input watcher
-  orca run starts a detached watcher (orca watch <id>, log: <repo>/.orca/jobs/<id>/watcher.log, pid in job.watcherPid).
+  orka run starts a detached watcher (orka watch <id>, log: <repo>/.orka/jobs/<id>/watcher.log, pid in job.watcherPid).
   When the orchestrator is blocked or idle on a question it POSTs, through the finish webhook config,
   {"kind":"needs-input","job","title","status":"blocked"|"idle","question","pane"}. It dedupes per episode and exits when the
   job is terminal (markTerminal also stops it). With no webhook configured it logs and skips. Workers never post;
-  only orca done, stop or a failed run send the finish wake.
+  only orka done, stop or a failed run send the finish wake.
+
+Formerly orca
+  orca still works as a deprecated alias: same commands and output, plus one note on stderr.
+  State dir: .orka/ if it exists, else an existing .orca/ (never moved), else .orka/ is created.
+  Same fallback for orka.verify.json / orca.verify.json and orka.features.md / orca.features.md.
+  New jobs use branch orka/<id>, workspace label orka-<id> and browser sessions orka-<sha8>; jobs from
+  orca keep orca/<id> and orca-<sha8>. Env vars are exported as ORKA_* and ORCA_*; either is read.
 
 claude must be on PATH in the pane, and on PATH here so aliases can be checked.
 This CLI does not install it.
@@ -3386,7 +3393,7 @@ async function main() {
   else if (cmd === "cleanup") cmdCleanup(args);
   else if (cmd === "reap") cmdReap(args);
   else if (cmd === "watch") await cmdWatch(args);
-  else fail(`unknown command ${cmd}\nrun: orca help`);
+  else fail(`unknown command ${cmd}\nrun: orka help`);
 }
 
 try {
