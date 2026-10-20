@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
-const src = readFileSync(join(import.meta.dirname, "..", "bin", "orca.mjs"), "utf8");
+const src = readFileSync(join(import.meta.dirname, "..", "bin", "orka.mjs"), "utf8");
 const fn = (name) => {
   const start = src.indexOf(`function ${name}(`);
   return src.slice(start, src.indexOf("\n}\n", start));

@@ -7,7 +7,7 @@ import { rmSync as rmScratch } from "node:fs";
 import test from "node:test";
 import { renderDigest } from "../lib/digest.mjs";
 
-const ORCA = join(import.meta.dirname, "..", "bin", "orca.mjs");
+const ORKA = join(import.meta.dirname, "..", "bin", "orka.mjs");
 const TASK = "GOAL: build the delivery feature carefully. SCOPE: bin. ACCEPTANCE: tests pass.";
 
 // Fake herdr. Knobs are files in the box:
@@ -21,7 +21,7 @@ const TASK = "GOAL: build the delivery feature carefully. SCOPE: bin. ACCEPTANCE
 // An agent goes working once it has been prompted. Per-agent get counts and the get count seen at
 // prompt time are recorded so tests can prove ordering.
 function scratch(env = {}) {
-  const base = mkdtempSync(join(tmpdir(), "orca-delivery-"));
+  const base = mkdtempSync(join(tmpdir(), "orka-delivery-"));
   process.on("exit", () => rmScratch(base, { recursive: true, force: true }));
   const repo = join(base, "repo");
   const bin = join(base, "bin");
@@ -62,12 +62,12 @@ esac
   chmodSync(join(bin, "herdr"), 0o755);
   chmodSync(join(bin, "agent-browser"), 0o755);
   execFileSync("git", ["init", "-q"], { cwd: repo });
-  const fast = { ORCA_PROMPT_POLL_MS: "10", ORCA_PROMPT_WAIT_MS: "250", ORCA_PROMPT_BACKOFF_MS: "20", ORCA_READY_WAIT_MS: "1500" };
-  const full = { PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORCA_NO_WATCH: "1", ...fast, ...env };
-  const orca = (args) => spawnSync(process.execPath, [ORCA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...process.env, ...full } });
-  orca(["init"]);
+  const fast = { ORKA_PROMPT_POLL_MS: "10", ORKA_PROMPT_WAIT_MS: "250", ORKA_PROMPT_BACKOFF_MS: "20", ORKA_READY_WAIT_MS: "1500" };
+  const full = { PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ...fast, ...env };
+  const orka = (args) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...process.env, ...full } });
+  orka(["init"]);
   const t = {
-    base, repo, orca,
+    base, repo, orka,
     set: (f, v) => writeFileSync(join(base, f), v),
     state: (f) => (existsSync(join(st, f)) ? readFileSync(join(st, f), "utf8") : ""),
     prompts: (name) => t.state(`prompts-${name}`).split("\n").filter(Boolean).length,
@@ -77,17 +77,17 @@ esac
 }
 
 function makeJob(t) {
-  const id = t.orca(["new", "--kind", "pi", "--title", "d", "--goal", "g"]).stdout.trim();
-  const path = join(t.repo, ".orca", "jobs", `${id}.json`);
+  const id = t.orka(["new", "--kind", "pi", "--title", "d", "--goal", "g"]).stdout.trim();
+  const path = join(t.repo, ".orka", "jobs", `${id}.json`);
   const job = JSON.parse(readFileSync(path, "utf8"));
   Object.assign(job, { status: "running", pane: "p-orch", agent: "orch", worktree: join(t.repo, "wt") });
   writeFileSync(path, JSON.stringify(job));
-  mkdirSync(join(t.repo, ".orca", "jobs", id, "results"), { recursive: true });
-  mkdirSync(join(t.repo, ".orca", "jobs", id, "notes"), { recursive: true });
-  return { id, dir: join(t.repo, ".orca", "jobs", id), read: () => JSON.parse(readFileSync(path, "utf8")) };
+  mkdirSync(join(t.repo, ".orka", "jobs", id, "results"), { recursive: true });
+  mkdirSync(join(t.repo, ".orka", "jobs", id, "notes"), { recursive: true });
+  return { id, dir: join(t.repo, ".orka", "jobs", id), read: () => JSON.parse(readFileSync(path, "utf8")) };
 }
 
-const worker = (t, id, name = "builder") => t.orca(["worker", "--job", id, "--name", name, "--task", TASK]);
+const worker = (t, id, name = "builder") => t.orka(["worker", "--job", id, "--name", name, "--task", TASK]);
 
 test("fast path: ready agent that goes working after one prompt records delivery ok", () => {
   const t = scratch();
@@ -96,7 +96,7 @@ test("fast path: ready agent that goes working after one prompt records delivery
   assert.equal(r.status, 0, r.stderr);
   assert.equal(t.prompts("builder"), 1);
   assert.equal(j.read().workers[0].delivery, "ok");
-  assert.match(t.orca(["status", j.id]).stdout, /worker: builder .*delivery=ok/);
+  assert.match(t.orka(["status", j.id]).stdout, /worker: builder .*delivery=ok/);
 });
 
 test("slow start: the prompt is sent only after interactive_ready and idle", () => {
@@ -111,7 +111,7 @@ test("slow start: the prompt is sent only after interactive_ready and idle", () 
 });
 
 test("an agent that never gets ready is not prompted; the worker fails loudly", () => {
-  const t = scratch({ ORCA_READY_WAIT_MS: "150" });
+  const t = scratch({ ORKA_READY_WAIT_MS: "150" });
   t.set("ready-after", "100000");
   const j = makeJob(t);
   const r = worker(t, j.id);
@@ -122,7 +122,7 @@ test("an agent that never gets ready is not prompted; the worker fails loudly", 
 });
 
 test("agent get erroring (no status) is not ready: nothing is prompted, the worker fails with delivery failed", () => {
-  const t = scratch({ ORCA_READY_WAIT_MS: "200" });
+  const t = scratch({ ORKA_READY_WAIT_MS: "200" });
   t.set("get-error", "1");
   const j = makeJob(t);
   const r = worker(t, j.id);
@@ -143,12 +143,12 @@ test("a prompt that never makes the agent working is retried 3 times, then fails
   assert.equal(t.prompts("builder"), 3);
   const w = j.read().workers[0];
   assert.equal(w.delivery, "failed");
-  assert.match(t.orca(["status", j.id]).stdout, /worker: builder .*delivery=failed/);
-  assert.match(t.orca(["digest", j.id]).stdout, /DELIVERY FAILED/);
+  assert.match(t.orka(["status", j.id]).stdout, /worker: builder .*delivery=failed/);
+  assert.match(t.orka(["digest", j.id]).stdout, /DELIVERY FAILED/);
 });
 
-test("ORCA_PROMPT_ATTEMPTS overrides the attempt count", () => {
-  const t = scratch({ ORCA_PROMPT_ATTEMPTS: "2" });
+test("ORKA_PROMPT_ATTEMPTS overrides the attempt count", () => {
+  const t = scratch({ ORKA_PROMPT_ATTEMPTS: "2" });
   t.set("never", "builder\n");
   const j = makeJob(t);
   assert.notEqual(worker(t, j.id).status, 0);
@@ -181,7 +181,7 @@ test("re-issuing a task closes the earlier pane only when it provably never star
   assert.ok(first.closedUnused.reason.includes("builder-2"));
   assert.equal(second.delivery, "ok");
   assert.ok(!second.closedUnused);
-  assert.match(t.orca(["status", j.id]).stdout, /worker: builder .*delivery=failed closed-unused/);
+  assert.match(t.orka(["status", j.id]).stdout, /worker: builder .*delivery=failed closed-unused/);
 });
 
 // A first builder whose delivery failed, then (optionally) state changes by hand, then re-issue.
@@ -214,7 +214,7 @@ test("delivery failed, startup screen only, empty input, idle, no results: still
   const { t, j } = reissue(() => {});
   assert.match(t.log(), /^herdr pane close p-1$/m);
   assert.ok(j.read().workers[0].closedUnused);
-  assert.match(t.orca(["status", j.id]).stdout, /closed-unused/);
+  assert.match(t.orka(["status", j.id]).stdout, /closed-unused/);
 });
 
 test("agent get error or pane read error at re-issue keeps the pane", () => {
@@ -273,7 +273,7 @@ test("a duplicate with no delivery field (older record) is never closed", () => 
   t.set("never", "builder\n");
   const j = makeJob(t);
   assert.notEqual(worker(t, j.id).status, 0);
-  const path = join(t.repo, ".orca", "jobs", `${j.id}.json`);
+  const path = join(t.repo, ".orka", "jobs", `${j.id}.json`);
   const job = j.read();
   delete job.workers[0].delivery;
   delete job.workers[0].deliveryReason;
@@ -288,22 +288,22 @@ test("steer uses the same delivery: waits for ready, fails when the agent never 
   const j = makeJob(t);
   writeFileSync(join(t.base, "state", "pane-orch"), "p-orch\n");
   t.set("ready-after", "5");
-  const ok = t.orca(["steer", j.id, "go on"]);
+  const ok = t.orka(["steer", j.id, "go on"]);
   assert.equal(ok.status, 0, ok.stderr);
   assert.ok(Number(t.state("at-prompt-orch")) >= 5);
   const t2 = scratch();
   const j2 = makeJob(t2);
   writeFileSync(join(t2.base, "state", "pane-orch"), "p-orch\n");
   t2.set("never", "orch\n");
-  const bad = t2.orca(["steer", j2.id, "go on"]);
+  const bad = t2.orka(["steer", j2.id, "go on"]);
   assert.notEqual(bad.status, 0);
   assert.match(bad.stderr, /steer not delivered/);
   assert.equal(t2.prompts("orch"), 3);
   assert.equal(j2.read().steers.at(-1).delivery, "failed");
-  assert.match(t2.orca(["status", j2.id]).stdout, /steer: go on delivery=failed \[/);
-  assert.match(t2.orca(["digest", j2.id]).stdout, /last steer: go on \(0 earlier\) DELIVERY FAILED: steer never started the agent; re-send it/);
-  assert.doesNotMatch(t.orca(["status", j.id]).stdout, /steer:/);
-  assert.match(t.orca(["digest", j.id]).stdout, /last steer: go on \(0 earlier\)\n/);
+  assert.match(t2.orka(["status", j2.id]).stdout, /steer: go on delivery=failed \[/);
+  assert.match(t2.orka(["digest", j2.id]).stdout, /last steer: go on \(0 earlier\) DELIVERY FAILED: steer never started the agent; re-send it/);
+  assert.doesNotMatch(t.orka(["status", j.id]).stdout, /steer:/);
+  assert.match(t.orka(["digest", j.id]).stdout, /last steer: go on \(0 earlier\)\n/);
 });
 
 test("digest: delivery failed + results file shows no re-issue text; with nothing at all it still says DELIVERY FAILED", () => {
@@ -311,18 +311,18 @@ test("digest: delivery failed + results file shows no re-issue text; with nothin
   t.set("never", "builder\n");
   const j = makeJob(t);
   worker(t, j.id);
-  assert.match(t.orca(["digest", j.id]).stdout, /DELIVERY FAILED: prompt never started the agent; re-issue the task/);
+  assert.match(t.orka(["digest", j.id]).stdout, /DELIVERY FAILED: prompt never started the agent; re-issue the task/);
   mkdirSync(join(j.dir, "results"), { recursive: true });
   writeFileSync(join(j.dir, "results", "builder.json"), JSON.stringify({ ok: true, result: "done" }));
-  const out = t.orca(["digest", j.id]).stdout;
+  const out = t.orka(["digest", j.id]).stdout;
   assert.doesNotMatch(out, /DELIVERY FAILED|re-issue/);
   assert.match(out, /builder ok=true/);
 });
 
-test("orca run marks the job failed when the orchestrator prompt never starts the agent", () => {
+test("orka run marks the job failed when the orchestrator prompt never starts the agent", () => {
   const t = scratch();
   execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: t.repo });
-  const id = t.orca(["new", "--kind", "pi", "--title", "r", "--goal", "g"]).stdout.trim();
+  const id = t.orka(["new", "--kind", "pi", "--title", "r", "--goal", "g"]).stdout.trim();
   const jobName = `j${id.replace(/[^a-z0-9]/g, "")}`.slice(0, 32);
   t.set("never", `${jobName}\n`);
   writeFileSync(
@@ -332,21 +332,21 @@ test("orca run marks the job failed when the orchestrator prompt never starts th
       `"workspace create") echo '{"result":{"root_pane":{"pane_id":"p-root"}}}';;\n  "agent list")`,
     ),
   );
-  const r = t.orca(["run", id]);
+  const r = t.orka(["run", id]);
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /orchestrator prompt not delivered/);
   assert.equal(t.prompts(jobName), 3);
-  const job = JSON.parse(readFileSync(join(t.repo, ".orca", "jobs", `${id}.json`), "utf8"));
+  const job = JSON.parse(readFileSync(join(t.repo, ".orka", "jobs", `${id}.json`), "utf8"));
   assert.equal(job.leadDelivery, "failed");
   assert.equal(job.status, "failed");
-  const digest = t.orca(["digest", id]).stdout;
+  const digest = t.orka(["digest", id]).stdout;
   assert.match(digest, /^orchestrator: DELIVERY FAILED: orchestrator prompt not delivered: .*never started working/m);
 });
 
 test("digest of a job with a delivered orchestrator prompt has no orchestrator line", () => {
   const t = scratch();
   const j = makeJob(t);
-  assert.doesNotMatch(t.orca(["digest", j.id]).stdout, /orchestrator:/);
+  assert.doesNotMatch(t.orka(["digest", j.id]).stdout, /orchestrator:/);
   const ok = { id: "x", status: "running", leadDelivery: "ok", stopReason: "stopped by hand" };
   assert.doesNotMatch(renderDigest(ok), /orchestrator:/);
   assert.match(renderDigest({ ...ok, leadDelivery: "failed" }), /^orchestrator: DELIVERY FAILED: stopped by hand$/m);
@@ -359,7 +359,7 @@ test("gate table: only interactive_ready true + idle sends a prompt; every other
   const statuses = ["idle", "working", "blocked", undefined, "done"];
   const cases = [...readies.flatMap((r) => statuses.map((s) => [r, s])), ["error", "error"]];
   for (const [ready, status] of cases) {
-    const t = scratch({ ORCA_READY_WAIT_MS: "150" });
+    const t = scratch({ ORKA_READY_WAIT_MS: "150" });
     if (ready === "error") t.set("get-error", "1");
     else {
       const agent = {};
@@ -414,17 +414,17 @@ const surfaces = {
   },
   orchestrator: (t, failed) => {
     execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: t.repo });
-    const id = t.orca(["new", "--kind", "pi", "--title", "r", "--goal", "g"]).stdout.trim();
+    const id = t.orka(["new", "--kind", "pi", "--title", "r", "--goal", "g"]).stdout.trim();
     if (failed) t.set("never", `j${id.replace(/[^a-z0-9]/g, "")}`.slice(0, 32) + "\n");
     withWorkspace(t);
-    assert.equal(t.orca(["run", id]).status === 0, !failed);
+    assert.equal(t.orka(["run", id]).status === 0, !failed);
     return id;
   },
   steer: (t, failed) => {
     const j = makeJob(t);
     writeFileSync(join(t.base, "state", "pane-orch"), "p-orch\n");
     if (failed) t.set("never", "orch\n");
-    assert.equal(t.orca(["steer", j.id, "go on"]).status === 0, !failed);
+    assert.equal(t.orka(["steer", j.id, "go on"]).status === 0, !failed);
     return j.id;
   },
 };
@@ -434,8 +434,8 @@ test("delivery matrix: worker / orchestrator run / steer each show failure in st
     for (const failed of [true, false]) {
       const t = scratch();
       const id = make(t, failed);
-      const status = t.orca(["status", id]).stdout;
-      const digest = t.orca(["digest", id]).stdout;
+      const status = t.orka(["status", id]).stdout;
+      const digest = t.orka(["digest", id]).stdout;
       if (failed) {
         assert.match(status, /delivery=failed/, `${name}: status\n${status}`);
         assert.match(digest, /DELIVERY FAILED/, `${name}: digest\n${digest}`);

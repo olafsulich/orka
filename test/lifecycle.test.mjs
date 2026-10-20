@@ -63,7 +63,7 @@ test("isStale respects status, keep, workspace and extra activity", () => {
 });
 
 function fakeProc() {
-  const root = mkdtempSync(join(tmpdir(), "orca-lifecycle-"));
+  const root = mkdtempSync(join(tmpdir(), "orka-lifecycle-"));
   const procRoot = join(root, "proc");
   const wt = join(root, "wt");
   const wt2 = join(root, "wt2");
@@ -117,7 +117,7 @@ test("isServerProcess heuristics", () => {
     "zsh -l",
     "fish",
     "git status",
-    "node /x/bin/orca.mjs done abc",
+    "node /x/bin/orka.mjs done abc",
     "ls -la",
   ]) assert.equal(isServerProcess(c), false, c);
 });

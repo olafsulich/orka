@@ -6,27 +6,27 @@ import { join } from "node:path";
 import test from "node:test";
 import { DECISION_ROWS, DIGEST_MAX, renderDigest } from "../lib/digest.mjs";
 
-const ORCA = join(import.meta.dirname, "..", "bin", "orca.mjs");
+const ORKA = join(import.meta.dirname, "..", "bin", "orka.mjs");
 
 // No herdr is needed: log, strategy, status and digest never talk to it.
 function scratch() {
-  const base = mkdtempSync(join(tmpdir(), "orca-dlog-"));
+  const base = mkdtempSync(join(tmpdir(), "orka-dlog-"));
   process.on("exit", () => rmSync(base, { recursive: true, force: true }));
   const repo = join(base, "repo");
   for (const d of [repo, join(base, "home"), join(base, "run")]) mkdirSync(d, { recursive: true });
   execFileSync("git", ["init", "-q"], { cwd: repo });
   execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: repo });
-  const env = { ...process.env, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), ORCA_NO_WATCH: "1" };
-  const orca = (args) => spawnSync(process.execPath, [ORCA, ...args, "--cwd", repo], { encoding: "utf8", env });
-  orca(["init"]);
-  const id = orca(["new", "--kind", "claude", "--title", "dl", "--goal", "log decisions"]).stdout.trim();
-  const rows = () => readFileSync(join(repo, ".orca", "jobs", id, "decisions.tsv"), "utf8").split("\n").filter(Boolean);
-  return { orca, id, rows };
+  const env = { ...process.env, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), ORKA_NO_WATCH: "1" };
+  const orka = (args) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", repo], { encoding: "utf8", env });
+  orka(["init"]);
+  const id = orka(["new", "--kind", "claude", "--title", "dl", "--goal", "log decisions"]).stdout.trim();
+  const rows = () => readFileSync(join(repo, ".orka", "jobs", id, "decisions.tsv"), "utf8").split("\n").filter(Boolean);
+  return { orka, id, rows };
 }
 
-test("orca log appends a timestamped TSV row and escapes tabs and newlines", () => {
+test("orka log appends a timestamped TSV row and escapes tabs and newlines", () => {
   const t = scratch();
-  const r = t.orca(["log", t.id, "split", "two workers", "files\tdiffer", "line1\nline2", "ok"]);
+  const r = t.orka(["log", t.id, "split", "two workers", "files\tdiffer", "line1\nline2", "ok"]);
   assert.equal(r.status, 0, r.stderr);
   const rows = t.rows();
   assert.equal(rows[0], "ts\tphase\tdecision\twhy\tevidence\tresult");
@@ -37,32 +37,32 @@ test("orca log appends a timestamped TSV row and escapes tabs and newlines", () 
   assert.deepEqual(cells.slice(1), ["split", "two workers", "files\\tdiffer", "line1\\nline2", "ok"]);
 });
 
-test("orca log rejects a wrong argument count", () => {
+test("orka log rejects a wrong argument count", () => {
   const t = scratch();
-  const r = t.orca(["log", t.id, "split", "only two"]);
+  const r = t.orka(["log", t.id, "split", "only two"]);
   assert.notEqual(r.status, 0);
 });
 
-test("orca strategy appends a strategy row", () => {
+test("orka strategy appends a strategy row", () => {
   const t = scratch();
-  assert.equal(t.orca(["strategy", t.id, "fresh worker"]).status, 0);
+  assert.equal(t.orka(["strategy", t.id, "fresh worker"]).status, 0);
   const cells = t.rows()[1].split("\t");
   assert.equal(cells[1], "strategy");
   assert.equal(cells[2], "fresh worker");
 });
 
-test("orca status shows the decision count", () => {
+test("orka status shows the decision count", () => {
   const t = scratch();
-  assert.match(t.orca(["status", t.id]).stdout, /decisions: 0/);
-  t.orca(["log", t.id, "routing", "a", "b", "c", "d"]);
-  t.orca(["log", t.id, "routing", "a2", "b", "c", "d"]);
-  assert.match(t.orca(["status", t.id]).stdout, /decisions: 2/);
+  assert.match(t.orka(["status", t.id]).stdout, /decisions: 0/);
+  t.orka(["log", t.id, "routing", "a", "b", "c", "d"]);
+  t.orka(["log", t.id, "routing", "a2", "b", "c", "d"]);
+  assert.match(t.orka(["status", t.id]).stdout, /decisions: 2/);
 });
 
 test("digest shows the last rows and stays within DIGEST_MAX", () => {
   const t = scratch();
-  for (let i = 1; i <= 6; i++) t.orca(["log", t.id, "split", `decision-${i}`, "why", "ev", "res"]);
-  const out = t.orca(["digest", t.id]).stdout;
+  for (let i = 1; i <= 6; i++) t.orka(["log", t.id, "split", `decision-${i}`, "why", "ev", "res"]);
+  const out = t.orka(["digest", t.id]).stdout;
   assert.match(out, /decisions: 6/);
   assert.match(out, /decision-6/);
   assert.match(out, new RegExp(`decision-${6 - DECISION_ROWS + 1}`));
@@ -74,6 +74,6 @@ test("digest shows the last rows and stays within DIGEST_MAX", () => {
 });
 
 test("orchestrator prompt tells the lead to log decisions", () => {
-  const src = readFileSync(ORCA, "utf8");
-  assert.match(src, /Log every split, routing and strategy decision[^`]*orca log \$\{job\.id\}/);
+  const src = readFileSync(ORKA, "utf8");
+  assert.match(src, /Log every split, routing and strategy decision[^`]*orka log \$\{job\.id\}/);
 });

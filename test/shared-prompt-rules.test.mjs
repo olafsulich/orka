@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import * as brand from "../lib/brand.mjs";
 
-const src = readFileSync(join(import.meta.dirname, "..", "bin", "orca.mjs"), "utf8");
+const src = readFileSync(join(import.meta.dirname, "..", "bin", "orka.mjs"), "utf8");
 const fn = (name) => {
   const start = src.indexOf(`function ${name}(`);
   return src.slice(start, src.indexOf("\n}\n", start));
@@ -33,7 +34,7 @@ test("never-close-panes constant is used once in each of the three prompts", () 
 test("only the orchestrator gets the diff-based summary rule, before the digest line", () => {
   const orch = fn("orchestratorPrompt");
   assert.equal(count(orch, "SUMMARY_FROM_DIFF(job)"), 1);
-  assert.ok(orch.indexOf("SUMMARY_FROM_DIFF(job)") < orch.indexOf("Before orca done, run orca digest"));
+  assert.ok(orch.indexOf("SUMMARY_FROM_DIFF(job)") < orch.indexOf("Before orka done, run orka digest"));
   assert.doesNotMatch(fn("workerPrompt"), /SUMMARY_FROM_DIFF/);
   assert.doesNotMatch(fn("verifierPrompt"), /SUMMARY_FROM_DIFF/);
 });
@@ -42,11 +43,12 @@ test("orchestrator summary line follows the diff rule and a job without baseComm
   assert.doesNotMatch(fn("orchestratorPrompt"), /what you already know/);
   assert.match(fn("orchestratorPrompt"), /set the summary field\. Do not load the job JSON into the turn to copy fields/);
   const line = src.split("\n").find((l) => l.startsWith("const SUMMARY_FROM_DIFF"));
-  const render = new Function("job", `return (${line.slice(line.indexOf("=") + 1).replace(/;\s*$/, "")})(job);`);
+  const render = (job) => new Function("job", "brand", `return (${line.slice(line.indexOf("=") + 1).replace(/;\s*$/, "")})(job);`)(job, brand);
   assert.doesNotMatch(render({ id: "j0" }), /undefined/);
-  const noBase = render({ id: "j1", branch: "orca/j1-x" });
-  assert.match(noBase, /git diff \$\(git merge-base orca\/j1-x main\)/);
+  const noBase = render({ id: "j1", branch: "orka/j1-x" });
+  assert.match(noBase, /git diff \$\(git merge-base orka\/j1-x main\)/);
   assert.doesNotMatch(noBase, /<branch>|undefined/);
+  // A record without a branch predates orka, so it is on orca/<id>.
   assert.match(render({ id: "j2" }), /git diff \$\(git merge-base orca\/j2 main\)/);
   assert.match(render({ baseCommit: "abc123" }), /git diff abc123 \(--stat plus a skim\)/);
 });

@@ -15,7 +15,7 @@ test("README stays short outside tables", () => {
 
 test("README has exactly the two main sections", () => {
   const h2 = lines.filter((l) => l.startsWith("## "));
-  assert.deepEqual(h2, ["## How orca works", "## What you can use"]);
+  assert.deepEqual(h2, ["## How orka works", "## What you can use"]);
 });
 
 test("README relative links and images resolve", () => {

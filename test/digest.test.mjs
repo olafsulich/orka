@@ -23,11 +23,11 @@ import {
   steerText,
 } from "../lib/digest.mjs";
 
-const ORCA = join(import.meta.dirname, "..", "bin", "orca.mjs");
+const ORKA = join(import.meta.dirname, "..", "bin", "orka.mjs");
 const ELLIPSIS = "\u2026";
 
 function scratch() {
-  const base = mkdtempSync(join(tmpdir(), "orca-digest-"));
+  const base = mkdtempSync(join(tmpdir(), "orka-digest-"));
   process.on("exit", () => rmScratch(base, { recursive: true, force: true }));
   const repo = join(base, "repo");
   const bin = join(base, "bin");
@@ -63,24 +63,24 @@ echo '{}'
     PATH: `${bin}:${process.env.PATH}`,
     HOME: home,
     XDG_RUNTIME_DIR: run,
-    AGENT_BROWSER_SOCKET_DIR: "", ORCA_NO_WATCH: "1",
-    ORCA_PROMPT_WAIT_MS: "1500",
-    ORCA_PROMPT_POLL_MS: "100",
+    AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1",
+    ORKA_PROMPT_WAIT_MS: "1500",
+    ORKA_PROMPT_POLL_MS: "100",
   };
-  const orca = (args) => spawnSync(process.execPath, [ORCA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...process.env, ...env } });
-  orca(["init"]);
-  return { base, repo, orca, log, prompt };
+  const orka = (args) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...process.env, ...env } });
+  orka(["init"]);
+  return { base, repo, orka, log, prompt };
 }
 
 function makeJob(t, extra = {}) {
-  const created = t.orca(["new", "--kind", "pi", "--title", "digest", "--goal", "g"]);
+  const created = t.orka(["new", "--kind", "pi", "--title", "digest", "--goal", "g"]);
   assert.equal(created.status, 0, created.stderr);
   const id = created.stdout.trim();
-  const path = join(t.repo, ".orca", "jobs", `${id}.json`);
+  const path = join(t.repo, ".orka", "jobs", `${id}.json`);
   const job = JSON.parse(readFileSync(path, "utf8"));
   Object.assign(job, { status: "running", pane: "p-1", agent: "orch", worktree: join(t.repo, "wt") }, extra);
   writeFileSync(path, JSON.stringify(job, null, 2) + "\n");
-  const dir = join(t.repo, ".orca", "jobs", id);
+  const dir = join(t.repo, ".orka", "jobs", id);
   mkdirSync(join(dir, "notes"), { recursive: true });
   mkdirSync(join(dir, "results"), { recursive: true });
   return { id, path, dir, read: () => JSON.parse(readFileSync(path, "utf8")) };
@@ -123,15 +123,15 @@ test("exported caps match the brief", () => {
   assert.match(CONTRACT, /Do not push/);
   assert.match(CONTRACT, /Do not create a branch or worktree/);
   assert.match(CONTRACT, /Do not close panes/);
-  assert.match(CONTRACT, /orca done sends the finish webhook/);
-  assert.match(CONTRACT, /Do not run orca webhook or orca stop/);
-  assert.match(CONTRACT, /follow-up round must call orca done again/);
+  assert.match(CONTRACT, /orka done sends the finish webhook/);
+  assert.match(CONTRACT, /Do not run orka webhook or orka stop/);
+  assert.match(CONTRACT, /follow-up round must call orka done again/);
   assert.match(CONTRACT, /verifier stays a fresh worker/);
   assert.match(CONTRACT, /Do not read the job JSON or verify\.log/);
 });
 
 test("steerText is digest, a blank line, Owner steer, message last", () => {
-  const digest = "Orca digest for abc (capped snapshot, not the job file).";
+  const digest = "Orka digest for abc (capped snapshot, not the job file).";
   const message = "look here";
   const text = steerText(digest, message);
   assert.equal(text, `${digest}\n\nOwner steer:\n${message}`);
@@ -141,7 +141,7 @@ test("steerText is digest, a blank line, Owner steer, message last", () => {
 
 test("renderDigest clips fields and hard-caps the assembled text", () => {
   const id = "job-1";
-  const header = `Orca digest for ${id} (capped snapshot, not the job file).`;
+  const header = `Orka digest for ${id} (capped snapshot, not the job file).`;
   assert.ok(header.length >= 20);
   const short = renderDigest({ id, status: "running", round: 1, keep: false, goal: "Ship it." }, {});
   assert.ok(short.startsWith(header.replace("job-1", id)));
@@ -163,10 +163,10 @@ test("renderDigest clips fields and hard-caps the assembled text", () => {
   assert.match(longGoal, new RegExp(`goal: ${"A".repeat(240)}\u2026`));
   assert.doesNotMatch(longGoal, new RegExp(`A{241}`));
 
-  const round = renderDigest({ id, status: "running", round: 2, keep: true, goal: "g", branch: "orca/job-1" }, {});
+  const round = renderDigest({ id, status: "running", round: 2, keep: true, goal: "g", branch: "orka/job-1" }, {});
   assert.match(round, /round: 2/);
   assert.match(round, /keep: true/);
-  assert.match(round, /branch: orca\/job-1/);
+  assert.match(round, /branch: orka\/job-1/);
 
   const path = `/tmp/${"p".repeat(200)}`;
   const wt = renderDigest({ id, status: "running", worktree: path }, {}).split("\n").find((l) => l.startsWith("worktree: "));
@@ -233,14 +233,14 @@ test("renderDigest clips fields and hard-caps the assembled text", () => {
     { id, status: "running", goal: "g", verifier: { verdict: "fail", rounds: 4, stall: { checks: ["Q".repeat(8000)] } } },
     {},
   );
-  const suffix = `${ELLIPSIS} capped; full records stay in .orca/jobs/${id}/`;
+  const suffix = `${ELLIPSIS} capped; full records stay in .orka/jobs/${id}/`;
   assert.equal(capped.length, 2400);
   assert.ok(capped.endsWith(suffix));
-  assert.ok(capped.startsWith(`Orca digest for ${id} (capped snapshot, not the job file).`));
+  assert.ok(capped.startsWith(`Orka digest for ${id} (capped snapshot, not the job file).`));
   assert.ok(!capped.includes("Q".repeat(3000)));
 });
 
-test("orca digest stays within 2400 and drops log and evidence sentinels", () => {
+test("orka digest stays within 2400 and drops log and evidence sentinels", () => {
   const t = scratch();
   const verdict = "needs-fix";
   const task = "TASK_PLANTED_ONLY_ON_JOB_9f3a";
@@ -262,10 +262,10 @@ test("orca digest stays within 2400 and drops log and evidence sentinels", () =>
       warnings: [{ check: "old", evidence: "do not print this warning body" }],
     }),
   );
-  const r = t.orca(["digest", j.id]);
+  const r = t.orka(["digest", j.id]);
   assert.equal(r.status, 0, r.stderr);
   assert.ok(r.stdout.length <= 2400, String(r.stdout.length));
-  assert.match(r.stdout, new RegExp(`Orca digest for ${j.id}`));
+  assert.match(r.stdout, new RegExp(`Orka digest for ${j.id}`));
   assert.match(r.stdout, new RegExp(verdict));
   assert.match(r.stdout, /ship-check/);
   assert.match(r.stdout, /SUM_HEAD_9f3a/);
@@ -290,7 +290,7 @@ test("verifier.json over 64KB is not inlined and does not throw", () => {
   const sentinel = "HUGE_VERIFIER_SENTINEL_9f3a";
   writeFileSync(join(j.dir, "results", "verifier.json"), sentinel + "x".repeat(bytes - sentinel.length));
   assert.ok(statSync(join(j.dir, "results", "verifier.json")).size > 64 * 1024);
-  const r = t.orca(["digest", j.id]);
+  const r = t.orka(["digest", j.id]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, new RegExp(`results/verifier.json is ${bytes} bytes; not inlined`));
   assert.doesNotMatch(r.stdout, /HUGE_VERIFIER_SENTINEL_9f3a/);
@@ -308,7 +308,7 @@ test("more than 8 workers names eight and leaves the rest in notes/", () => {
   }));
   const j = makeJob(t, { workers });
   writeFileSync(join(j.dir, "results", "w01.json"), JSON.stringify({ ok: true, result: "fine" }));
-  const r = t.orca(["digest", j.id]);
+  const r = t.orka(["digest", j.id]);
   assert.equal(r.status, 0, r.stderr);
   for (let i = 1; i <= 8; i++) assert.match(r.stdout, new RegExp(`w${String(i).padStart(2, "0")}`));
   assert.doesNotMatch(r.stdout, /w09/);
@@ -320,7 +320,7 @@ test("more than 8 workers names eight and leaves the rest in notes/", () => {
   assert.doesNotMatch(r.stdout, /TASK_PLANTED_ONLY_ON_JOB_9f3a/);
 });
 
-test("orca digest does not create or modify files, change status, or call herdr", () => {
+test("orka digest does not create or modify files, change status, or call herdr", () => {
   const t = scratch();
   const j = makeJob(t, { status: "running", workers: [{ name: "w1", pane: "p", task: "secret-task" }] });
   writeFileSync(join(j.dir, "notes", "w1.txt"), "noted");
@@ -328,7 +328,7 @@ test("orca digest does not create or modify files, change status, or call herdr"
   const before = filesOf(t.repo);
   const jobBefore = readFileSync(j.path, "utf8");
   writeFileSync(t.log, "");
-  const r = t.orca(["digest", j.id]);
+  const r = t.orka(["digest", j.id]);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(readFileSync(t.log, "utf8"), "");
   assert.equal(readFileSync(j.path, "utf8"), jobBefore);
@@ -342,35 +342,35 @@ test("orca digest does not create or modify files, change status, or call herdr"
 test("steer stores only the human message and prompts digest plus Owner steer", () => {
   const t = scratch();
   const j = makeJob(t, { status: "running", agent: "orch" });
-  const first = t.orca(["steer", j.id, "first human"]);
+  const first = t.orka(["steer", j.id, "first human"]);
   assert.equal(first.status, 0, first.stderr);
   assert.deepEqual(j.read().steers.map((s) => s.message), ["first human"]);
-  const second = t.orca(["steer", j.id, "second human"]);
+  const second = t.orka(["steer", j.id, "second human"]);
   assert.equal(second.status, 0, second.stderr);
   const job = j.read();
   assert.deepEqual(job.steers.map((s) => s.message), ["first human", "second human"]);
   assert.equal(job.digest, undefined);
-  assert.doesNotMatch(readFileSync(j.path, "utf8"), /Orca digest|Owner steer:/);
+  assert.doesNotMatch(readFileSync(j.path, "utf8"), /Orka digest|Owner steer:/);
   const prompted = readFileSync(t.prompt, "utf8");
-  assert.ok(prompted.startsWith(`Orca digest for ${j.id}`));
+  assert.ok(prompted.startsWith(`Orka digest for ${j.id}`));
   assert.match(prompted, /Owner steer:/);
   assert.match(prompted, /last steer: first human/);
   assert.ok(prompted.endsWith("second human"));
   assert.equal(prompted.slice(prompted.lastIndexOf("Owner steer:\n")), "Owner steer:\nsecond human");
 });
 
-test("orca digest on a missing id exits 1", () => {
+test("orka digest on a missing id exits 1", () => {
   const t = scratch();
-  const r = t.orca(["digest", "missing-id-xyz"]);
+  const r = t.orka(["digest", "missing-id-xyz"]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /no job missing-id-xyz/);
 });
 
-test("orca help mentions digest", () => {
+test("orka help mentions digest", () => {
   const t = scratch();
-  const r = t.orca(["help"]);
+  const r = t.orka(["help"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /orca digest <id> \[--cwd <repo>\]/);
+  assert.match(r.stdout, /orka digest <id> \[--cwd <repo>\]/);
   assert.match(r.stdout, /capped snapshot/);
   assert.match(r.stdout, /does not change the job/);
 });
@@ -378,12 +378,12 @@ test("orca help mentions digest", () => {
 test("a capped digest printed by the CLI ends with the suffix inside 2400", () => {
   const t = scratch();
   const j = makeJob(t, { verifier: { rounds: 1, verdict: "fail", stall: { checks: ["Q".repeat(8000)] }, history: [] } });
-  const r = t.orca(["digest", j.id]);
+  const r = t.orka(["digest", j.id]);
   assert.equal(r.status, 0, r.stderr);
-  const suffix = `${ELLIPSIS} capped; full records stay in .orca/jobs/${j.id}/`;
+  const suffix = `${ELLIPSIS} capped; full records stay in .orka/jobs/${j.id}/`;
   assert.equal(r.stdout.length, 2400);
   assert.ok(r.stdout.endsWith(suffix));
-  assert.ok(r.stdout.startsWith(`Orca digest for ${j.id} (capped snapshot, not the job file).`));
+  assert.ok(r.stdout.startsWith(`Orka digest for ${j.id} (capped snapshot, not the job file).`));
 });
 
 test("digest shows verdict=pass|fail for the verifier, never 'ok not true'", () => {

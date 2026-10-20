@@ -8,12 +8,12 @@ import { rmSync as rmScratch } from "node:fs";
 import test from "node:test";
 
 const root = join(import.meta.dirname, "..");
-const ORCA = join(root, "bin", "orca.mjs");
+const ORKA = join(root, "bin", "orka.mjs");
 
-function orca(repo, args, env = {}) {
+function orka(repo, args, env = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [ORCA, ...args, "--cwd", repo], {
-      env: { ...process.env, ORCA_NO_WATCH: "1", ...env },
+    const child = spawn(process.execPath, [ORKA, ...args, "--cwd", repo], {
+      env: { ...process.env, ORKA_NO_WATCH: "1", ...env },
     });
     let stdout = "";
     let stderr = "";
@@ -32,19 +32,19 @@ function git(repo, args) {
 }
 
 async function scratch() {
-  const repo = mkdtempSync(join(tmpdir(), "orca-finish-"));
+  const repo = mkdtempSync(join(tmpdir(), "orka-finish-"));
   process.on("exit", () => rmScratch(repo, { recursive: true, force: true }));
   git(repo, ["init", "-q"]);
-  const init = await orca(repo, ["init"]);
+  const init = await orka(repo, ["init"]);
   assert.equal(init.status, 0, init.stderr);
-  const created = await orca(repo, ["new", "--kind", "pi", "--title", "wake", "--goal", "test the wake"]);
+  const created = await orka(repo, ["new", "--kind", "pi", "--title", "wake", "--goal", "test the wake"]);
   assert.equal(created.status, 0, created.stderr);
   const id = created.stdout.trim();
-  return { repo, id, jobPath: join(repo, ".orca", "jobs", `${id}.json`), recordPath: join(repo, ".orca", "jobs", `${id}.finish.json`) };
+  return { repo, id, jobPath: join(repo, ".orka", "jobs", `${id}.json`), recordPath: join(repo, ".orka", "jobs", `${id}.finish.json`) };
 }
 
 function writeEnv(repo, url, key = "test-key", mode = 0o600) {
-  const path = join(repo, ".orca", "secrets", "finish-webhook.env");
+  const path = join(repo, ".orka", "secrets", "finish-webhook.env");
   writeFileSync(path, `WEBHOOK_URL=${url}\nWEBHOOK_KEY=${key}\n`, { mode });
   chmodSync(path, mode);
   return path;
@@ -55,7 +55,7 @@ function job(path) {
 }
 
 function listen(hits) {
-  const dir = mkdtempSync(join(tmpdir(), "orca-cert-"));
+  const dir = mkdtempSync(join(tmpdir(), "orka-cert-"));
   execFileSync("openssl", [
     "req", "-x509", "-newkey", "rsa:2048",
     "-keyout", join(dir, "key.pem"),
@@ -91,13 +91,13 @@ function listen(hits) {
 }
 
 test("help and prompts no longer say the wake is unwired", async () => {
-  const help = await orca(root, ["help"]);
+  const help = await orka(root, ["help"]);
   assert.equal(help.status, 0);
   assert.match(help.stdout, /finish-webhook\.env/);
   assert.match(help.stdout, /does not run herdr-finish-watch/);
   assert.doesNotMatch(help.stdout, /not wired/);
-  const src = readFileSync(ORCA, "utf8");
-  assert.match(src, /Finish wake is automatic from the orca CLI/);
+  const src = readFileSync(ORKA, "utf8");
+  assert.match(src, /Finish wake is automatic from the orka CLI/);
   assert.match(src, /markTerminal\(repo, job, "stopped"/);
   assert.match(src, /markTerminal\(repo, job, "failed"/);
   assert.doesNotMatch(src, /Do not POST a finish webhook/);
@@ -113,7 +113,7 @@ test("missing file and process env do not send", async () => {
   const receiver = await listen(hits);
   const box = await scratch();
   try {
-    const stopped = await orca(box.repo, ["stop", box.id, "enough"], {
+    const stopped = await orka(box.repo, ["stop", box.id, "enough"], {
       WEBHOOK_URL: `https://127.0.0.1:${receiver.port}/from-env`,
       WEBHOOK_KEY: "from-env",
     });
@@ -122,7 +122,7 @@ test("missing file and process env do not send", async () => {
     assert.equal(job(box.jobPath).status, "stopped");
     assert.equal(existsSync(box.recordPath), false);
     assert.equal(hits.length, 0);
-    const manual = await orca(box.repo, ["webhook", box.id]);
+    const manual = await orka(box.repo, ["webhook", box.id]);
     assert.notEqual(manual.status, 0);
     assert.match(manual.stderr, /missing/);
     assert.equal(hits.length, 0);
@@ -139,7 +139,7 @@ test("stop posts once and a failed send does not flip status", async () => {
   const tls = { NODE_TLS_REJECT_UNAUTHORIZED: "0" };
   try {
     writeEnv(box.repo, `https://127.0.0.1:${receiver.port}/secret-path`);
-    const preview = await orca(box.repo, ["stop", box.id, "--dry-run"], tls);
+    const preview = await orka(box.repo, ["stop", box.id, "--dry-run"], tls);
     assert.equal(preview.status, 0, preview.stderr);
     assert.match(preview.stdout, /queued -> stopped/);
     assert.match(preview.stdout, /"status":"stopped"/);
@@ -148,7 +148,7 @@ test("stop posts once and a failed send does not flip status", async () => {
     assert.equal(job(box.jobPath).status, "queued");
     assert.equal(hits.length, 0);
 
-    const stopped = await orca(box.repo, ["stop", box.id, "done watching"], tls);
+    const stopped = await orka(box.repo, ["stop", box.id, "done watching"], tls);
     assert.equal(stopped.status, 0, stopped.stderr);
     assert.match(stopped.stdout, /finish webhook: accepted \(HTTP 204\)/);
     assert.doesNotMatch(`${stopped.stdout}\n${stopped.stderr}`, /SECRET-BODY|test-key|secret-path/);
@@ -157,32 +157,32 @@ test("stop posts once and a failed send does not flip status", async () => {
     assert.equal(hits.length, 1);
     assert.equal(hits[0].headers.authorization, "Bearer test-key");
     assert.equal(hits[0].headers["x-automation-key"], "test-key");
-    assert.deepEqual(JSON.parse(hits[0].body), { job: box.id, status: "stopped", branch: `orca/${box.id}`, playbook: "feature" });
+    assert.deepEqual(JSON.parse(hits[0].body), { job: box.id, status: "stopped", branch: `orka/${box.id}`, playbook: "feature" });
     const record = JSON.parse(readFileSync(box.recordPath, "utf8"));
     assert.equal(record.attempts.length, 1);
     assert.equal(record.attempts[0].outcome, "accepted");
     assert.equal(record.attempts[0].http, 204);
     assert.doesNotMatch(JSON.stringify(record), /test-key|secret-path/);
 
-    const again = await orca(box.repo, ["stop", box.id], tls);
+    const again = await orka(box.repo, ["stop", box.id], tls);
     assert.equal(again.status, 0, again.stderr);
     assert.match(again.stdout, /already stopped/);
     assert.equal(hits.length, 1);
 
-    const status = await orca(box.repo, ["status", box.id], tls);
+    const status = await orka(box.repo, ["status", box.id], tls);
     assert.match(status.stdout, /finish webhook: accepted HTTP 204 attempt 1/);
-    const dry = await orca(box.repo, ["webhook", box.id, "--dry-run"], tls);
+    const dry = await orka(box.repo, ["webhook", box.id, "--dry-run"], tls);
     assert.equal(dry.status, 0, dry.stderr);
     assert.match(dry.stdout, /send: no \(last attempt accepted\)/);
     assert.doesNotMatch(dry.stdout, /secret-path|test-key/);
     assert.equal(hits.length, 1);
 
-    const dup = await orca(box.repo, ["webhook", box.id], tls);
+    const dup = await orka(box.repo, ["webhook", box.id], tls);
     assert.equal(dup.status, 0, dup.stderr);
     assert.match(dup.stdout, /last attempt is accepted/);
     assert.equal(hits.length, 1);
 
-    const forced = await orca(box.repo, ["webhook", box.id, "--force"], tls);
+    const forced = await orka(box.repo, ["webhook", box.id, "--force"], tls);
     assert.equal(forced.status, 0, forced.stderr);
     assert.match(forced.stdout, /accepted \(HTTP 204\)/);
     assert.equal(hits.length, 2);
@@ -200,33 +200,33 @@ test("bad config is recorded and does not send or flip status", async () => {
   const boxes = [await scratch(), await scratch(), await scratch()];
   try {
     writeEnv(boxes[0].repo, `http://127.0.0.1:${receiver.port}/plain`);
-    const http = await orca(boxes[0].repo, ["stop", boxes[0].id], tls);
+    const http = await orka(boxes[0].repo, ["stop", boxes[0].id], tls);
     assert.equal(http.status, 0, http.stderr);
     assert.equal(job(boxes[0].jobPath).status, "stopped");
     assert.match(http.stdout, /finish webhook: failed: WEBHOOK_URL must be https/);
     assert.equal(JSON.parse(readFileSync(boxes[0].recordPath, "utf8")).attempts[0].outcome, "failed");
 
     writeEnv(boxes[1].repo, `https://127.0.0.1:${receiver.port}/loose`, "test-key", 0o644);
-    const loose = await orca(boxes[1].repo, ["stop", boxes[1].id], tls);
+    const loose = await orka(boxes[1].repo, ["stop", boxes[1].id], tls);
     assert.equal(loose.status, 0, loose.stderr);
     assert.equal(job(boxes[1].jobPath).status, "stopped");
     assert.match(loose.stdout, /mode 600/);
     assert.equal(hits.length, 0);
 
-    const outside = join(tmpdir(), `orca-outside-${process.pid}.env`);
+    const outside = join(tmpdir(), `orka-outside-${process.pid}.env`);
     writeFileSync(outside, `WEBHOOK_URL=https://127.0.0.1:${receiver.port}/escaped\nWEBHOOK_KEY=test-key\n`, { mode: 0o600 });
     chmodSync(outside, 0o600);
-    symlinkSync(outside, join(boxes[2].repo, ".orca", "secrets", "finish-webhook.env"));
-    const escaped = await orca(boxes[2].repo, ["stop", boxes[2].id], tls);
+    symlinkSync(outside, join(boxes[2].repo, ".orka", "secrets", "finish-webhook.env"));
+    const escaped = await orka(boxes[2].repo, ["stop", boxes[2].id], tls);
     assert.equal(escaped.status, 0, escaped.stderr);
     assert.equal(job(boxes[2].jobPath).status, "stopped");
-    assert.match(escaped.stdout, /must stay inside \.orca/);
+    assert.match(escaped.stdout, /must stay inside \.orka/);
     assert.equal(hits.filter((hit) => hit.url === "/escaped").length, 0);
     assert.equal(hits.length, 0);
   } finally {
     receiver.close();
     for (const box of boxes) rmSync(box.repo, { recursive: true, force: true });
-    rmSync(join(tmpdir(), `orca-outside-${process.pid}.env`), { force: true });
+    rmSync(join(tmpdir(), `orka-outside-${process.pid}.env`), { force: true });
   }
 });
 
@@ -237,14 +237,14 @@ test("webhook retries a rejected POST and records the attempt", async () => {
   const tls = { NODE_TLS_REJECT_UNAUTHORIZED: "0" };
   try {
     writeEnv(box.repo, `https://127.0.0.1:${receiver.port}/fail`);
-    const stopped = await orca(box.repo, ["stop", box.id], tls);
+    const stopped = await orka(box.repo, ["stop", box.id], tls);
     assert.equal(stopped.status, 0, stopped.stderr);
     assert.equal(job(box.jobPath).status, "stopped");
     assert.match(stopped.stdout, /finish webhook: failed: HTTP 500/);
     assert.equal(hits.length, 1);
 
     writeEnv(box.repo, `https://127.0.0.1:${receiver.port}/ok`);
-    const retried = await orca(box.repo, ["webhook", box.id], tls);
+    const retried = await orka(box.repo, ["webhook", box.id], tls);
     assert.equal(retried.status, 0, retried.stderr);
     assert.match(retried.stdout, /accepted \(HTTP 204\)/);
     assert.equal(job(box.jobPath).status, "stopped");
@@ -252,7 +252,7 @@ test("webhook retries a rejected POST and records the attempt", async () => {
     assert.deepEqual(record.attempts.map((item) => item.outcome), ["failed", "accepted"]);
     assert.equal(hits.length, 2);
     assert.equal(hits[1].url, "/ok");
-    assert.deepEqual(JSON.parse(hits[1].body), { job: box.id, status: "stopped", branch: `orca/${box.id}`, playbook: "feature" });
+    assert.deepEqual(JSON.parse(hits[1].body), { job: box.id, status: "stopped", branch: `orka/${box.id}`, playbook: "feature" });
   } finally {
     receiver.close();
     rmSync(box.repo, { recursive: true, force: true });
@@ -269,10 +269,10 @@ test("a job already marked done can POST that status", async () => {
     current.status = "done";
     writeFileSync(box.jobPath, JSON.stringify(current, null, 2) + "\n");
     writeEnv(box.repo, `https://127.0.0.1:${receiver.port}/done`);
-    const sent = await orca(box.repo, ["webhook", box.id], tls);
+    const sent = await orka(box.repo, ["webhook", box.id], tls);
     assert.equal(sent.status, 0, sent.stderr);
     assert.equal(job(box.jobPath).status, "done");
-    assert.deepEqual(JSON.parse(hits[0].body), { job: box.id, status: "done", branch: `orca/${box.id}`, playbook: "feature" });
+    assert.deepEqual(JSON.parse(hits[0].body), { job: box.id, status: "done", branch: `orka/${box.id}`, playbook: "feature" });
   } finally {
     receiver.close();
     rmSync(box.repo, { recursive: true, force: true });
@@ -283,12 +283,12 @@ test("a run that never starts does not mark failed or post", async () => {
   const box = await scratch();
   try {
     writeEnv(box.repo, "https://example.invalid/should-not-send");
-    const ran = await orca(box.repo, ["run", box.id]);
+    const ran = await orka(box.repo, ["run", box.id]);
     assert.notEqual(ran.status, 0);
     assert.match(ran.stderr, /no commits/);
     assert.equal(job(box.jobPath).status, "queued");
     assert.equal(existsSync(box.recordPath), false);
-    const dry = await orca(box.repo, ["run", box.id, "--dry-run"]);
+    const dry = await orka(box.repo, ["run", box.id, "--dry-run"]);
     assert.equal(dry.status, 0, dry.stderr);
     assert.match(dry.stdout, /finish webhook: posts \{job, status, branch\}/);
   } finally {
@@ -300,11 +300,11 @@ test("unknown acceptance is not retried unless forced", async () => {
   const box = await scratch();
   try {
     writeEnv(box.repo, "https://127.0.0.1:9/closed");
-    const stopped = await orca(box.repo, ["stop", box.id]);
+    const stopped = await orka(box.repo, ["stop", box.id]);
     assert.equal(stopped.status, 0, stopped.stderr);
     assert.equal(job(box.jobPath).status, "stopped");
     assert.match(stopped.stdout, /finish webhook: unknown: request failed; acceptance unknown/);
-    const refused = await orca(box.repo, ["webhook", box.id]);
+    const refused = await orka(box.repo, ["webhook", box.id]);
     assert.notEqual(refused.status, 0);
     assert.match(refused.stdout, /last attempt is unknown/);
     assert.equal(JSON.parse(readFileSync(box.recordPath, "utf8")).attempts.length, 1);
@@ -314,41 +314,41 @@ test("unknown acceptance is not retried unless forced", async () => {
 });
 
 async function piJob(args = []) {
-  const repo = mkdtempSync(join(tmpdir(), "orca-pi-"));
+  const repo = mkdtempSync(join(tmpdir(), "orka-pi-"));
   process.on("exit", () => rmScratch(repo, { recursive: true, force: true }));
   git(repo, ["init", "-q"]);
-  assert.equal((await orca(repo, ["init"])).status, 0);
-  const created = await orca(repo, ["new", "--kind", "pi", "--title", "pi", "--goal", "do the thing", ...args]);
+  assert.equal((await orka(repo, ["init"])).status, 0);
+  const created = await orka(repo, ["new", "--kind", "pi", "--title", "pi", "--goal", "do the thing", ...args]);
   assert.equal(created.status, 0, created.stderr);
   return { repo, id: created.stdout.trim() };
 }
 
 test("pi run dry-run starts an orchestrator that spawns pi workers", async () => {
   const { repo, id } = await piJob();
-  const out = await orca(repo, ["run", id, "--dry-run"]);
+  const out = await orka(repo, ["run", id, "--dry-run"]);
   assert.equal(out.status, 0, out.stderr);
   assert.match(out.stdout, /role: orchestrator \(pi\)/);
-  assert.match(out.stdout, /worker: orca worker --job/);
+  assert.match(out.stdout, /worker: orka worker --job/);
   assert.doesNotMatch(out.stdout, /single worker|--model/);
 });
 
 test("pi worker dry-run opens a pi pane and refuses --model", async () => {
   const { repo, id } = await piJob();
-  const ok = await orca(repo, ["worker", "--job", id, "--name", "w1", "--task", "x", "--dry-run"]);
+  const ok = await orka(repo, ["worker", "--job", id, "--name", "w1", "--task", "x", "--dry-run"]);
   assert.equal(ok.status, 0, ok.stderr);
   assert.match(ok.stdout, /kind=pi/);
   assert.match(ok.stdout, /pane: pi$/m);
   assert.doesNotMatch(ok.stdout, /claude --model/);
-  const bad = await orca(repo, ["worker", "--job", id, "--name", "w1", "--task", "x", "--model", "sonnet", "--dry-run"]);
+  const bad = await orka(repo, ["worker", "--job", id, "--name", "w1", "--task", "x", "--model", "sonnet", "--dry-run"]);
   assert.notEqual(bad.status, 0);
   assert.match(bad.stderr, /only for kind claude/);
 });
 
 test("pi still refuses orchestrator and worker model flags", async () => {
   const { repo, id } = await piJob();
-  const run = await orca(repo, ["run", id, "--dry-run", "--worker-model", "sonnet"]);
+  const run = await orka(repo, ["run", id, "--dry-run", "--worker-model", "sonnet"]);
   assert.notEqual(run.status, 0);
-  const made = await orca(repo, ["new", "--kind", "pi", "--title", "t", "--goal", "g", "--orchestrator-model", "opus"]);
+  const made = await orka(repo, ["new", "--kind", "pi", "--title", "t", "--goal", "g", "--orchestrator-model", "opus"]);
   assert.notEqual(made.status, 0);
 });
 
@@ -366,13 +366,13 @@ test("done on a running job marks done and posts once", async () => {
   try {
     setStatus(box, "running");
     writeEnv(box.repo, `https://127.0.0.1:${receiver.port}/done`);
-    const out = await orca(box.repo, ["done", box.id], tls);
+    const out = await orka(box.repo, ["done", box.id], tls);
     assert.equal(out.status, 0, out.stderr);
     assert.match(out.stdout, new RegExp(`done ${box.id}: completed`));
     assert.equal(job(box.jobPath).status, "done");
     assert.equal(existsSync(box.recordPath), true);
     assert.equal(hits.length, 1);
-    assert.deepEqual(JSON.parse(hits[0].body), { job: box.id, status: "done", branch: `orca/${box.id}`, playbook: "feature" });
+    assert.deepEqual(JSON.parse(hits[0].body), { job: box.id, status: "done", branch: `orka/${box.id}`, playbook: "feature" });
   } finally {
     receiver.close();
     rmSync(box.repo, { recursive: true, force: true });
@@ -386,7 +386,7 @@ test("done on a queued job refuses and does not post", async () => {
   const tls = { NODE_TLS_REJECT_UNAUTHORIZED: "0" };
   try {
     writeEnv(box.repo, `https://127.0.0.1:${receiver.port}/done`);
-    const out = await orca(box.repo, ["done", box.id], tls);
+    const out = await orka(box.repo, ["done", box.id], tls);
     assert.notEqual(out.status, 0);
     assert.match(out.stderr, /is queued, not running; nothing finished/);
     assert.equal(job(box.jobPath).status, "queued");
@@ -406,7 +406,7 @@ test("done --dry-run on a running job changes nothing", async () => {
   try {
     setStatus(box, "running");
     writeEnv(box.repo, `https://127.0.0.1:${receiver.port}/done`);
-    const out = await orca(box.repo, ["done", box.id, "--dry-run"], tls);
+    const out = await orka(box.repo, ["done", box.id, "--dry-run"], tls);
     assert.equal(out.status, 0, out.stderr);
     assert.match(out.stdout, /running -> done/);
     assert.equal(job(box.jobPath).status, "running");
@@ -426,10 +426,10 @@ test("a second done on a done job is a no-op", async () => {
   try {
     setStatus(box, "running");
     writeEnv(box.repo, `https://127.0.0.1:${receiver.port}/done`);
-    const first = await orca(box.repo, ["done", box.id], tls);
+    const first = await orka(box.repo, ["done", box.id], tls);
     assert.equal(first.status, 0, first.stderr);
     assert.equal(hits.length, 1);
-    const again = await orca(box.repo, ["done", box.id], tls);
+    const again = await orka(box.repo, ["done", box.id], tls);
     assert.equal(again.status, 0, again.stderr);
     assert.match(again.stdout, /already done/);
     assert.equal(hits.length, 1);
@@ -452,7 +452,7 @@ test("finish webhook fires and job is done even when every herdr call fails (wor
     const data = job(box.jobPath);
     Object.assign(data, { status: "running", workspace: "w-1", pane: "p-lead", agent: "lead", workers: [{ name: "w1", pane: "p-gone" }] });
     writeFileSync(box.jobPath, JSON.stringify(data));
-    const done = await orca(box.repo, ["done", box.id], { NODE_TLS_REJECT_UNAUTHORIZED: "0", PATH: `${bin}:${process.env.PATH}` });
+    const done = await orka(box.repo, ["done", box.id], { NODE_TLS_REJECT_UNAUTHORIZED: "0", PATH: `${bin}:${process.env.PATH}` });
     assert.equal(done.status, 0, done.stderr);
     assert.match(done.stdout, /finish webhook: accepted/);
     assert.equal(job(box.jobPath).status, "done");

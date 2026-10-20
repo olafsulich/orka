@@ -6,11 +6,11 @@ import { join } from "node:path";
 import { rmSync as rmScratch } from "node:fs";
 import test from "node:test";
 
-const ORCA = join(import.meta.dirname, "..", "bin", "orca.mjs");
+const ORKA = join(import.meta.dirname, "..", "bin", "orka.mjs");
 
 // herdr stub: `agent start <name>` records the name; `agent get <name>` finds recorded names.
 function scratch() {
-  const base = mkdtempSync(join(tmpdir(), "orca-naming-"));
+  const base = mkdtempSync(join(tmpdir(), "orka-naming-"));
   process.on("exit", () => rmScratch(base, { recursive: true, force: true }));
   const repo = join(base, "repo");
   const bin = join(base, "bin");
@@ -45,24 +45,24 @@ echo '{}'
   chmodSync(join(bin, "herdr"), 0o755);
   chmodSync(join(bin, "agent-browser"), 0o755);
   execFileSync("git", ["init", "-q"], { cwd: repo });
-  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: home, XDG_RUNTIME_DIR: run, AGENT_BROWSER_SOCKET_DIR: "", ORCA_NO_WATCH: "1" };
-  const orca = (args) => spawnSync(process.execPath, [ORCA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...process.env, ...env } });
-  orca(["init"]);
-  return { repo, orca, log, agents, base, env };
+  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: home, XDG_RUNTIME_DIR: run, AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1" };
+  const orka = (args) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...process.env, ...env } });
+  orka(["init"]);
+  return { repo, orka, log, agents, base, env };
 }
 
 function makeJob(t) {
-  const id = t.orca(["new", "--kind", "pi", "--title", "n", "--goal", "g"]).stdout.trim();
-  const path = join(t.repo, ".orca", "jobs", `${id}.json`);
+  const id = t.orka(["new", "--kind", "pi", "--title", "n", "--goal", "g"]).stdout.trim();
+  const path = join(t.repo, ".orka", "jobs", `${id}.json`);
   const job = JSON.parse(readFileSync(path, "utf8"));
   Object.assign(job, { status: "running", pane: "p-1", agent: "orch", worktree: join(t.repo, "wt") });
   writeFileSync(path, JSON.stringify(job));
-  const results = join(t.repo, ".orca", "jobs", id, "results");
+  const results = join(t.repo, ".orka", "jobs", id, "results");
   mkdirSync(results, { recursive: true });
   return { id, results, read: () => JSON.parse(readFileSync(path, "utf8")) };
 }
 
-const worker = (t, id, name, role = "builder") => t.orca(["worker", "--job", id, "--name", name, "--role", role, "--task", "t"]);
+const worker = (t, id, name, role = "builder") => t.orka(["worker", "--job", id, "--name", name, "--role", role, "--task", "t"]);
 
 test("a second verifier round starts while the first verifier pane is still open", () => {
   const t = scratch();
@@ -91,13 +91,13 @@ test("a stale round-1 result is archived and never read as the round-2 verdict",
   assert.equal(worker(t, j.id, "verifier", "verifier").status, 0);
   assert.ok(existsSync(join(j.results, "verifier.round-1.json")));
   assert.ok(!existsSync(join(j.results, "verifier.json")));
-  t.orca(["status", j.id]);
+  t.orka(["status", j.id]);
   const job = j.read();
   assert.equal(job.verifier.rounds, 2);
   assert.equal(job.verifier.verdict, null);
   // Round 2 writes its own result and it is picked up.
   writeFileSync(join(j.results, "verifier.json"), JSON.stringify({ round: 2, verdict: "pass", failures: [] }));
-  t.orca(["status", j.id]);
+  t.orka(["status", j.id]);
   assert.equal(j.read().verifier.verdict, "pass");
 });
 
@@ -145,7 +145,7 @@ test("builders cannot take verifier or verifier-N", () => {
 });
 
 test("orchestrator, worker and verifier prompts all say never to close panes", () => {
-  const src = readFileSync(ORCA, "utf8");
+  const src = readFileSync(ORKA, "utf8");
   assert.equal((src.match(/Never close panes \(yours or anyone's/g) || []).length, 1);
   assert.equal((src.match(/NEVER_CLOSE_PANES,/g) || []).length, 3);
 });
@@ -160,7 +160,7 @@ test("a name used by an agent in another workspace is skipped", () => {
   assert.match(worker(t, j.id, "api").stdout, /worker api-2 pane/);
 });
 
-test("herdr reporting 'already used' at start makes orca pick the next suffix and retry", () => {
+test("herdr reporting 'already used' at start makes orka pick the next suffix and retry", () => {
   const t = scratch();
   const j = makeJob(t);
   writeFileSync(join(t.base, "hidden"), "api\napi-2\n");
@@ -170,7 +170,7 @@ test("herdr reporting 'already used' at start makes orca pick the next suffix an
   assert.equal(j.read().workers[0].name, "api-3");
 });
 
-test("a failed start closes only the pane orca just split", () => {
+test("a failed start closes only the pane orka just split", () => {
   const t = scratch();
   const j = makeJob(t);
   writeFileSync(join(t.base, "start-fails"), "");
@@ -180,7 +180,7 @@ test("a failed start closes only the pane orca just split", () => {
   assert.deepEqual(closes, ["herdr pane close p-split"]);
   // with --pane the pane is the caller's: never closed
   writeFileSync(t.log, "");
-  const own = t.orca(["worker", "--job", j.id, "--name", "api", "--task", "t", "--pane", "w9:p9"]);
+  const own = t.orka(["worker", "--job", j.id, "--name", "api", "--task", "t", "--pane", "w9:p9"]);
   assert.notEqual(own.status, 0);
   assert.ok(!readFileSync(t.log, "utf8").includes("pane close"));
   assert.deepEqual(j.read().workers || [], []);
@@ -200,10 +200,10 @@ echo "  -h, --help        help"
 `,
   );
   chmodSync(join(t.base, "bin", "claude"), 0o755);
-  const cache = join(t.repo, ".orca", "cache", "claude-models.json");
-  const orca = (args) => spawnSync(process.execPath, [ORCA, ...args, "--cwd", t.repo], { encoding: "utf8", env: { ...process.env, ...t.env, XDG_CACHE_HOME: join(t.base, "xdg") } });
+  const cache = join(t.repo, ".orka", "cache", "claude-models.json");
+  const orka = (args) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", t.repo], { encoding: "utf8", env: { ...process.env, ...t.env, XDG_CACHE_HOME: join(t.base, "xdg") } });
   const calls = () => readFileSync(counter, "utf8").split("\n").filter(Boolean).length;
-  const mk = (model) => orca(["new", "--kind", "claude", "--title", "m", "--goal", "g", "--worker-model", model]);
+  const mk = (model) => orka(["new", "--kind", "claude", "--title", "m", "--goal", "g", "--worker-model", model]);
   assert.equal(mk("sonnet").status, 0);
   const first = calls();
   assert.ok(first >= 1);
@@ -249,7 +249,7 @@ case "$1 $2" in
 esac
 `,
   );
-  const run = (extra = {}) => spawnSync(process.execPath, [ORCA, "worker", "--job", j.id, "--name", "api", "--task", "do the thing in a long enough line", "--cwd", t.repo], { encoding: "utf8", env: { ...process.env, ...t.env, ORCA_PROMPT_WAIT_MS: "6000", ORCA_PROMPT_POLL_MS: "200", ...extra } });
+  const run = (extra = {}) => spawnSync(process.execPath, [ORKA, "worker", "--job", j.id, "--name", "api", "--task", "do the thing in a long enough line", "--cwd", t.repo], { encoding: "utf8", env: { ...process.env, ...t.env, ORKA_PROMPT_WAIT_MS: "6000", ORKA_PROMPT_POLL_MS: "200", ...extra } });
   const count = (what) => readFileSync(t.log, "utf8").split("\n").filter((l) => l.startsWith(what)).length;
   return { run, count };
 }
@@ -272,7 +272,7 @@ test("unknown statuses followed by working never duplicate the prompt or press E
 
 test("an idle agent with an empty input box that never saw the prompt is re-prompted, then reported as failed", () => {
   const b = promptBox({ statuses: ["idle"], pane: "\u276f \n" });
-  const r = b.run({ ORCA_PROMPT_WAIT_MS: "800", ORCA_PROMPT_BACKOFF_MS: "50" });
+  const r = b.run({ ORKA_PROMPT_WAIT_MS: "800", ORKA_PROMPT_BACKOFF_MS: "50" });
   assert.notEqual(r.status, 0, "idle is never delivered");
   assert.match(r.stderr, /did not start/);
   assert.equal(b.count("herdr agent prompt api"), 3);

@@ -55,15 +55,16 @@ test("full sweep throws", async () => {
 
 test("portEnv", () => {
   const env = portEnv({ port: 20008, ports: [20008, 20009, 20010, 20011] });
-  assert.deepEqual(env, { ORCA_PORT: "20008", ORCA_PORTS: "20008,20009,20010,20011", PORT: "20008" });
+  const ports = "20008,20009,20010,20011";
+  assert.deepEqual(env, { ORKA_PORT: "20008", ORKA_PORTS: ports, ORCA_PORT: "20008", ORCA_PORTS: ports, PORT: "20008" });
   assert.deepEqual(portEnv({}), {});
 });
 
 test("expandPortVars", () => {
   const job = { port: 20008, ports: [20008, 20009, 20010, 20011] };
   assert.equal(
-    expandPortVars("http://localhost:${ORCA_PORT}/ {{port}} ${ORCA_PORT_1} ${ORCA_PORT_2} ${ORCA_PORT_9}", job),
-    "http://localhost:20008/ 20008 20008 20009 ${ORCA_PORT_9}",
+    expandPortVars("http://localhost:${ORKA_PORT}/ {{port}} ${ORKA_PORT_1} ${ORKA_PORT_2} ${ORKA_PORT_9}", job),
+    "http://localhost:20008/ 20008 20008 20009 ${ORKA_PORT_9}",
   );
 });
 
