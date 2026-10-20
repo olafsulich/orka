@@ -1,5 +1,5 @@
 {
-  "note": "Example only. orca does not run this file. Copy it to orca.verify.json in the repo you want checked, and replace the URL with that app.",
+  "note": "Example only. orka does not run this file. Copy it to orka.verify.json in the repo you want checked, and replace the URL with that app.",
   "steps": [
     ["open", "http://127.0.0.1:3000/"],
     ["wait", "--text", "Ready"],

@@ -1,4 +1,6 @@
-# orca improvement backlog
+# orka improvement backlog
+
+Written when orka was called orca; the task files keep the old name as a record.
 
 From the pstack and Limen research, [research/IMPROVEMENTS-pstack-limen.md](../research/IMPROVEMENTS-pstack-limen.md), filtered by Olaf's decisions on 2026-10-18. Do them in order, one at a time. Mark the status here and in the file.
 
