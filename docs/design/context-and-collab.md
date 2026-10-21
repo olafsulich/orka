@@ -177,3 +177,64 @@ What Limen does with context:
 | file | scope | size |
 |------|-------|------|
 | `tasks/24-worker-reading-budget.md` | One sentence in `workerPrompt` and the verifier prompt; test asserts it. | S |
+
+## 4. Collaborative jobs
+
+### Current state (correction)
+
+"Each worker gets its own worktree" is not right. **One job = one linked worktree on branch `orka/<id>`; every worker of that job, the orchestrator and the verifier all work in that same checkout.**
+
+- `addWorktree` creates exactly one worktree per job at `orka run` (`bin/orka.mjs:1759-1772`, called once at `:1836`).
+- `cmdWorker` splits a pane with `--cwd job.worktree` and creates no worktree (`bin/orka.mjs:1976`, `splitPane` `:1869-1874`). The job records `workerLayout: "shared-worktree"` (`:1724`); dry-run prints "layout: shared worktree (workers do not get sibling checkouts)" (`:1641`).
+- Prompts say so: worker "Other workers share this worktree. Do not revert their files. Do not create a branch, worktree, or push." (`:1166`); orchestrator "Workers share one worktree, so never give two workers the same files. Split by file or area" (`:1581-1585`); digest contract "Contract: shared worktree." (`lib/digest.mjs:21`).
+- Header comment: "Workers share that worktree." (`bin/orka.mjs:2-3`).
+
+So orka already runs several workers on one goal in parallel; what is missing is structure: ownership is a prompt rule, there is no shared findings file, no dependency order, and no integration step.
+
+### Proposal
+
+Keep the shared worktree as the default. Add structure around it, and add per-worker branches only for parts that cannot be split by files.
+
+**Plan file.** The orchestrator writes `<jobdir>/plan.json` before starting workers, via `orka plan <id> --file plan.json` (orka validates it):
+
+```json
+{ "parts": [
+  { "name": "api",  "owns": ["src/api/**"],       "after": [],      "task": "..." },
+  { "name": "ui",   "owns": ["src/ui/**"],        "after": ["api"], "task": "..." },
+  { "name": "docs", "owns": ["docs/feature.md"],  "after": ["api"], "task": "..." }
+]}
+```
+
+- `owns` globs must not overlap; orka refuses overlap. `orka worker --part ui` puts the globs into SCOPE.
+- `after` is the dependency order. `orka worker --part ui` refuses (or `--queue`s) until `api` has `ok: true`. Independent parts start together.
+- Ownership check: before `orka done`, and on every worker note, orka runs `git diff --name-only <base>` and attributes files to parts. A file changed outside every `owns` is a warning in the digest. With one shared checkout orka cannot tell who wrote a file, so this is a check of the plan, not of people; commits per worker (below) close that gap.
+
+**Commit per part.** Each worker commits its own files when done (`git add <owned paths> && git commit -m "<part>: ..."`). Today workers do not commit; the orchestrator's `SUMMARY_FROM_DIFF` reads the whole diff. Per-part commits give attribution, let the verifier route failures by `git log -- <file>`, and make a revert of one part cheap.
+
+**Shared findings.** `<jobdir>/findings.md`, append-only, one entry per line: `<ts> <part> <kind: fact|decision|interface|blocker> <text, ≤200 chars> <path refs>`. Written with `orka note <id> --part ui "..."` (orka does the locking and the cap; agents never edit the file directly). Workers read it at start and before touching an interface. Limen's rule applies: write your plan entry first, then read others'. The digest shows the last 3 `interface`/`blocker` entries.
+
+**Integration step.** When all parts report, the orchestrator starts one `integrator` worker (a builder role with SCOPE = glue files only, listed in `plan.json` `integration.owns`) whose task is: run the full build and tests, fix seams only in glue files, report. Then the verifier runs as today.
+
+**Verifier.** Judges the whole job against the goal, unchanged. Add: the verifier task gets the plan (parts and acceptance per part) and must report each blocking failure with the part that owns the file; routing then goes straight to that part's worker (the existing route-by-owner rule, `bin/orka.mjs:1529`, now backed by `owns`).
+
+**Per-worker branches (opt-in, `--isolate`).** For parts that must touch the same files or run conflicting dev servers. orka creates `orka/<id>/<part>` worktrees from the job branch tip; the orchestrator merges them in `after` order into `orka/<id>`; a conflict is routed to the integrator. Cost: one checkout + one `node_modules` per part, so this is the exception, not the default.
+
+**VPS limits.** 4 cores, 7.7 GB RAM, ~1 GB available when measured. Measured RSS: ~300 MB per `claude` pane (6 panes, avg 308 MB), ~500 MB per headless Chrome session (6 processes 40-200 MB). Cap per job: `maxParallel` default 3 working builders (plus orchestrator and at most one verifier), `orka worker` queues beyond that. Global cap: `orka worker` refuses a new pane when `MemAvailable` < 1.5 GB and says so; the orchestrator then waits for a part to finish. Handed-off idle panes count toward the global check, not toward `maxParallel`.
+
+### Open questions
+
+1. Should workers commit (new behaviour) or should the orchestrator keep one squash at the end? Proposal: workers commit their part; Olaf still decides the merge to main.
+2. Is `--isolate` worth building now, or only after a real job needs it? Proposal: later.
+3. Default `maxParallel`: 3 is safe for RAM today; with a browser per worker, 2.
+4. Should `findings.md` also feed the handoff note (section 2), so a successor reads peers' interfaces? Proposal: yes, by reference.
+
+### Follow-up tasks
+
+| file | scope | size |
+|------|-------|------|
+| `tasks/25-plan-file.md` | `orka plan` validates `plan.json` (no overlapping `owns`, acyclic `after`); `orka worker --part` fills SCOPE and enforces order. | M |
+| `tasks/26-findings-file.md` | `orka note --part`, append-only capped `findings.md`, digest shows last interface/blocker lines; prompt lines. | S |
+| `tasks/27-commit-per-part.md` | Worker prompt: commit owned files; orka ownership check from `git diff --name-only`, warning in digest. | M |
+| `tasks/28-integrator-and-verifier-parts.md` | Integrator role in the flow; verifier gets the plan and reports owning part per failure. | M |
+| `tasks/29-parallel-cap.md` | `maxParallel` per job + `MemAvailable` floor, queueing in `orka worker`. | S |
+| `tasks/30-isolate-parts.md` | Opt-in per-part worktrees and orchestrator merge in `after` order. | L |
