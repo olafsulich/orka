@@ -48,3 +48,90 @@ So with both files present, **Claude reads CLAUDE.md and Pi reads AGENTS.md**. T
 | `tasks/16-orka-agents-md.md` | Write `AGENTS.md` for the orka repo. | S |
 | `tasks/17-context-file-check.md` | `orka run` / dry-run detect the four cases above and warn; Claude version check; tests with fixture repos. | S |
 | `tasks/18-worktree-double-read.md` | Measure whether a pane in `.orka/worktrees/<id>` loads the primary checkout's AGENTS.md too; write the result into this doc. | S |
+
+## 2. Context cap at ~50% with handoff
+
+### Current state
+
+- No part of orka reads context usage. The verifier is the only role that is fresh by design: each round is a new pane (`verifierPrompt`, `bin/orka.mjs:1466`, "You start with fresh context").
+- Compaction defence today is the digest: `orka digest` renders a 2400-character snapshot (`DIGEST_MAX`, `lib/digest.mjs:4`) and `orka steer` prepends it to every steer (`cmdSteer`, `bin/orka.mjs:2266-2302`; `steerText`, `lib/digest.mjs:43`). Decisions survive in `decisions.tsv` (`orka log`, `bin/orka.mjs:2107-2142`).
+- herdr exposes no token data. `herdr agent list` (herdr 0.9.0) returns only `agent, agent_status, cwd, focused, foreground_cwd, interactive_ready, name, pane_id, revision, state_change_seq, tab_id, terminal_id, terminal_title, terminal_title_stripped, workspace_id`.
+- The orchestrator's name is baked into every worker prompt: `herdr agent prompt ${job.agent} "<note>"` (`bin/orka.mjs:1179`, `:1508`). The watcher reads `job.agent` and `job.pane` once at start (`cmdWatch`, `bin/orka.mjs:3187`). Steer, stop and the watcher all address `job.agent`. A handoff that only starts a new pane would break all three.
+- Panes: finished worker panes stay open until `releaseJob` on done/stop (`bin/orka.mjs:810-856`); the orchestrator pane stays until `orka cleanup`. The only mid-job close is a provably unused duplicate (`closeUnusedDuplicates`, `bin/orka.mjs:1918-1933`).
+
+### How to measure context (proved)
+
+Both agents write per-turn token usage into their session transcript. Current context = the last assistant turn's input side.
+
+- Claude Code: `~/.claude/projects/<cwd-slug>/<session-id>.jsonl`, `message.usage` on `type: assistant` lines. Context = `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`.
+- Pi: `~/.pi/agent/sessions/<cwd-slug>/<ts>_<id>.jsonl`, `usage` with `input`, `cacheRead`, `cacheWrite`, `totalTokens`.
+
+Proof on a live job (motion-lab `lauren-mechanic-r3-arms`), one transcript per pane in the shared worktree dir:
+
+```
+$ cd ~/.claude/projects/-home-olaf-projects-motion-lab--orca-worktrees-20261021205713915-lauren-mechanic-r3-arms
+$ for f in *.jsonl; do python3 last_usage.py "$f"; done   # last assistant message.usage: input + cache_read + cache_creation
+262c7c46 claude-sonnet-5-5 ctx_tokens= 124829 pct_of_200k=62% | You are a worker for orka job 20261021205...
+638ae96e claude-haiku-5-5  ctx_tokens=  84801 pct_of_200k=42% | [Image: ...]
+c74543a0 claude-opus-5-5   ctx_tokens=  56527 pct_of_200k=28% | arms r3 done f061e63: ...
+```
+
+So one worker in that job was already past 50% of a 200k window.
+
+Two gaps, both fixable:
+
+1. **Which transcript belongs to which pane.** Every pane in a job shares the worktree cwd, so they share one transcript folder. Fix: orka generates a UUID per agent and starts Claude with `--session-id <uuid>` (flag exists in the installed `claude --help`), stores it on the worker record, and reads exactly that file. For Pi, record the newest session file that appears in `~/.pi/agent/sessions/<slug>/` right after the start, and match it by the first user message (the orka prompt names the worker).
+2. **Window size.** The transcript has tokens, not the window (200k by default, 1M with extended context). Default 200k, overridable per job or in `.orka/config.json` `contextWindow`. Percent = tokens / window.
+
+Other sources, checked:
+- **Statusline JSON** (https://code.claude.com/docs/en/statusline) has exactly what we want: `context_window.context_window_size`, `context_window.used_percentage` (input + cache tokens), `transcript_path`, `session_id`. It runs on each new assistant message. orka could pass `--settings '{"statusLine":{...}}'` at `herdr agent start` so a tiny script writes `<jobdir>/ctx/<name>.json`, with nothing installed in the target repo. Claude-only, and it replaces Olaf's own statusline in those panes (none is set today). Use it later to get the exact window size; not needed for v1.
+- **Hooks**: no hook carries live usage (only `SessionStart` on resume and `PreModelSwitch` have `context_tokens`). `PreCompact` exists and can block an auto-compact (exit 2). Useful as a safety net: a `--settings` PreCompact hook that writes `ctx/<name>.compact` lets the watcher hand off instead of letting a pane compact silently.
+- **herdr**: nothing (see above).
+
+Transcript parsing is the primary method: it works for Claude and Pi and installs nothing.
+
+### Proposal
+
+**Who triggers.** The existing watcher (`lib/watch.mjs`), one per job, already polls every 30 s. Add a context check to its loop: for the orchestrator and each live worker, read the tail of its transcript and compute percent. The agent itself does not decide (it cannot see its own usage reliably, and it would hand off at the wrong moment). The orchestrator does not decide either (it would burn its own context reading numbers).
+
+**When.** Threshold `contextCap` default 0.5, per job (`orka run --context-cap 0.5`) or config. Hand off only at a safe point: agent status `idle` or `done`, never `working` or `blocked`. If a worker is past the cap but still working, the watcher writes `notes/<name>.ctx` with the percent and waits; at 0.7 it sends one short line: "Context at 70%. Finish the current step, then write the handoff note." Hard stop never.
+
+**Handoff note.** Based on Matt Pocock's `handoff` skill (text in the appendix). orka sends the outgoing agent one prompt: write the handoff note to `<jobdir>/handoff/<name>-<n>.md`. Adapted to orka:
+- path is fixed by orka, not a temp file;
+- sections: goal (pointer to the brief, not a copy), done so far with commit SHAs, open work, files touched, decisions (point to `decisions.tsv` rows, do not repeat them), dead ends, next step, and a "do not redo" list;
+- reference artifacts by path (results JSON, verifier JSON, digest), never paste them;
+- hard cap: 200 lines / 8 KB, so it stays far below the 50% it replaces.
+
+**New pane.** orka starts the successor in a new pane split from the old one, same cwd, same model, same role. Name: herdr names are global and never reused (`freeWorkerName`, `bin/orka.mjs:1234`), so:
+- rename the old agent `builder` → `builder-h1` (`herdr agent rename`), then start the new agent as `builder`. This keeps the routing target stable: worker prompts that say `herdr agent prompt <orchestrator>` still reach the live orchestrator, and `job.agent` never changes. Workers' `results/<name>.json` and `notes/<name>.txt` paths stay the same.
+- Record on the worker: `handoffs: [{ n, from: "builder-h1", pane, sessionId, pct, at, note }]`.
+
+First prompt of the successor = the normal role prompt (`workerPrompt` or `orchestratorPrompt`) + "You continue from a handoff. Read `<note>` first. Do not repeat what it lists as done." For the orchestrator also prepend the current `orka digest`, the same way steer does.
+
+**Old pane.** Stays open, idle, until done/stop/cleanup, like any finished worker. `releaseJob` already closes every `job.workers[].pane`; handed-off panes are in that list, so nothing changes there. The renamed orchestrator pane `j<id>-h1` is a worker-style record and is closed by `releaseJob`; the live orchestrator pane keeps today's rule (stays until `orka cleanup`).
+
+**Interactions.**
+- *Digest:* add one line per worker with a handoff (`builder: h2, 54% → fresh`), inside `DIGEST_MAX`. The digest is the orchestrator's re-entry kit, so `DIGEST_MAX` stays 2400; the handoff note carries the rest.
+- *Steer:* unchanged, it addresses `job.agent`, which is the successor after the rename. A steer that arrives during a handoff waits (orka holds a `handoff.lock` in the job dir; steer retries for up to 60 s).
+- *Verifier:* exempt. It is fresh each round and short-lived. If a verifier passes the cap, the watcher only logs it; a round that needs more than half a window is a sign the task is too big, and the orchestrator should split verification.
+- *Finish webhook:* unchanged. Handoffs are not terminal. Add `handoffs: <count>` to the payload so Olaf sees it.
+- *Watcher itself:* reload `job.agent`/`job.pane` from the job file each poll instead of once at start (`bin/orka.mjs:3187`), so a handoff never strands it.
+- *Housekeeping popups and needs-input:* the watcher already reads the lead pane; the handoff check runs after those.
+
+**RAM.** A handoff briefly has two live processes for one role. Kill nothing: the old agent is idle, but it still holds ~300 MB (measured: 6 `claude` processes, avg 308 MB RSS). Count handed-off panes against the job's worker cap (section 4).
+
+### Open questions
+
+1. 50% of what: of the model's full window, or of the point where Claude auto-compacts? Proposal: of the full window, measured from the transcript.
+2. Should the orchestrator be handed off at all, or only workers? It holds the plan; the digest + `decisions.tsv` + handoff note should be enough, but this is the riskiest case. Proposal: workers first, orchestrator behind a flag.
+3. Is keeping the old pane (and its ~300 MB) worth it when RAM is tight? The rule says yes; an alternative is to `/exit` the old agent but leave the pane shell open.
+
+### Follow-up tasks
+
+| file | scope | size |
+|------|-------|------|
+| `tasks/19-session-id-per-pane.md` | Start Claude panes with `--session-id`, record it on each worker; Pi: record the session file. | S |
+| `tasks/20-context-meter.md` | `lib/context.mjs`: read the transcript tail, compute tokens and percent; `orka status` shows it per pane. Tests with fixture jsonl. | M |
+| `tasks/21-watcher-reloads-job.md` | Watcher reloads `job.agent`/`job.pane` each poll. | S |
+| `tasks/22-handoff-worker.md` | Watcher triggers handoff for builder workers at the cap: note prompt, rename, new pane, successor prompt, job record, digest line. | L |
+| `tasks/23-handoff-orchestrator.md` | Same for the orchestrator, behind `--handoff-orchestrator`; digest prepended. | M |
