@@ -263,3 +263,55 @@ If the user passed arguments, treat them as a description of what the next sessi
 ```
 
 What orka changes: the note goes to `<jobdir>/handoff/<name>-<n>.md`, not `$TMPDIR` (it must outlive the pane and sit next to `decisions.tsv`); orka triggers it, not the user (`disable-model-invocation` does not apply, orka sends the text as a prompt); "suggested skills" becomes "next commands" (orka commands and checks to run); "reference by path" and "redact secrets" stay as they are; the argument is filled by orka with the worker's open SCOPE.
+
+## Limen, latest source (2026-10-21)
+
+Source: https://github.com/overment/limen, `main` at `a8cb4b0` (2026-10-21 15:06 +02:00), `package.json` `@overment/limen` 0.1.0. There are no tags or releases. The npm package named `limen` is unrelated (0.0.0, last changed 2022). I read a sparse, shallow clone of `src/`, `hook/`, `templates/` and `docs/`. Refs below are to that commit. The newest public writing is https://mega.dev/autonomous-product-development; `docs/research/overment-agents.html` covers Adam's messages from Sep 1 to Oct 20.
+
+**a. Context limits.** Limen has none.
+- No threshold, no measurement of a live context window, and no compaction prompt anywhere in the code.
+- `src/job/usage.ts:20-44` (`readSessionUsage`) adds up the input, output and cache tokens of every assistant turn in `.limen/jobs/<id>/session/*.jsonl`. It only feeds the `tokens` line of `limen jobs <id>` (`src/commands/jobs.ts:371-373`). Its own comment says "This informs; it never blocks" (`usage.ts:48`).
+- Compaction belongs to the engine (Pi or OMP). Limen only reacts to it: the Pi hook clears its read-recall on `session_compact` (`hook/communication.ts:105-110`).
+- Rules survive compaction because they are re-attached every turn. `before_agent_start` (`hook/communication.ts:73-92`) appends the guidance to the system prompt and adds a hidden per-turn cue (`display: false`, `:84`).
+- The only bounds are spend bounds, not context bounds: a detached job gets 90 minutes and 900 tool calls (`src/runtime/wrapper.ts:32-35`). "A job is one short turn" (`:32`).
+- So neither "50% of the full window" nor "50% of the auto-compact point" has a Limen precedent. Limen keeps jobs short instead.
+
+**b. Handoff format.**
+- A worker's handoff is its final message. Template `templates/worker.md:40`: "changes, checks actually run, commit(s), anything you left running or outside the worktree, what the next worker must know, and any remaining slice … The worktree, branch, and `.limen/jobs/<id>/session` are the handoff."
+- The coordinator gets a bounded excerpt of it in the wake (`docs/jobs.md:37`).
+- Coordinator-to-worker handoffs stay short and point to files ("Use a short instruction, not a ticket dump", `templates/agents.md:150`).
+- Picking up the work means `limen spawn --branch <branch>`, which reuses the job's branch and worktree (`src/commands/spawn.ts:610-631`, `docs/jobs.md:105`), or `limen continue`.
+- `limen continue` **copies the transcript**: `copyFile(job.session.source, …/session/…)` (`src/job/publication.ts:177`, `docs/jobs.md:144`). Context is carried over, not reset.
+
+**c. Coordinator.** It is never handed off or reset by Limen.
+- "The coordinator is a hosted session in Herdr … It is not a limen job" (`templates/agents.md:7`). Limen never spawns or replaces a coordinator (`:17`).
+- It lives on engine compaction plus the per-turn cue, and the job files are its source of truth after a reload ("Job files under `.limen/jobs/<id>/` are truth", `templates/agents.md:148`).
+- For groups: "Resume the original lead session … A different session does not silently inherit lead authority" (`docs/groups.md:97`).
+- Fresh context is reserved for workers and reviewers. "A reviewer is independent because it is a fresh session" (`templates/agents.md:189`). Spawning costs "a cold context" (`:185`).
+
+**d. Collaboration.**
+- Every spawned job gets its own worktree and branch (`addNewWorktree`, `src/project/git.ts:207-209`, used at `src/commands/spawn.ts:629`).
+- **Workers commit**: "commit, write the final summary as the last message, then call `finish`" (`templates/worker.md:10`).
+- The coordinator integrates with `limen land`, a plain `git merge --no-edit <branch>` onto its own checkout (`src/project/git.ts:255-258`, `src/commands/land.ts:44`), after it reads the diff and runs or orders review (`templates/agents.md:150-151`).
+- Groups (newest version) are several teams, each on its own model, working **one ticket in rounds** (`draft`, `critique`, `revise`, `final`; `docs/groups.md:3,9-20`):
+  - Each team has its own worktree (`:55`).
+  - Round results are saved to `.limen/groups/<id>/rounds/<round>/team-N.md`, and every team gets every team's results in the next round (`:41`).
+  - Urgent findings go through `limen group publish` (`:57-61`).
+  - The `final` team writes the single result (`:20`).
+  - The lead merges the branches it keeps onto one integration branch (`:101`).
+  - A launch lock makes sure a round starts once (`:45`). There is no automatic merge or push (`:5`).
+  - Limen does not split a task into file areas. Teams overlap on purpose and then critique each other.
+
+**e. Changed vs the article and the Oct 17 checkout.**
+- Groups were "teams pursuing the same feature through different approaches" at `3241454` (2026-10-17). Now they are **rounds with critique and one final writer**, configured as `--team ENGINE:PROVIDER/MODEL:THINKING` and `--rounds` (`docs/groups.md:3,17-20`).
+- The article's "one agent each from xAI, OpenAI and Anthropic … returns one result" matches the `final` round.
+- The article says "the coordinator keeps its context. It does not start again", and the code agrees: no coordinator reset.
+- The article describes "merge to main, push". In the code, `land` merges only, with no push (`src/commands/land.ts`), and groups never push (`docs/groups.md:5`). Pushing is a separate step.
+
+### Copy, adapt, skip (tied to the open questions above)
+
+- **50% of the full window vs the auto-compact point.** Adapt. Limen has no threshold to copy, and its answer is short jobs plus spend caps. Keep orka's measure: transcript tokens ÷ full window, the same source Limen uses in `usage.ts` (Limen sums all turns; orka takes the last turn). Add Limen's tool-call/time cap as a second trigger for workers.
+- **Orchestrator handoff.** Skip by default, matching Limen: the coordinator stays one session, and files are truth. Copy the per-turn re-injection in the only form orka can do portably, the digest on every steer (already built). Keep orchestrator handoff behind a flag, as proposed.
+- **Workers commit their part.** Copy. Limen workers always commit, and the coordinator integrates with a plain merge. For orka's shared worktree that means "commit your owned paths" (task 27). For `--isolate` it means Limen's branch-per-job and merge-in-order.
+- **Handoff note.** Copy Limen's final-message checklist (changes, checks run, commits, left running, next must know, remaining slice) into orka's handoff note. Skip transcript copying (`limen continue`).
+- **Collaboration shape.** Adapt rounds later, as an option for hard design questions (draft → critique → final, results as files). Do not use rounds for ordinary splits. Skip the cabinet locks and the publish/wait protocol.
