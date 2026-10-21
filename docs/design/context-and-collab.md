@@ -135,3 +135,45 @@ First prompt of the successor = the normal role prompt (`workerPrompt` or `orche
 | `tasks/21-watcher-reloads-job.md` | Watcher reloads `job.agent`/`job.pane` each poll. | S |
 | `tasks/22-handoff-worker.md` | Watcher triggers handoff for builder workers at the cap: note prompt, rename, new pane, successor prompt, job record, digest line. | L |
 | `tasks/23-handoff-orchestrator.md` | Same for the orchestrator, behind `--handoff-orchestrator`; digest prepended. | M |
+
+## 3. What to take from Limen
+
+### Current state
+
+Sources: `docs/research/limen-2026-10-10.md`, `docs/research/overment-vs-orca.md`, `docs/research/overment-agents.html`, and the local Limen checkout (`~/projects/limen` at `3241454`, 2026-10-17). Limen is public at https://github.com/overment/limen (background: https://mega.dev/autonomous-product-development). It has no document on context handling; the points below come from its code and templates. No context-limit threshold or custom compaction prompt exists in it.
+
+What Limen does with context:
+- **It does not compact or hand off.** Pi (or OMP) compacts the session. Limen keeps big stable text out of the thread and leaves the full record on disk (`limen-2026-10-10.md:41`).
+- **Rules live on the system prompt, plus a hidden per-turn cue** rebuilt every turn, so they survive compaction (`hook/communication.ts`, `limen-2026-10-10.md:63`). Pi-only (a Pi extension).
+- **Bounded wake:** `handoffExcerpt` clips a finished job's result to 15 lines / 1200 chars + 10 commits (`limen-2026-10-10.md:83`). orka already copied this as the digest.
+- **`limen continue` copies the parent's jsonl** into the child. Context is kept, not shrunk (`limen-2026-10-10.md:33`).
+- **A correction goes to the same coordinator, which keeps its context** (`overment-vs-orca.md:14`, `overment-agents.html` "Correction").
+- **Worker reading budget:** about ten reads, then a probe edit; stop if the seam widens (`templates/worker.md`). **Handoffs under ~200 words** (`templates/agents.md`).
+- **AGENTS.md:** a project `AGENTS.md` replaces Limen's inherited shop manual (`hook/communication.ts:234-237`, `docs/setup.md:76`). Limen treats AGENTS.md as the one project file.
+- **Groups** (collaboration): several teams pursue the same feature with different approaches, each candidate in its own worktree, findings published to a shared cabinet, the lead merges what it keeps onto one integration branch (`docs/groups.md:3,43,87,89`).
+
+### Copy
+
+- The ~200-word handoff discipline and "point to files, never paste": into the handoff note template (section 2).
+- The worker reading budget as one sentence in `workerPrompt`. It delays the 50% point for free.
+- Per-candidate worktrees + one integration branch owned by the lead: into section 4.
+- "Publish first hypothesis before reading peers": for collaborative workers, write your plan to the findings file before reading others'.
+- AGENTS.md as the single project file (section 1).
+
+### Do not copy
+
+- A Pi extension / per-turn hidden cue. Claude panes would not get it, and orka must not install hooks in the target repo.
+- `continue` by copying the transcript. It is the opposite of a fresh agent.
+- Relying on the harness's own compaction as the only defence. That is exactly what the 50% cap replaces.
+- Groups' lock, lease and delivery-claim machinery (`docs/groups.md:109-124`). orka has one orchestrator per job; the job file plus `herdr agent prompt` is enough.
+- Competing teams on one feature. Olaf asked for cooperation on one task, not a race (orka skipped best-of-N, `tasks/README.md` #21).
+
+### Open questions
+
+1. Does Olaf want the reading budget as a hard number ("ten reads") or a softer rule?
+
+### Follow-up tasks
+
+| file | scope | size |
+|------|-------|------|
+| `tasks/24-worker-reading-budget.md` | One sentence in `workerPrompt` and the verifier prompt; test asserts it. | S |
