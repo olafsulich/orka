@@ -19,6 +19,7 @@ orka log <id> <phase> <decision> <why> <evidence> <result>
 orka cleanup [--dry-run] [--older-than 12h] [--orphan-hours 2] [--cwd <repo>]
 orka reap <id> [--worker <name>] [--dry-run] [--cwd <repo>]   # closes browsers only; panes stay
 orka watch <id> [--dry-run] [--cwd <repo>]   # started by orka run, not for hand use
+orka handoff <id> [--dry-run] [--cwd <repo>]   # one context-handoff pass; the watcher runs it every poll
 orka webhook <id> [--dry-run] [--force] [--cwd <repo>]
 orka verify <id> [--base] [--dry-run] [--cwd <repo>]
 orka help
@@ -45,6 +46,8 @@ orka help
 `cleanup` closes the workspaces of finished jobs that have been idle for a while. See [cleanup.md](cleanup.md).
 
 `watch` is the needs-input watcher that `run` starts in the background. See [needs-input.md](needs-input.md).
+
+`handoff` measures each builder worker's context from its transcript and hands an idle one past `handoff.threshold` to a fresh pane. See [handoff.md](handoff.md).
 
 `verify` runs project browser checks in the job worktree. See [verify.md](verify.md). It does not set the job to `done`; `orka done` does. The verifier worker runs it, not the orchestrator. `--base` runs the same checks against the base commit instead (see [verify.md](verify.md)).
 
