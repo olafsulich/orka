@@ -5,6 +5,7 @@
 // Finish wake: when the CLI marks done|failed|stopped, POST {job, status, branch}
 // if <repo>/.orka/secrets/finish-webhook.env exists. Never a home path.
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -13,6 +14,7 @@ import { parseEnv } from "node:util";
 import { DECISION_ROWS, DIGEST_MAX, FILE_READ_MAX, SUMMARY_MAX, VERIFIER_JSON_MAX, renderDigest, steerText } from "../lib/digest.mjs";
 import * as brand from "../lib/brand.mjs";
 import * as browsers from "../lib/browsers.mjs";
+import * as context from "../lib/context.mjs";
 import * as lifecycle from "../lib/lifecycle.mjs";
 import * as ports from "../lib/ports.mjs";
 import * as watch from "../lib/watch.mjs";
@@ -924,9 +926,12 @@ function assertAgentName(name) {
   if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) fail(`agent name must match [a-z][a-z0-9_-]{0,31}, got ${name}`);
 }
 
-function startArgs(name, pane, kind, alias) {
+// sessionId names the agent's transcript (claude and pi both take --session-id), so orka reads
+// the right file when it measures context; every pane of a job shares one transcript folder.
+function startArgs(name, pane, kind, alias, sessionId) {
   const args = ["agent", "start", name, "--kind", kind, "--pane", pane, "--timeout", "60000"];
-  if (kind === "claude") args.push("--", "--model", alias);
+  const extra = [...(kind === "claude" ? ["--model", alias] : []), ...(sessionId ? ["--session-id", sessionId] : [])];
+  if (extra.length) args.push("--", ...extra);
   return args;
 }
 
@@ -1642,21 +1647,21 @@ function printDryRun(repo, job) {
   console.log(`git: git -C ${q(repo)} worktree add -b ${q(branch)} ${q(wt)} HEAD`);
   console.log(`workspace: herdr workspace create --cwd ${q(wt)} --label ${q(brand.workspaceLabel(job.id))} --no-focus --env PATH=<orka-bins>:$PATH${job.port != null ? ` ${portEnvArgs(job).map(q).join(" ")}` : " (+ ORKA_PORT/ORCA_PORT env, allocated at run)"}`);
   console.log(`port: ${job.port != null ? (job.ports || [job.port]).join(",") : "allocated at run"} (ORKA_PORT in the panes and orka verify scripts; urls and commands in ${verifyFile(job.worktree)} expand \${ORKA_PORT})`);
-  console.log(`lead: herdr ${sh(startArgs(name, "<pane>", kind, orchestratorModel))}`);
+  console.log(`lead: herdr ${sh(startArgs(name, "<pane>", kind, orchestratorModel, "<session-id>"))}`);
   if (kind === "claude") {
     const verifierModel = job.verifierModel || workerModel;
     console.log(`models: orchestrator=${orchestratorModel} worker=${workerModel} ${verifierLabel(job)}`);
     console.log(`pane: ${paneCommand(orchestratorModel)}`);
     console.log(`worker: orka worker --job ${job.id} --name <worker> --task "<task>"`);
     console.log(`worker-pane: ${paneCommand(workerModel)}`);
-    console.log(`worker-lead: herdr ${sh(startArgs("<worker>", "<pane>", "claude", workerModel))}`);
+    console.log(`worker-lead: herdr ${sh(startArgs("<worker>", "<pane>", "claude", workerModel, "<session-id>"))}`);
     console.log(`verifier-pane: ${paneCommand(verifierModel)}`);
   } else {
     console.log("role: orchestrator (pi)");
     console.log(`pane: ${paneCommand("")}`);
     console.log(`worker: orka worker --job ${job.id} --name <worker> --task "<task>"`);
     console.log(`worker-pane: ${paneCommand("")}`);
-    console.log(`worker-lead: herdr ${sh(startArgs("<worker>", "<pane>", "pi", ""))}`);
+    console.log(`worker-lead: herdr ${sh(startArgs("<worker>", "<pane>", "pi", "", "<session-id>"))}`);
   }
   console.log("finish webhook: posts {job, status, branch} when the CLI marks done, failed, or stopped");
   console.log("watcher: orka watch <id> (detached) posts {kind:needs-input, job, title, status, question, pane} when the orchestrator waits on a question");
@@ -1799,8 +1804,9 @@ function startLead(job) {
   const alias = kind === "claude" ? job.orchestratorModel || job.model : "";
   if (kind === "claude" && !alias) fail("job has no orchestratorModel");
   let last = null;
+  job.sessionId = randomUUID();
   for (let attempt = 1; attempt <= 2; attempt++) {
-    last = herdr(startArgs(name, job.pane, kind, alias), 90000);
+    last = herdr(startArgs(name, job.pane, kind, alias, job.sessionId), 90000);
     if (last.code === 0 && !last.json?.error) return name;
     if (attempt === 1 && /not an available shell|agent_not_ready/i.test(last.text)) {
       sleep(1000);
@@ -1961,7 +1967,7 @@ function cmdWorker(args) {
     console.log(`worktree: ${wt}`);
     console.log("layout: shared worktree");
     console.log(`split: herdr pane split --pane ${q(job.pane || "<orchestrator-pane>")} --direction right --cwd ${q(wt)} --no-focus`);
-    console.log(`spawn: herdr ${sh(startArgs(first, args.pane || "<pane>", kind, alias))}`);
+    console.log(`spawn: herdr ${sh(startArgs(first, args.pane || "<pane>", kind, alias, "<session-id>"))}`);
     console.log(`pane: ${paneCommand(alias)}`);
     return;
   }
@@ -1977,8 +1983,9 @@ function cmdWorker(args) {
   let name = first;
   const tried = [];
   let started;
+  const sessionId = randomUUID();
   for (;;) {
-    started = herdr(startArgs(name, pane, kind, alias), 90000);
+    started = herdr(startArgs(name, pane, kind, alias, sessionId), 90000);
     const failed = started.code !== 0 || started.json?.error;
     if (!failed) break;
     if (!/already used/i.test(started.text) || tried.length >= 20) break;
@@ -2003,6 +2010,8 @@ function cmdWorker(args) {
     model: alias,
     role,
     task: String(task),
+    sessionId,
+    startedAt: new Date().toISOString(),
     result: role === "verifier" ? verifierResultPath(repo, job.id) : join(jobDir(repo, job.id), "results", `${name}.json`),
     note: join(jobDir(repo, job.id), "notes", `${name}.txt`),
   });
