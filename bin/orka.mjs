@@ -2030,6 +2030,184 @@ function cmdWorker(args) {
   console.log(`${id} worker ${name} pane=${pane} kind=${kind}${alias ? ` model=${alias}` : ""}${role === "verifier" ? ` role=verifier round=${round}` : ""} worktree=${job.worktree}`);
 }
 
+// Context handoff for builder workers (docs/handoff.md). The watcher runs handoffTick every poll:
+// a live builder past handoff.threshold of its window and idle is asked for a note; once the note
+// exists and it is idle again, it is renamed <name>-h<n> and a fresh agent starts under <name> in a
+// new pane of the same worktree. The old pane stays open until done, stop or cleanup.
+const HANDOFF_NOTE_WAIT_MS = Number(brand.env("HANDOFF_NOTE_WAIT_MS")) || 15 * 60 * 1000;
+let orchestratorHandoffLogged = false;
+
+function handoffSettingsOf(repo) {
+  let config = {};
+  try {
+    config = JSON.parse(readFileSync(configPath(repo), "utf8"));
+  } catch {
+    config = {};
+  }
+  return context.handoffSettings(config?.handoff);
+}
+
+// Load, change, save: a handoff step takes minutes, so it never writes back a stale job record.
+function updateJob(repo, id, fn) {
+  const job = load(repo, id);
+  const out = fn(job);
+  save(repo, job);
+  return out;
+}
+
+// The session id is the stable key of a worker record; its name changes on handoff.
+const workerBySession = (job, sessionId) => (job.workers || []).find((w) => w.sessionId === sessionId);
+
+function measureWorker(job, worker, settings) {
+  const path = context.findTranscript({ kind: worker.kind, cwd: job.worktree, sessionId: worker.sessionId, home: homedir() });
+  return path ? context.contextOf(context.readUsage(path), settings.contextWindow) : null;
+}
+
+const herdrOk = (got) => got.code === 0 && !got.json?.error;
+const herdrDetail = (got) => String(got.json?.error?.message || got.json?.error || got.text || "").replace(/\s+/g, " ").slice(0, 200);
+const pctOf = (pct) => Math.round(pct * 1000) / 1000;
+
+function handoffFailed(repo, id, sessionId, reason, log) {
+  updateJob(repo, id, (job) => {
+    const w = workerBySession(job, sessionId);
+    if (w?.handoff) Object.assign(w.handoff, { state: "failed", reason });
+  });
+  appendDecision(repo, id, ["handoff", "handoff abandoned", reason, "", "failed"]);
+  log(`handoff failed: ${reason}`);
+}
+
+function askForNote(repo, job, worker, ctx, settings, log) {
+  const n = context.handoffNumber(worker);
+  const note = context.notePath(jobDir(repo, job.id), worker.name, n);
+  mkdirSync(dirname(note), { recursive: true });
+  const sent = promptWithRetry(worker.name, context.notePrompt({ path: note, context: ctx, threshold: settings.threshold }));
+  const at = new Date().toISOString();
+  updateJob(repo, job.id, (j) => {
+    const w = workerBySession(j, worker.sessionId);
+    if (w) w.handoff = { state: sent.ok ? "writing" : "failed", n, note, tokens: ctx.tokens, window: ctx.window, pct: pctOf(ctx.pct), at, ...(sent.ok ? {} : { reason: sent.reason }) };
+  });
+  appendDecision(repo, job.id, ["handoff", `ask ${worker.name} for handoff note h${n}`, `context ${context.pctLabel(ctx.pct)} >= ${context.pctLabel(settings.threshold)} of ${ctx.window}`, note, sent.ok ? "asked" : `failed: ${sent.reason}`]);
+  log(`handoff ${worker.name}: context ${context.pctLabel(ctx.pct)} (${ctx.tokens}/${ctx.window}); ${sent.ok ? `asked for ${note}` : `note prompt failed: ${sent.reason}`}`);
+}
+
+// Note written and the agent idle: rename it, start the successor under its name, prompt it.
+function startSuccessor(repo, id, sessionId, log) {
+  const job = load(repo, id);
+  const worker = workerBySession(job, sessionId);
+  const h = worker.handoff;
+  const name = worker.name;
+  const from = context.retiredName(name, h.n);
+  const renamed = herdr(["agent", "rename", name, from]);
+  if (!herdrOk(renamed)) return handoffFailed(repo, id, sessionId, `herdr agent rename ${name} ${from}: ${herdrDetail(renamed)}`, log);
+  const at = new Date().toISOString();
+  updateJob(repo, id, (j) => {
+    const w = workerBySession(j, sessionId);
+    w.name = from;
+    w.retired = { at, by: name, n: h.n };
+    w.handoff.state = "done";
+  });
+  const rollback = (why) => {
+    herdr(["agent", "rename", from, name]);
+    updateJob(repo, id, (j) => {
+      const w = workerBySession(j, sessionId);
+      w.name = name;
+      delete w.retired;
+    });
+    handoffFailed(repo, id, sessionId, why, log);
+  };
+  const split = herdr(["pane", "split", "--pane", worker.pane, "--direction", "down", "--cwd", job.worktree, "--no-focus", "--env", `PATH=${pathPrefix()}`, ...portEnvArgs(job), ...jobEnvArgs(job, name)]);
+  const pane = split.json?.result?.pane?.pane_id;
+  if (!pane) return rollback(`pane split: ${herdrDetail(split)}`);
+  const nextSession = randomUUID();
+  const started = herdr(startArgs(name, pane, worker.kind, worker.model, nextSession), 90000);
+  if (!herdrOk(started)) {
+    // The pane was split just now and never held an agent: close only that one.
+    herdr(["pane", "close", pane]);
+    return rollback(`agent start ${name}: ${herdrDetail(started)}`);
+  }
+  const prompt = `${workerPrompt(job, name, worker.task, worker.model)}\n${context.successorLines({ path: h.note, n: h.n, from })}`;
+  const delivered = promptWithRetry(name, prompt);
+  const record = { n: h.n, from, pane: worker.pane, sessionId, tokens: h.tokens, window: h.window, pct: h.pct, at, note: h.note };
+  updateJob(repo, id, (j) => {
+    j.workers.push({
+      delivery: delivered.ok ? "ok" : "failed",
+      ...(delivered.ok ? {} : { deliveryReason: delivered.reason }),
+      name,
+      pane,
+      kind: worker.kind,
+      model: worker.model,
+      role: worker.role,
+      task: worker.task,
+      sessionId: nextSession,
+      startedAt: at,
+      result: worker.result,
+      note: worker.note,
+      handoffs: [...(Array.isArray(worker.handoffs) ? worker.handoffs : []), record],
+    });
+    j.handoffs = [...(Array.isArray(j.handoffs) ? j.handoffs : []), { worker: name, ...record }];
+  });
+  appendDecision(repo, id, ["handoff", `${from} -> fresh ${name} (h${h.n})`, `context ${context.pctLabel(h.pct)}; old pane ${worker.pane} stays open`, h.note, delivered.ok ? `ok pane=${pane}` : `delivery failed: ${delivered.reason}`]);
+  log(`handoff ${name}: old agent renamed ${from} (pane ${worker.pane} stays open), fresh ${name} pane=${pane}${delivered.ok ? "" : ` delivery failed: ${delivered.reason}`}`);
+}
+
+// One pass over a job's workers. Returns what it saw, for orka handoff --dry-run and the tests.
+function handoffTick(repo, id, { log = console.log, dry = false } = {}) {
+  const settings = handoffSettingsOf(repo);
+  const job = load(repo, id);
+  const seen = [];
+  if (!settings.enabled || job.status !== "running" || !job.worktree) return seen;
+  if (settings.orchestrator && !orchestratorHandoffLogged) {
+    orchestratorHandoffLogged = true;
+    log("handoff.orchestrator is on, but orchestrator handoff is not built yet; only workers are handed off");
+  }
+  for (const worker of job.workers || []) {
+    if (!worker?.sessionId) continue;
+    if (worker.handoff?.state === "writing") {
+      const ready = existsSync(worker.handoff.note) && statSync(worker.handoff.note).size > 0;
+      const status = agentStatus(worker.name);
+      seen.push({ name: worker.name, state: "writing", ready, status });
+      if (dry) continue;
+      if (ready && status === "idle") startSuccessor(repo, id, worker.sessionId, log);
+      else if (Date.now() - Date.parse(worker.handoff.at) > HANDOFF_NOTE_WAIT_MS) {
+        handoffFailed(repo, id, worker.sessionId, `${worker.name} wrote no handoff note in ${Math.round(HANDOFF_NOTE_WAIT_MS / 60000)} min`, log);
+      }
+      continue;
+    }
+    const resultExists = existsSync(join(jobDir(repo, id), "results", `${worker.name}.json`));
+    if (!context.handoffCandidate(worker, { resultExists })) continue;
+    const ctx = measureWorker(job, worker, settings);
+    if (!ctx) {
+      seen.push({ name: worker.name, state: "no usage" });
+      continue;
+    }
+    const status = ctx.pct >= settings.threshold ? agentStatus(worker.name) : "";
+    const due = context.handoffDue({ context: ctx, status, threshold: settings.threshold });
+    seen.push({ name: worker.name, tokens: ctx.tokens, window: ctx.window, pct: pctOf(ctx.pct), status, due: due.due, why: due.why });
+    if (dry) continue;
+    updateJob(repo, id, (j) => {
+      const w = workerBySession(j, worker.sessionId);
+      if (w) w.context = { tokens: ctx.tokens, window: ctx.window, pct: pctOf(ctx.pct), at: new Date().toISOString() };
+    });
+    if (due.due) askForNote(repo, job, worker, ctx, settings, log);
+  }
+  return seen;
+}
+
+function cmdHandoff(args) {
+  allowFlags(args, ["cwd", "dry-run"]);
+  const id = args._[1];
+  if (!id) fail("need: orka handoff <id> [--dry-run]");
+  const repo = requireRepo(args.cwd || process.cwd());
+  const settings = handoffSettingsOf(repo);
+  if (args["dry-run"]) console.log(`handoff: ${settings.enabled ? `threshold ${context.pctLabel(settings.threshold)}` : "off"}${settings.orchestrator ? " orchestrator flag on (not built)" : ""}`);
+  const seen = handoffTick(repo, String(id), { dry: Boolean(args["dry-run"]) });
+  for (const s of seen) {
+    if (s.state) console.log(`${s.name}: ${s.state}${s.state === "writing" ? ` note=${s.ready ? "written" : "not yet"} status=${s.status}` : ""}`);
+    else console.log(`${s.name}: ${s.tokens}/${s.window} tokens ${context.pctLabel(s.pct)}${s.status ? ` ${s.status}` : ""} -> ${s.due ? "hand off" : "keep"} (${s.why})`);
+  }
+  if (!seen.length) console.log("no worker to measure");
+}
+
 // A new verifier round starts clean: the previous verifier's sessions are closed
 // and any Chrome left from them (tagged or by session name) is killed.
 function reapPreviousVerifier(job) {
@@ -2072,7 +2250,7 @@ function cmdStatus(args) {
     if (job.cleanup) console.log(`  cleaned up: ${job.cleanup.browsers.length} browser(s), ${job.cleanup.servers.length} server(s), ${job.cleanup.panes.length} worker pane(s)`);
     if (job.kind === "claude") console.log(`  models: orchestrator=${job.orchestratorModel || job.model || "-"} worker=${job.workerModel || "-"} ${verifierLabel(job)}`);
     if (job.agent || job.pane) console.log(`  agent: ${job.agent || "-"} pane=${job.pane || "-"} workspace=${job.workspace || "-"} model=${job.orchestratorModel || job.model || "-"}${job.leadDelivery === "failed" ? ` delivery=failed${job.stopReason ? ` [${job.stopReason}]` : ""}` : ""}`);
-    for (const worker of job.workers || []) console.log(`  worker: ${worker.name} pane=${worker.pane} ${worker.model ? `model=${worker.model}` : "kind=pi"}${worker.role === "verifier" ? " role=verifier" : ""}${worker.delivery ? ` delivery=${worker.delivery}` : ""}${worker.closedUnused ? ` closed-unused (${worker.closedUnused.reason})` : ""}${worker.delivery === "failed" && worker.deliveryReason ? ` [${worker.deliveryReason}]` : ""}`);
+    for (const worker of job.workers || []) console.log(`  worker: ${worker.name} pane=${worker.pane} ${worker.model ? `model=${worker.model}` : "kind=pi"}${worker.role === "verifier" ? " role=verifier" : ""}${worker.delivery ? ` delivery=${worker.delivery}` : ""}${worker.closedUnused ? ` closed-unused (${worker.closedUnused.reason})` : ""}${worker.delivery === "failed" && worker.deliveryReason ? ` [${worker.deliveryReason}]` : ""}${handoffLabel(worker)}`);
     for (const steer of (job.steers || []).filter((x) => x?.delivery === "failed")) console.log(`  steer: ${String(steer.message ?? "").slice(0, 200).replace(/[\r\n]+/g, " ")} delivery=failed${steer.deliveryReason ? ` [${steer.deliveryReason}]` : ""}`);
     const summary = summaryOf(repo, job);
     if (summary) console.log(`  summary: ${summary}`);
@@ -2092,6 +2270,15 @@ function cmdStatus(args) {
     return;
   }
   for (const file of files) line(JSON.parse(readFileSync(join(jobsDir(repo), file), "utf8")));
+}
+
+function handoffLabel(worker) {
+  const parts = [];
+  if (worker.context?.pct != null && !worker.retired) parts.push(`ctx=${context.pctLabel(worker.context.pct)}`);
+  if (worker.retired) parts.push(`handed-off->${worker.retired.by} (h${worker.retired.n}, pane open)`);
+  else if (worker.handoff?.state === "writing") parts.push(`handoff=writing ${worker.handoff.note}`);
+  else if (worker.handoff?.state === "failed") parts.push(`handoff=failed [${worker.handoff.reason}]`);
+  return parts.length ? ` ${parts.join(" ")}` : "";
 }
 
 function staleLabel(repo) {
@@ -2169,7 +2356,9 @@ function cmdStrategy(args) {
 
 // Snapshot input only. Never copy workers[].task. Never open verify.log.
 function digestView(job) {
-  const workers = Array.isArray(job.workers) ? job.workers.map((worker) => ({ name: worker?.name, role: worker?.role })) : [];
+  const workers = Array.isArray(job.workers)
+    ? job.workers.map((worker) => ({ name: worker?.name, role: worker?.role, ...(worker?.retired ? { handedOffTo: worker.retired.by, handoffPct: worker.handoff?.pct } : {}) }))
+    : [];
   return { ...job, workers };
 }
 
@@ -3211,6 +3400,7 @@ async function cmdWatch(args) {
     },
     repoExists: () => existsSync(repo),
     pathExists: (p) => existsSync(p),
+    tick: () => handoffTick(repo, id, { log }),
     post: async (payload) => {
       const cfg = readFinishConfig(repo);
       if (cfg.off) return log("no finish webhook configured; needs-input not sent");
@@ -3249,6 +3439,7 @@ function help() {
   orka cleanup [--dry-run] [--older-than <12h>] [--orphan-hours <2>] [--cwd <repo>]
   orka reap <id> [--worker <name>] [--dry-run] [--cwd <repo>]   (closes browsers only; panes stay)
   orka watch <id> [--dry-run] [--cwd <repo>]   (started by orka run; not for hand use)
+  orka handoff <id> [--dry-run] [--cwd <repo>]   (one context-handoff pass; the watcher runs it every poll)
   orka webhook <id> [--dry-run] [--force] [--cwd <repo>]
   orka verify <id> [--base] [--dry-run] [--cwd <repo>]
   orka help
@@ -3279,6 +3470,14 @@ Multi-worker (both kinds)
   The orchestrator splits the goal and starts one worker per task. Independent tasks
   start in parallel (several orka worker calls). All workers share one worktree, so no
   two workers get the same files.
+
+Context handoff (builder workers, both kinds)
+  Every pane starts with --session-id; the watcher reads that transcript's last turn each poll.
+  An idle builder at or past handoff.threshold (default 0.5) of its window writes a note to
+  .orka/jobs/<id>/handoff/<name>-<n>.md, is renamed <name>-h<n>, and a fresh <name> continues
+  from the note in a new pane. The old pane stays open until done/stop/cleanup. Verifier exempt.
+  Config: "handoff": {"threshold": 0.5, "contextWindow": 200000 | {"<model substring>": N}, "orchestrator": false}
+  or "handoff": false. See docs/handoff.md.
 
 Verifier (both kinds)
   After every builder reports, the orchestrator starts ONE verifier:
@@ -3402,6 +3601,7 @@ async function main() {
   else if (cmd === "cleanup") cmdCleanup(args);
   else if (cmd === "reap") cmdReap(args);
   else if (cmd === "watch") await cmdWatch(args);
+  else if (cmd === "handoff") cmdHandoff(args);
   else fail(`unknown command ${cmd}\nrun: orka help`);
 }
 
