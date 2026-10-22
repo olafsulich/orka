@@ -202,6 +202,21 @@ test("full handoff: note asked, old agent renamed and kept open, fresh agent pic
   assert.equal(j.read().workers[1].handoff.note, join(j.dir, "handoff", "builder-2.md"));
 });
 
+test("herdr status done (finished turn, not looked at) is a safe point like idle", () => {
+  const t = scratch();
+  const j = makeJob(t);
+  t.config({ threshold: 0.4 });
+  startWorker(t, j);
+  t.setStatus("builder", "done");
+  assert.match(t.orka(["handoff", j.id]).stdout, /45% done -> hand off/);
+  assert.equal(t.prompts("builder").length, 2);
+  writeFileSync(join(j.dir, "handoff", "builder-1.md"), "note");
+  t.setStatus("builder", "done");
+  t.orka(["handoff", j.id]);
+  assert.equal(j.read().workers[0].name, "builder-h1");
+  assert.equal(j.read().workers.length, 2);
+});
+
 test("done after a handoff closes both panes; before that none is closed", () => {
   const t = scratch();
   const j = makeJob(t);

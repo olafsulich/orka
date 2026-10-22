@@ -81,12 +81,14 @@ test("settings: default threshold 0.5, orchestrator off, false or enabled:false 
   assert.equal(ctx.handoffSettings({ orchestrator: true }).orchestrator, true);
 });
 
-test("threshold: due only when idle and at or past the cap", () => {
+test("threshold: due only when idle or done and at or past the cap", () => {
   const at = (pct) => ({ tokens: pct * 200000, window: 200000, pct });
   assert.equal(ctx.handoffDue({ context: at(0.5), status: "idle", threshold: 0.5 }).due, true);
+  // herdr reports a finished turn nobody has looked at as done, not idle.
+  assert.equal(ctx.handoffDue({ context: at(0.5), status: "done", threshold: 0.5 }).due, true);
   assert.equal(ctx.handoffDue({ context: at(0.62), status: "idle", threshold: 0.5 }).why, "62% >= 50%");
   assert.equal(ctx.handoffDue({ context: at(0.49), status: "idle", threshold: 0.5 }).due, false);
-  for (const status of ["working", "blocked", "done", "unknown", undefined]) {
+  for (const status of ["working", "blocked", "unknown", undefined]) {
     assert.equal(ctx.handoffDue({ context: at(0.9), status, threshold: 0.5 }).due, false, String(status));
   }
   assert.equal(ctx.handoffDue({ context: null, status: "idle", threshold: 0.5 }).due, false);

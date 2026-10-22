@@ -17,14 +17,14 @@ A worker is handed off when all hold:
 - role builder (the verifier is exempt: it is fresh each round), not closed, not already handed off, started with a session id;
 - no `results/<name>.json` yet (a finished worker has nothing left to continue);
 - context >= `handoff.threshold` of the full window (default `0.5`);
-- herdr `agent_status` is exactly `idle` (never `working` or `blocked`).
+- herdr `agent_status` is `idle` or `done` (`done` is a finished turn nobody has looked at yet; never `working` or `blocked`).
 
 `"handoff": false` (or `"enabled": false`) turns it off. `"orchestrator": true` is only a flag today: the watcher logs that orchestrator handoff is not built and leaves the orchestrator alone.
 
 ## Steps
 
 1. orka prompts the worker to write `<jobdir>/handoff/<name>-<n>.md` and end its turn. The prompt is Matt Pocock's `handoff` skill adapted to orka (fixed path, orka triggers it, reference artifacts by path or SHA, never paste, redact secrets, ~200 words) with Limen's final-message checklist as sections: Changes, Checks run, Commits, Still running, Notes, Remaining slice, Next commands. State: `handoff.state = "writing"`.
-2. Next passes wait until the note exists and the agent is idle again (15 min limit, `ORKA_HANDOFF_NOTE_WAIT_MS`; then the handoff is marked failed and not retried).
+2. Next passes wait until the note exists and the agent is idle or done again (15 min limit, `ORKA_HANDOFF_NOTE_WAIT_MS`; then the handoff is marked failed and not retried).
 3. `herdr agent rename <name> <name>-h<n>` (cut to 32 characters). The old record gets the new name and `retired: {at, by, n}`.
 4. A new pane is split below the old one in the same worktree, and a fresh agent starts there as `<name>` (same kind, model, task, new session id). Its prompt is the normal worker prompt plus: read the note first, do its Remaining slice, do not redo what it lists, leave the old pane alone. Results and notes paths are the same as before.
 5. Recorded: `handoffs: [{n, from, pane, sessionId, tokens, window, pct, at, note}]` on the new worker, the same plus `worker` in `job.handoffs`, and two `decisions.tsv` rows (note asked, successor started), so the digest shows them. `orka status` shows `ctx=NN%` per worker and `handed-off->builder (h1, pane open)` on the old one.

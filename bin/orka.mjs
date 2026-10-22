@@ -980,8 +980,8 @@ function agentInfo(name) {
 
 // The prompt gate: interactive_ready must be exactly true AND the status exactly idle. A missing
 // key or status, an error, blocked, working or done all mean "not ready".
-function isAgentReady(info) {
-  return Boolean(info) && info.interactive_ready === true && info.agent_status === "idle";
+function isAgentReady(info, statuses = ["idle"]) {
+  return Boolean(info) && info.interactive_ready === true && statuses.includes(info.agent_status);
 }
 
 // After the prompt was sent: working means it took. Blocked also counts: the agent received the
@@ -992,11 +992,11 @@ function isDelivered(status, sawWorking) {
 }
 
 // Blocks until isAgentReady(info), polling until READY_WAIT_MS; anything else keeps polling.
-function waitAgentReady(name) {
+function waitAgentReady(name, statuses) {
   const deadline = Date.now() + READY_WAIT_MS;
   let info = agentInfo(name);
   for (;;) {
-    if (isAgentReady(info)) return { ready: true };
+    if (isAgentReady(info, statuses)) return { ready: true };
     if (Date.now() >= deadline) return { ready: false, status: info.agent_status, interactiveReady: info.interactive_ready };
     sleep(PROMPT_POLL_MS);
     info = agentInfo(name);
@@ -1036,8 +1036,9 @@ function sendAndWatch(name, text, attempt) {
 // agent_status working as delivered (the text showing up in the pane is not enough). Up to
 // ORKA_PROMPT_ATTEMPTS attempts with backoff. Returns { ok, attempts, reason }; never throws on a
 // missed start, so callers can record delivery: failed before exiting.
-function promptWithRetry(name, text) {
-  const ready = waitAgentReady(name);
+// readyStatuses: the handoff also prompts an agent herdr reports as done (finished, not looked at).
+function promptWithRetry(name, text, { readyStatuses } = {}) {
+  const ready = waitAgentReady(name, readyStatuses);
   if (!ready.ready) {
     return { ok: false, attempts: 0, reason: `delivery failed: agent ${name} not ready after ${Math.round(READY_WAIT_MS / 1000)}s (last status ${ready.status}, interactive_ready ${ready.interactiveReady})` };
   }
@@ -2080,7 +2081,7 @@ function askForNote(repo, job, worker, ctx, settings, log) {
   const n = context.handoffNumber(worker);
   const note = context.notePath(jobDir(repo, job.id), worker.name, n);
   mkdirSync(dirname(note), { recursive: true });
-  const sent = promptWithRetry(worker.name, context.notePrompt({ path: note, context: ctx, threshold: settings.threshold }));
+  const sent = promptWithRetry(worker.name, context.notePrompt({ path: note, context: ctx, threshold: settings.threshold }), { readyStatuses: context.SAFE_STATUSES });
   const at = new Date().toISOString();
   updateJob(repo, job.id, (j) => {
     const w = workerBySession(j, worker.sessionId);
@@ -2167,7 +2168,7 @@ function handoffTick(repo, id, { log = console.log, dry = false } = {}) {
       const status = agentStatus(worker.name);
       seen.push({ name: worker.name, state: "writing", ready, status });
       if (dry) continue;
-      if (ready && status === "idle") startSuccessor(repo, id, worker.sessionId, log);
+      if (ready && context.SAFE_STATUSES.includes(status)) startSuccessor(repo, id, worker.sessionId, log);
       else if (Date.now() - Date.parse(worker.handoff.at) > HANDOFF_NOTE_WAIT_MS) {
         handoffFailed(repo, id, worker.sessionId, `${worker.name} wrote no handoff note in ${Math.round(HANDOFF_NOTE_WAIT_MS / 60000)} min`, log);
       }
