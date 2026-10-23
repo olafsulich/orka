@@ -10,7 +10,7 @@ Formerly **orca**. `orca` still works as a deprecated alias, and repos with an e
 
 ![How orka works](docs/orca-how-it-works.png)
 
-**Orchestrator, workers, verifier.** `orka run` starts an orchestrator that splits the goal and starts one worker per task, in parallel when tasks are independent. After the builders report, it starts one verifier, in rounds. The verifier runs `orka verify`, the project's checks and targeted browser checks, and writes a pass/fail verdict. On fail the orchestrator routes each blocking failure back to the builder that owns it. If the same check fails two rounds in a row, orka flags a stall and the orchestrator must change strategy (`orka strategy`) instead of repeating itself. Only the orchestrator runs `orka done`. See [verifier.md](docs/verifier.md), [verify.md](docs/verify.md).
+**Orchestrator, workers, verifier.** `orka run` starts an orchestrator that splits the goal and starts one worker per task, in parallel when tasks are independent. After the builders report, it starts one verifier, in rounds. The verifier runs `orka verify`, the project's checks and targeted browser checks, and writes a pass/fail verdict. On fail the orchestrator routes each blocking failure back to the builder that owns it. If the same check fails two rounds in a row, orka flags a stall and the orchestrator must change strategy (`orka strategy`) instead of repeating itself. When the verifier passes the orchestrator runs `orka review` and waits for Olaf's sign-off (`orka approve`); only then does it run `orka done` ([review.md](docs/review.md)). See [verifier.md](docs/verifier.md), [verify.md](docs/verify.md).
 
 ![Orchestrator, workers and verifier rounds](docs/orca-loop.png)
 
@@ -40,11 +40,12 @@ Commands (full flags in [commands.md](docs/commands.md)):
 | `orka status` / `digest` | show a job, free memory, live panes, worker queue / capped snapshot |
 | `orka steer <id> "msg"` | message the lead; follow-up round on a finished job |
 | `orka propose <id>` | orchestrator: pause at the direction gate, notify ([gate.md](docs/gate.md)) |
-| `orka approve <id>` | resume a job waiting at the direction gate |
-| `orka stop` / `done` | end a job; send the finish wake |
+| `orka review <id>` | orchestrator: verifier passed, wait for Olaf's sign-off, notify ([review.md](docs/review.md)) |
+| `orka approve <id>` | Olaf: approve the plan (`awaiting-direction`) or sign off the result (`review`) |
+| `orka stop` / `done` | end a job; send the finish wake (`done` needs Olaf's sign-off, or `--give-up`) |
 | `orka strategy` / `log` | record a strategy change / a decision |
 | `orka verify <id>` | browser checks in the worktree |
-| `orka reap` / `cleanup` | free browsers / sweep finished jobs: browsers, done worktrees, stale workspaces (also runs at `new` and `run`) |
+| `orka reap` / `cleanup` | free browsers / sweep finished jobs: browsers, done worktrees, stale workspaces (only when you run it) |
 | `orka webhook <id>` | preview or retry the finish POST |
 | `orka watch <id>` | needs-input watcher (started by `run`) |
 | `orka autonomy [set <L0-L3>]` | per-repo level, CLI-enforced ([autonomy.md](docs/autonomy.md)) |

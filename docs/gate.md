@@ -33,4 +33,4 @@ Jobs filed before the gate existed have no `job.gate` and run ungated.
 
 ## Naming
 
-`orka approve` only resumes a job at the direction gate; on any other job it exits 1 and says so. The poteto and retro research notes propose `orka approve <id> <paths...>` for approve-and-lock of finished work (`orka.approved.json`). If that is built, it needs another verb (for example `orka lock <id> <paths>`), or approve must tell the two apart by job status.
+`orka approve` is dispatched on status: on a job in `awaiting-direction` it approves the plan (this page); on a job in `review` it signs off the finished result ([review.md](review.md)); on any other job it exits 1 and names both. Approve-and-lock of paths (`orka approve <id> <paths...>` in the poteto and retro notes) is not built; if it is, it needs another verb, such as `orka lock`.
