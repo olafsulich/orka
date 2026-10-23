@@ -505,31 +505,43 @@ test("the watcher runs the handoff tick every poll, and a throwing tick does not
   assert.ok(logs.some((m) => /boom/.test(m)));
 });
 
-test("while a pane is busy the watcher waits in busyMs slices and ticks between them; idle keeps waitMs", async () => {
+test("busy poll: waits run in busyMs slices, busy is re-asked each slice and ticks; idle keeps one tick per waitMs", async () => {
   const { watchJob } = await import("../lib/watch.mjs");
-  const run = async ({ busy, busyMs, statuses }) => {
-    let polls = 0;
+  const run = async ({ busy, busyMs, statuses, polls = 1 }) => {
+    let loads = 0;
     let ticks = 0;
+    let asks = 0;
     const waits = [];
     const deps = {
-      loadJob: async () => (polls++ < 2 ? { id: "1", status: "running" } : { id: "1", status: "done" }),
+      loadJob: async () => (loads++ < polls ? { id: "1", status: "running" } : { id: "1", status: "done" }),
       waitAgent: async (_a, _s, ms) => (waits.push(ms), statuses.shift() || "working"),
       readPane: async () => "",
       post: async () => {},
-      tick: () => ((ticks += 1), { busy }),
+      tick: () => void (ticks += 1),
+      busy: () => (asks += 1, busy(asks)),
       log: () => {},
       sleep: async () => {},
     };
     await watchJob({ jobId: "1", agent: "orch", pane: "p", deps, waitMs: 30000, graceMs: 60000, busyMs });
-    return { waits, ticks };
+    return { waits, ticks, asks };
   };
-  // Lead working, a pane busy: each main wait is one 5 s slice.
-  assert.deepEqual((await run({ busy: true, busyMs: 5000, statuses: ["working", "working"] })).waits, [5000, 5000]);
-  // Nothing busy, or the fast poll off: the normal 30 s wait.
-  assert.deepEqual((await run({ busy: false, busyMs: 5000, statuses: ["working", "working"] })).waits, [30000, 30000]);
-  assert.deepEqual((await run({ busy: true, busyMs: 0, statuses: ["working", "working"] })).waits, [30000, 30000]);
-  // Lead idle while a worker is busy: the 60 s idle grace runs as 12 slices with a tick after each but the last.
-  const idle = await run({ busy: true, busyMs: 5000, statuses: ["idle", ...Array(11).fill("idle"), "working"] });
-  assert.deepEqual(idle.waits.slice(0, 13), [5000, ...Array(12).fill(5000)]);
-  assert.equal(idle.ticks, 1 + 11 + 1);
+  // Lead working the whole time, a pane busy: six 5 s slices per poll, a tick after each but the last.
+  let r = await run({ busy: () => true, busyMs: 5000, statuses: [] });
+  assert.deepEqual(r.waits, Array(6).fill(5000));
+  assert.equal(r.ticks, 1 + 5);
+  // Nothing busy: still sliced and probed, but the tick runs only once per 30 s poll.
+  r = await run({ busy: () => false, busyMs: 5000, statuses: [] });
+  assert.equal(r.ticks, 1);
+  assert.equal(r.asks, 5);
+  // A worker that starts in the middle of a wait is picked up at the next slice.
+  r = await run({ busy: (n) => n >= 3, busyMs: 5000, statuses: [] });
+  assert.equal(r.ticks, 1 + 3);
+  // busyMs 0: one plain 30 s wait, no probe.
+  r = await run({ busy: () => true, busyMs: 0, statuses: [] });
+  assert.deepEqual(r.waits, [30000]);
+  assert.equal(r.asks, 0);
+  // Lead idle while a worker is busy: the 60 s idle grace runs in 12 slices and ticks between them.
+  r = await run({ busy: () => true, busyMs: 5000, statuses: ["idle", ...Array(11).fill("idle"), "working"] });
+  assert.deepEqual(r.waits.slice(0, 13), [5000, ...Array(12).fill(5000)]);
+  assert.equal(r.ticks, 1 + 11);
 });

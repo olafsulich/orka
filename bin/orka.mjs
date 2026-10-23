@@ -3590,10 +3590,8 @@ async function cmdWatch(args) {
     },
     repoExists: () => existsSync(repo),
     pathExists: (p) => existsSync(p),
-    tick: () => {
-      handoffTick(repo, id, { log });
-      return { busy: handoffBusy(repo, id) };
-    },
+    tick: () => handoffTick(repo, id, { log }),
+    busy: () => handoffBusy(repo, id),
     post: async (payload) => {
       const cfg = readFinishConfig(repo);
       if (cfg.off) return log("no finish webhook configured; needs-input not sent");
