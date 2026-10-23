@@ -17,6 +17,7 @@ function spedJob() {
   t.orka(["log", id, "split", "two builders", "files differ", "-", "-"]);
   const job = t.read(id);
   job.steers = [{ at: "2026-10-23T10:00:00Z", message: "keep the toggle 24px" }, { at: "x", message: "never delivered", delivery: "failed" }];
+  job.signoff = { round: 1, at: "2026-10-23T00:00:00Z" };
   job.verifier = { ...job.verifier, rounds: 2, verdict: null, history: [{ round: 1, verdict: "fail", failing: ["toggle"], warnings: [] }] };
   t.write(id, job);
   const results = join(t.repo, ".orka", "jobs", id, "results");
@@ -59,6 +60,7 @@ test("a follow-up round's done adds only new lessons and is not refused as stale
   t.ready(t.read(t.id).agent);
   const steer = t.orka(["steer", t.id, "make the icon a moon"]);
   assert.equal(steer.status, 0, steer.stderr);
+  t.write(t.id, { ...t.read(t.id), signoff: { round: 2, at: "2026-10-23T01:00:00Z" } });
   const again = t.orka(["done", t.id]);
   assert.equal(again.status, 0, again.stderr + again.stdout);
   assert.match(again.stdout, /^done /m);
@@ -70,6 +72,7 @@ test("a follow-up round's done adds only new lessons and is not refused as stale
   assert.equal(t.orka(["steer", t.id, "nothing new"]).status, 0);
   const job = t.read(t.id);
   job.steers = job.steers.slice(0, -1);
+  job.signoff = { round: 3, at: "2026-10-23T02:00:00Z" };
   t.write(t.id, job);
   assert.match(t.orka(["done", t.id]).stdout, /lessons: \d+ already in specs\/dark-mode\/spec\.md/);
 });
@@ -113,6 +116,7 @@ test("a job without a spec prints no lessons line", () => {
   const id = t.orka(["new", "--title", "plain", "--goal", "g"]).stdout.trim();
   t.orka(["run", id]);
   t.orka(["strategy", id, "something"]);
+  t.write(id, { ...t.read(id), signoff: { round: 1, at: "2026-10-23T00:00:00Z" } });
   const r = t.orka(["done", id]);
   assert.equal(r.status, 0, r.stderr);
   assert.doesNotMatch(r.stdout, /lessons:/);

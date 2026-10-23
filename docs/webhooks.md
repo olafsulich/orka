@@ -16,7 +16,7 @@ When a verifier gave a verdict, the body also carries `verifier`:
 
 `job` is the id. `status` is the status just saved. `branch` is the job branch (`orka/<id>`; jobs created before the rename keep `orca/<id>`). The shape, field names, URL and key are unchanged by the rename. `verifier` is sent only when `job.verifier` has a verdict: `verified by verifier: pass, round 2` or `verifier: fail, round 3`. `verification` is sent with it: `verdict`, `rounds`, `strategyChanges` (strings), `blocking` and `warnings` (each `{check, evidence}`), and `stopReason` when the job gave up. Without a verifier the body is exactly `{job, status, branch}`. It is not the old `herdr-finish-watch` body.
 
-Today the CLI writes `done` from `orka done`, `stopped` from `orka stop`, and `failed` when `orka run` fails after the worktree or pane exists. All call the same sender after the status is saved. Idle is not terminal. A summary file does not send the wake. The success path is the orchestrator running `orka done <id>` after verify and the summary; that marks the job `done` and fires the wake once. `orka webhook` can also POST a job that is already `done`.
+Today the CLI writes `done` from `orka done`, `stopped` from `orka stop`, and `failed` when `orka run` fails after the worktree or pane exists. All call the same sender after the status is saved. Idle is not terminal. A summary file does not send the wake. The success path is the orchestrator running `orka review <id>` after verify and the summary (one POST with `"status":"review"`, see [review.md](review.md)), then `orka done <id>` after Olaf's sign-off; that marks the job `done` and fires the wake once. `orka webhook` can also POST a job that is already `done`.
 
 Off unless `<repo>/.orka/secrets/finish-webhook.env` exists. A missing file does not send and does not error. orka does not read `~/.config`, `~/bin/herdr-finish-watch`, the process environment, or any other home path for a destination. Do not symlink the file out of `.orka`. An escaped symlink is refused.
 
@@ -40,6 +40,6 @@ orka done <id> --dry-run
 node --test test/finish-webhook.test.mjs
 ```
 
-Agents must not run `herdr-finish-watch`, `orka webhook`, or `orka stop`. Only the orchestrator runs `orka done`, once, at the end. The CLI sends the wake after it has saved the terminal status.
+Agents must not run `herdr-finish-watch`, `orka webhook`, or `orka stop`. Only the orchestrator runs `orka done`, once, at the end, after Olaf's `orka approve`. The CLI sends the wake after it has saved the terminal status.
 
 The needs-input alert uses the same env file; see [needs-input.md](needs-input.md).

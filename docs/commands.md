@@ -39,7 +39,7 @@ orka help
 `--spec <path>` builds the job from a committed spec: the title defaults to its `# ` heading and the goal is built from its What, Why, Limits and Done when sections (`--goal` text, if given, goes first). The spec must be committed at HEAD and have What and Done when filled in. Its text is pasted into every worker and verifier brief. `spec init <feature>` writes the template to `specs/<feature>/spec.md` in the current checkout; you fill it in and commit it. See [specs.md](specs.md).
 
 `status` reads the job file. It does not poll Herdr. For one job it also prints the finish-wake record, and verify once it has run or a checks file is present. If a verifier ran it also prints the rounds, the last failing checks, the stall (if any), and the strategy changes, and records the latest round first.
-`status` reads the job file. The only Herdr call is `herdr pane list`, for the host line: free memory (MemAvailable), live agent panes and the `orka worker` queue of the memory guard (see [cleanup.md](cleanup.md#memory-guard)). For one job it also prints the finish-wake record, and verify once it has run or a checks file is present. If a verifier ran it also prints the rounds, the last failing checks, the stall (if any), and the strategy changes, and records the latest round first.
+`status` reads the job file. The host line shows free memory (MemAvailable), Orka's live panes (`ORKA_JOB`-tagged, read from `/proc`) and the `orka worker` queue of the memory guard (see [cleanup.md](cleanup.md#memory-guard)). For one job it also prints the finish-wake record, and verify once it has run or a checks file is present. If a verifier ran it also prints the rounds, the last failing checks, the stall (if any), and the strategy changes, and records the latest round first.
 
 `digest` prints a capped snapshot of the job and does not change it.
 
@@ -58,7 +58,7 @@ orka help
 
 `webhook` previews or retries that POST. It does not change job status.
 
-`cleanup` sweeps finished jobs: their browsers, the worktrees of done jobs, and the workspaces idle for a while. It also runs at the start of every `orka new` and `orka run`. `--dry-run` lists what it would delete, with sizes. See [cleanup.md](cleanup.md).
+`cleanup` sweeps finished jobs: their browsers, the worktrees of done jobs, and the workspaces idle for a while. Only `orka cleanup` does this: `orka new` and `orka run` never sweep other jobs. `--dry-run` lists what it would delete, with sizes. See [cleanup.md](cleanup.md).
 
 `watch` is the needs-input watcher that `run` starts in the background. See [needs-input.md](needs-input.md).
 

@@ -78,6 +78,10 @@ const BOOL_FLAGS = new Set(["dry-run", "help", "force", "keep", "base", "ui", "s
 const FINISH_STATUSES = new Set(["done", "failed", "stopped"]);
 // Direction gate: a new-feature job pauses here after planning until orka approve (or orka steer revises the plan).
 const AWAITING = "awaiting-direction";
+// Result review: the verifier passed and summary.txt is written; the job waits for Olaf's sign-off (orka approve) before orka done.
+const REVIEW = "review";
+// Not finished: the panes are live and Olaf may still act (approve, steer, stop).
+const LIVE_STATUSES = new Set(["running", AWAITING, REVIEW]);
 const APPROACH_MAX = 2000;
 const VERIFIER_NAME = "verifier";
 const FINISH_TIMEOUT_MS = 8000;
@@ -272,7 +276,6 @@ function hasBrowserSteps(path) {
 
 const BROWSER_CLOSE_TIMEOUT_MS = 20000;
 const CLEANUP_BUDGET_MS = 120000;
-const AUTO_CLEANUP_BUDGET_MS = 30000;
 const ORPHAN_BROWSER_HOURS = 2;
 const UI_GOAL_RE = /agent-browser|\b(ui|browser|visual)\s+(verification|check|checks|test|tests|testing)\b|\b(verify|check|test)\s+(the\s+)?(ui|user interface|user flows?)\b/i;
 
@@ -1192,8 +1195,8 @@ async function assignPorts(repo, job) {
 const REVERSIBLE_RULE = `Reversible work never waits on a human. Irreversible actions (push, delete outside the worktree, external sends, purchases) stop and ask.`;
 const NEVER_CLOSE_PANES = `Never close panes (yours or anyone's, no herdr pane close): finished panes stay open, and orka frees them when the job is done or stopped.`;
 const COMMIT_BEFORE_DONE = (job) =>
-  `Before orka done, commit everything in the worktree on the job branch${job.playbook === "investigation" ? "" : `, including the checks file and feature map the verifier wrote (${verifyFile(job.worktree)}, ${featureMapFile(job.worktree)}): they are meant to be committed`}. orka done removes a done job's worktree (the branch stays), and keeps it only when something is left uncommitted.`;
-const SUMMARY_FROM_DIFF = (job) => `Before orka done, run git diff ${job.baseCommit || `$(git merge-base ${brand.jobBranch(job)} main)`} (--stat plus a skim) and write summary.txt from the diff, not from the workers' claims.`;
+  `Before orka review, commit everything in the worktree on the job branch${job.playbook === "investigation" ? "" : `, including the checks file and feature map the verifier wrote (${verifyFile(job.worktree)}, ${featureMapFile(job.worktree)}): they are meant to be committed`}. orka done removes a done job's worktree (the branch stays), and keeps it only when something is left uncommitted.`;
+const SUMMARY_FROM_DIFF = (job) => `Before orka review, run git diff ${job.baseCommit || `$(git merge-base ${brand.jobBranch(job)} main)`} (--stat plus a skim) and write summary.txt from the diff, not from the workers' claims.`;
 
 function portPromptLines(job) {
   const list = Array.isArray(job.ports) && job.ports.length ? job.ports : job.port != null ? [job.port] : [];
@@ -1710,6 +1713,18 @@ function verifierPrompt(job, name, task, alias, round) {
   ].join("\n");
 }
 
+// The finish of every playbook: the job waits in review for Olaf's sign-off, and only then does the orchestrator run orka done.
+const SIGNOFF_LINES = (job, { refuses = "", redo, records }) => [
+  `Then hand the result to Olaf for review. This does NOT finish the job:`,
+  `  orka review ${job.id}`,
+  `It sets the job to ${REVIEW} and notifies Olaf (webhook status ${REVIEW}).${refuses ? ` ${refuses}` : ""} Then stop and wait; your pane and the workers' panes stay open.`,
+  `Olaf answers with orka steer or orka approve. A steer is a change request: the job is running again, so make the changes (${redo}), rewrite summary.txt and run orka review ${job.id} again.`,
+  `orka approve on a job in ${REVIEW} is Olaf's sign-off: you get "Olaf signed off". Only then mark the job done, which sends the finish wake${records} and removes this job's worktree (the branch stays):`,
+  `  orka done ${job.id}`,
+  `orka done refuses without Olaf's sign-off. Never run orka approve yourself. The only finish without a sign-off is giving up: orka done ${job.id} --give-up "<plain reason>".`,
+  `If orka is not on PATH, run ${ORKA} review ${job.id} and ${ORKA} done ${job.id}.`,
+];
+
 // The verifier and finish section of the orchestrator prompt. Every playbook but investigation uses this one.
 const FEATURE_FLOW = (job, dir) => ({
   reap: `When a worker or the verifier has finished, run orka reap ${job.id} --worker <name> to close its browsers (its pane stays open).`,
@@ -1730,7 +1745,7 @@ const FEATURE_FLOW = (job, dir) => ({
     `Record the change with: orka strategy ${job.id} --premise "<the shared premise you dropped>" "<what you changed>", then re-verify.`,
     `Log every split, routing and strategy decision so it survives compaction: orka log ${job.id} <phase> "<decision>" "<why>" "<evidence>" "<result>" (phase: split, routing or strategy). orka strategy logs its own row.`,
     job.maxRounds
-      ? `There is a round ceiling of ${job.maxRounds} verifier rounds (--max-rounds). orka refuses a round beyond it; say so in the summary and run orka done.`
+      ? `There is a round ceiling of ${job.maxRounds} verifier rounds (--max-rounds). orka refuses a round beyond it; if the verdict is still fail, run orka done ${job.id} --give-up "<the failing checks>".`
       : `There is no round limit. Keep going until the verdict is pass.`,
     `Stop only when you genuinely cannot progress: the same failure survived 3 different strategy changes, or the fix needs a human decision or a secret. Then run: orka done ${job.id} --give-up "<plain reason>".`,
     `You never run orka verify yourself and never edit ${verifyFile(job.worktree)} or any check. You may only run trivial read-only commands to read results.`,
@@ -1739,9 +1754,7 @@ const FEATURE_FLOW = (job, dir) => ({
   done: [
     `Keep every other field, including verify.`,
     `Do not change verify or verifier; the verifier and orka done write those.`,
-    `Then mark the job done, which sends the finish wake and records the verifier verdict (a fail verdict marks the job failed):`,
-    `  orka done ${job.id}`,
-    `If orka is not on PATH, run ${ORKA} done ${job.id}.`,
+    ...SIGNOFF_LINES(job, { refuses: "It refuses while the verifier verdict is fail or stale.", redo: "workers, then the verifier again", records: ", records the verifier verdict" }),
   ],
 });
 // Investigation swaps the verifier and finish section for a citation check by the orchestrator: no verifier runs, no verdict is waited for.
@@ -1759,9 +1772,7 @@ const INVESTIGATION_FLOW = (job, dir) => ({
   ],
   done: [
     `Keep every other field.`,
-    `Then mark the job done, which sends the finish wake:`,
-    `  orka done ${job.id}`,
-    `If orka is not on PATH, run ${ORKA} done ${job.id}.`,
+    ...SIGNOFF_LINES(job, { redo: "workers, then check the citations again", records: "" }),
   ],
 });
 const PLAYBOOK_FLOW = { investigation: INVESTIGATION_FLOW };
@@ -1828,9 +1839,9 @@ function orchestratorPrompt(job) {
     ``,
     SUMMARY_FROM_DIFF(job),
     COMMIT_BEFORE_DONE(job),
-    `Before orka done, run orka digest ${job.id}, use it only for ${flow.digestUse}; write ${dir}/summary.txt ${flow.summaryFrom} (per the rule above), and set the summary field. Do not load the job JSON into the turn to copy fields.`,
+    `Before orka review, run orka digest ${job.id}, use it only for ${flow.digestUse}; write ${dir}/summary.txt ${flow.summaryFrom} (per the rule above), and set the summary field. Do not load the job JSON into the turn to copy fields.`,
     ...flow.done,
-    `Then stop working. Your pane stays open after orka done, so Olaf can still give feedback with orka steer; a follow-up message starts a new round, and you run orka done ${job.id} again when that round is finished (the finish wake is sent again, marked followUp).`,
+    `Then stop working. After orka done your pane stays open, so Olaf can still give feedback with orka steer; a follow-up message starts a new round, which ends the same way: orka review ${job.id}, Olaf's orka approve, then orka done ${job.id} (the finish wake is sent again, marked followUp).`,
     `If you stop and wait on a question, orka's watcher tells Olaf you need input, so ask only the genuine human questions described above.`,
   ].join("\n");
 }
@@ -1960,9 +1971,15 @@ function gateLine(job) {
   const g = job.gate;
   if (!g) return "";
   if (!g.on) return `gate: off (${g.reason})`;
-  if (job.status === AWAITING) return `gate: awaiting direction since ${g.proposedAt} (proposal ${g.proposals || 1}); orka approve ${job.id} or orka steer ${job.id} "..."`;
+  if (job.status === AWAITING) return `gate: awaiting direction since ${g.proposedAt} (proposal ${g.proposals || 1}); orka approve ${job.id} approves the plan, or orka steer ${job.id} "..."`;
   if (g.state === "approved") return `gate: approved ${g.approvedAt}`;
   return `gate: on, ${g.state === "revising" ? "revising the approach" : "planning"} (builders wait for orka approve)`;
+}
+
+function reviewLine(job) {
+  if (job.status === REVIEW && signedOff(job)) return `review: signed off ${job.signoff.at}; the orchestrator runs orka done ${job.id}`;
+  if (job.status === REVIEW) return `review: awaiting Olaf's sign-off since ${job.review?.at || "?"}; orka approve ${job.id} signs off the result (then orka done), or orka steer ${job.id} "..." requests changes`;
+  return "";
 }
 
 const gatePending = (job) => Boolean(job.gate?.on) && job.gate.state !== "approved";
@@ -2030,7 +2047,6 @@ async function cmdNew(args) {
   };
   if (maxRounds) job.maxRounds = maxRounds;
   if (spec) job.spec = { path: spec.rel, feature: spec.feature, commit: spec.commit, ...(spec.parsed.kind ? { kind: spec.parsed.kind } : {}) };
-  sweepQuietly(repo);
   await assignPorts(repo, job);
   const head = git(repo, ["rev-parse", "--verify", "--quiet", "HEAD"]);
   if (head.code === 0 && head.out.trim()) job.baseCommit = head.out.trim();
@@ -2157,7 +2173,6 @@ async function cmdRun(args) {
   if (playbook) job.playbook = playbook;
   // Jobs filed before the gate existed have no job.gate and run ungated.
   if (job.gate && (playbook || args["no-gate"])) job.gate = decideGate(args, job.playbook || "feature", job.title, job.goal, job.spec?.kind);
-  if (!args["dry-run"]) sweepQuietly(repo);
   if (!args["dry-run"] || job.port == null) await assignPorts(repo, job);
   if (args.keep) job.keep = true;
   const maxRounds = parseMaxRounds(args);
@@ -2378,14 +2393,13 @@ function guardLimitsOf(repo) {
   return guard.guardLimits(cfg, (key) => brand.env(key));
 }
 
-// Live agent panes: herdr panes with an agent (agent_status other than unknown).
-// When herdr cannot list panes, the panes this repo's running jobs hold.
+// Orka's own live panes on this host (ORKA_JOB-tagged pane shells, any repo); Olaf's other Herdr
+// panes do not count. When /proc cannot be read, the panes this repo's running jobs hold.
 function livePaneCount(repo) {
-  const got = herdr(["pane", "list"], 10000);
-  const panes = got.json?.result?.panes;
-  if (got.code === 0 && Array.isArray(panes)) return panes.filter((p) => p?.agent_status && p.agent_status !== "unknown").length;
+  const tagged = guard.orkaPaneCount(browsers.procRootOf());
+  if (tagged !== null) return tagged;
   return loadAllJobs(repo)
-    .filter((j) => j.status === "running")
+    .filter((j) => LIVE_STATUSES.has(j.status))
     .reduce((n, j) => n + (j.pane ? 1 : 0) + (j.workers || []).filter((w) => w.pane && !w.closed && w.pane !== j.pane).length, 0);
 }
 
@@ -2833,6 +2847,7 @@ function cmdStatus(args) {
     if (job.spec?.path) console.log(`  spec: ${job.spec.path}${job.spec.commit ? ` @${job.spec.commit.slice(0, 8)}` : ""}`);
     if (job.lessons) console.log(`  lessons: ${job.lessons.added} added, ${job.lessons.bumped} seen again${job.lessons.commit ? ` (commit ${job.lessons.commit})` : " (not committed)"}`);
     if (gateLine(job)) console.log(`  ${gateLine(job)}`);
+    if (reviewLine(job)) console.log(`  ${reviewLine(job)}`);
     if (job.status === AWAITING && job.gate?.approach) for (const l of job.gate.approach.split("\n").slice(0, 12)) console.log(`    ${l}`);
     if (job.port != null) console.log(`  port: ${job.port}${Array.isArray(job.ports) && job.ports.length > 1 ? ` ports=${job.ports.join(",")}` : ""}`);
     if (roundOf(job) > 1) console.log(`  round: ${roundOf(job)} (follow-up)`);
@@ -3066,7 +3081,8 @@ function cmdSteer(args) {
   const job = load(repo, id);
   const finished = FINISH_STATUSES.has(job.status);
   const awaiting = job.status === AWAITING;
-  if ((job.status !== "running" && !finished && !awaiting) || !job.agent) fail(`${id} is ${job.status}; not steered`);
+  const inReview = job.status === REVIEW;
+  if ((job.status !== "running" && !finished && !awaiting && !inReview) || !job.agent) fail(`${id} is ${job.status}; not steered`);
   // A finished job can be steered while its orchestrator pane is still open:
   // that starts a follow-up round, and the next orka done sends the wake again.
   if (finished && (job.workspaceClosed || !agentExists(job.agent))) {
@@ -3075,8 +3091,13 @@ function cmdSteer(args) {
   if (finished) restoreWorktree(repo, job);
   const digest = renderDigest(digestView(job), collectDigestFiles(repo, job));
   // At the gate a steer revises the plan: the orchestrator rewrites approach.md and proposes again.
-  const text = awaiting ? `Direction gate: Olaf asks you to revise the approach, not to build yet.\n${message}\nUpdate ${join(jobDir(repo, id), "approach.md")}, run orka propose ${id} again, and wait.` : message;
-  const sent = promptWithRetry(job.agent, steerText(digest, text), awaiting ? { readyStatuses: GATE_READY } : {});
+  // In review a steer is a change request: the job runs again and comes back through orka review.
+  const text = awaiting
+    ? `Direction gate: Olaf asks you to revise the approach, not to build yet.\n${message}\nUpdate ${join(jobDir(repo, id), "approach.md")}, run orka propose ${id} again, and wait.`
+    : inReview
+      ? `Review: Olaf asks for changes before he signs off. No sign-off yet; do not run orka done.\n${message}\nMake the changes (workers, then the verifier again), rewrite summary.txt, run orka review ${id} again, and wait.`
+      : message;
+  const sent = promptWithRetry(job.agent, steerText(digest, text), awaiting || inReview ? { readyStatuses: GATE_READY } : {});
   const now = new Date().toISOString();
   if (!sent.ok) {
     job.steers = job.steers || [];
@@ -3099,9 +3120,17 @@ function cmdSteer(args) {
     job.gate = { ...job.gate, state: "revising" };
     appendDecision(repo, id, ["gate", "steer: revise the approach", message, "approach.md", "revising"]);
   }
+  if (inReview) {
+    job.status = "running";
+    delete job.signoff;
+    appendDecision(repo, id, ["review", "steer: changes requested", message, "orka steer", "running"]);
+  }
   save(repo, job);
   if (finished) startWatcher(repo, job);
-  console.log(finished ? `steered ${id} (follow-up round ${job.round}; run orka done ${id} when finished)` : awaiting ? `steered ${id} (direction gate: revising the approach; it proposes again)` : `steered ${id}`);
+  if (finished) console.log(`steered ${id} (follow-up round ${job.round}; it comes back through orka review)`);
+  else if (awaiting) console.log(`steered ${id} (direction gate: revising the approach; it proposes again)`);
+  else if (inReview) console.log(`steered ${id} (review: changes requested; running again, it comes back through orka review)`);
+  else console.log(`steered ${id}`);
 }
 
 function agentExists(name) {
@@ -3123,7 +3152,7 @@ async function cmdStop(args) {
   const reason = args._.slice(2).join(" ").trim() || "stopped by request";
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, id);
-  const live = job.status === "running" || job.status === AWAITING;
+  const live = LIVE_STATUSES.has(job.status);
   if (args["dry-run"]) {
     if (!live && job.status !== "queued") {
       console.log(`dry-run stop ${id}: already ${job.status}; no status change; no finish webhook`);
@@ -3226,6 +3255,16 @@ function verifierFailReason(rounds, blocking = []) {
   return `verifier failed after ${rounds} round${rounds === 1 ? "" : "s"}${checks.length ? `: ${checks.join(", ")}` : ""}`;
 }
 
+// Olaf's sign-off (orka approve on a job in review) for the current round.
+const signedOff = (job) => Boolean(job.signoff) && job.signoff.round === roundOf(job);
+
+function noSignoff(job) {
+  const id = job.id;
+  const give = `To stop without a result: orka done ${id} --give-up "<reason>" (or orka stop ${id}).`;
+  if (job.status === REVIEW) return `no sign-off from Olaf yet; the job is in ${REVIEW}, waiting for orka approve ${id}. ${give}`;
+  return `no sign-off from Olaf. Run orka review ${id} (status ${REVIEW}; Olaf is notified) and wait for orka approve ${id}. ${give}`;
+}
+
 async function cmdDone(args) {
   allowFlags(args, ["cwd", "dry-run", "keep", "give-up"]);
   const id = args._[1];
@@ -3237,10 +3276,15 @@ async function cmdDone(args) {
   const job = load(repo, id);
   if (job.status === "queued") fail(`orka done: ${id} is queued, not running; nothing finished`);
   if (job.status === AWAITING) fail(`orka done: ${id} is waiting at the direction gate; orka approve ${id}, orka steer ${id} "...", or orka stop ${id}`);
-  const terminal = job.status !== "running";
+  const terminal = job.status !== "running" && job.status !== REVIEW;
+  const unsigned = !terminal && !giveUp && !signedOff(job) ? noSignoff(job) : "";
   if (args["dry-run"]) {
     if (terminal) {
       console.log(`dry-run done ${id}: already ${job.status}; no status change; no finish webhook`);
+      return;
+    }
+    if (unsigned) {
+      console.log(`dry-run done ${id}: REFUSED, ${unsigned}`);
       return;
     }
     const next = computeVerifier(repo, job);
@@ -3265,6 +3309,11 @@ async function cmdDone(args) {
   }
   if (terminal) {
     console.log(`${id} is already ${job.status}`);
+    return;
+  }
+  if (unsigned) {
+    console.error(`orka done: ${id} not marked done: ${unsigned}`);
+    process.exitCode = 1;
     return;
   }
   const verifier = recordVerifier(repo, job);
@@ -3936,12 +3985,12 @@ function reapWatchers(repo, jobs, dry, log = console.log) {
 // One pass over this repo's finished jobs: their browser sessions and browser
 // processes, orphan watchers, the worktrees of done jobs (the branch stays),
 // then the workspaces idle longer than the threshold. Returns how many things it
-// closed. quiet: no "nothing to close" line. untagged: also kill orphan
-// agent-browser Chrome no job owns (explicit orka cleanup only).
-function sweep(repo, { dry = false, thresholdMs, quiet = false, untagged = true, log = console.log, budgetMs = CLEANUP_BUDGET_MS, orphanMinAgeMs = ORPHAN_BROWSER_HOURS * 3600000 } = {}) {
+// closed, orphan agent-browser Chrome no job owns included.
+// Only orka cleanup runs it: orka new and orka run never sweep other jobs.
+function sweep(repo, { dry = false, thresholdMs, log = console.log, budgetMs = CLEANUP_BUDGET_MS, orphanMinAgeMs = ORPHAN_BROWSER_HOURS * 3600000 } = {}) {
   const verb = dry ? "would close" : "closed";
   const jobs = loadAllJobs(repo);
-  const live = jobs.filter((j) => j.status === "running");
+  const live = jobs.filter((j) => LIVE_STATUSES.has(j.status));
   const now = Date.now();
   let count = 0;
   const workspaces = jobs.filter((j) => lifecycle.isStale(j, now, thresholdMs));
@@ -3950,14 +3999,10 @@ function sweep(repo, { dry = false, thresholdMs, quiet = false, untagged = true,
     const owner = jobs.find((j) => s.startsWith(`${browserPrefix(j)}-`) || s === legacyVerifySession(j));
     if (owner && !live.includes(owner) && !owner.keep) names.add(s);
   }
-  // Dead-daemon sessions of any name only on explicit cleanup; the automatic sweep keeps to orka's own.
-  for (const s of orphanSessions()) if (untagged || brand.SESSION_RE.test(s)) names.add(s);
+  // Dead-daemon sessions of any name.
+  for (const s of orphanSessions()) names.add(s);
   const deadline = Date.now() + budgetMs;
-  const stateful = new Set(browserList());
-  const scanned = quiet ? browsers.scanBrowsers() : [];
   for (const s of names) {
-    // Quiet: a recorded session with no state and nothing running is long gone; do not report it again.
-    if (quiet && !stateful.has(s) && !sessionLive(s, scanned)) continue;
     if (Date.now() > deadline) {
       log(`cleanup: time budget spent, skipping browser ${s}`);
       continue;
@@ -3969,7 +4014,7 @@ function sweep(repo, { dry = false, thresholdMs, quiet = false, untagged = true,
   }
   // Leftover browser processes of this repo's finished jobs (tagged ORKA_JOB/ORCA_JOB,
   // or named by session), then orphan agent-browser Chrome nobody owns.
-  const finished = jobs.filter((j) => j.status !== "running" && j.status !== "queued" && !j.keep);
+  const finished = jobs.filter((j) => !LIVE_STATUSES.has(j.status) && j.status !== "queued" && !j.keep);
   const scan = browsers.scanBrowsers();
   const doomed = new Set();
   const procs = [
@@ -3987,21 +4032,19 @@ function sweep(repo, { dry = false, thresholdMs, quiet = false, untagged = true,
   };
   for (const j of jobs) {
     if (j.keep) continue;
-    const records = readBrowserPids(repo, j.id).filter((r) => j.status !== "running" || goneWorker(j, r.worker));
+    const records = readBrowserPids(repo, j.id).filter((r) => !LIVE_STATUSES.has(j.status) || goneWorker(j, r.worker));
     if (j.status !== "queued" && records.length) gone.push(...browsers.selectRecorded(scan.filter((p) => !doomed.has(p.pid)), records));
   }
   const goneProcs = gone.filter((p) => !doomed.has(p.pid) && doomed.add(p.pid));
   for (const p of goneProcs) log(`cleanup: browser pid ${p.pid} has no owner left (${p.why})`);
   count += killBrowserProcs(goneProcs, dry, log).length;
-  if (untagged) {
-    const orphanProcs = browsers.selectOrphans(scan.filter((p) => !doomed.has(p.pid)), {
-      minAgeMs: orphanMinAgeMs,
-      liveJobIds: live.map((j) => j.id),
-      livePrefixes: live.map(browserPrefix),
-    });
-    if (orphanProcs.length) log(`cleanup: ${orphanProcs.filter((p) => p.chromeRoot).length} orphan agent-browser Chrome root(s) older than ${orphanMinAgeMs / 3600000}h, no running job`);
-    count += killBrowserProcs(orphanProcs, dry, log).length;
-  }
+  const orphanProcs = browsers.selectOrphans(scan.filter((p) => !doomed.has(p.pid)), {
+    minAgeMs: orphanMinAgeMs,
+    liveJobIds: live.map((j) => j.id),
+    livePrefixes: live.map(browserPrefix),
+  });
+  if (orphanProcs.length) log(`cleanup: ${orphanProcs.filter((p) => p.chromeRoot).length} orphan agent-browser Chrome root(s) older than ${orphanMinAgeMs / 3600000}h, no running job`);
+  count += killBrowserProcs(orphanProcs, dry, log).length;
   count += reapWatchers(repo, jobs, dry, log);
   let freedKb = 0;
   for (const j of jobs.filter(lifecycle.removableWorktree)) {
@@ -4016,7 +4059,7 @@ function sweep(repo, { dry = false, thresholdMs, quiet = false, untagged = true,
     log(`cleanup: ${verb} workspace ${j.workspace} (${j.id}, idle since ${new Date(lifecycle.lastActivity(j) || 0).toISOString()})`);
     count++;
   }
-  if (!count && !quiet) log("cleanup: nothing to close");
+  if (!count) log("cleanup: nothing to close");
   if (dry) return count;
   for (const j of workspaces) {
     // The record first: closing the workspace kills any pane in it.
@@ -4025,17 +4068,6 @@ function sweep(repo, { dry = false, thresholdMs, quiet = false, untagged = true,
     herdr(["workspace", "close", j.workspace]);
   }
   return count;
-}
-
-// The same sweep at the start of orka new and orka run: on stderr (stdout of new
-// is the id), only lines for what it closed, a short time budget, and never
-// untagged browsers. Never fatal.
-function sweepQuietly(repo) {
-  try {
-    sweep(repo, { quiet: true, untagged: false, log: (msg) => console.error(msg), budgetMs: AUTO_CLEANUP_BUDGET_MS, thresholdMs: staleThreshold(repo) });
-  } catch (err) {
-    console.error(`cleanup: skipped (${err?.message || err})`);
-  }
 }
 
 // Closes one job's browsers (or one worker's) without touching panes. Safe mid-job.
@@ -4604,15 +4636,73 @@ async function cmdPropose(args) {
   console.log(`approve: orka approve ${id}   revise: orka steer ${id} "..."`);
 }
 
-// Olaf resumes a job paused at the direction gate. Only that: approve-and-lock of finished work, if built, needs another name.
+// The orchestrator runs this when the verifier passed and summary.txt is written: the job waits in review
+// for Olaf's sign-off and he is notified once per request. It does not finish the job.
+async function cmdReview(args) {
+  allowFlags(args, ["cwd", "dry-run"]);
+  const id = args._[1];
+  if (!id) fail("need: orka review <id>");
+  const repo = requireRepo(args.cwd || process.cwd());
+  const job = load(repo, id);
+  if (job.status === REVIEW) fail(`job ${id} is already in ${REVIEW}; wait for orka approve or orka steer`);
+  if (job.status !== "running") fail(`job ${id} is ${job.status}, not running`);
+  const verifier = args["dry-run"] ? computeVerifier(repo, job) || job.verifier : recordVerifier(repo, job) || job.verifier;
+  const view = { ...job, verifier };
+  if (verifier?.verdict === "fail") fail(`orka review: ${verifierLine(view)}. Route the failures and re-verify, or orka done ${id} --give-up "<reason>"`);
+  if (verifier?.verdict === "pass" && verifier.stale) fail(`orka review: ${verifierLine(view)}; the verifier pass no longer describes the code. Re-run the verifier first`);
+  const summaryPath = join(jobDir(repo, id), "summary.txt");
+  const summary = existsSync(summaryPath) ? readCapped(summaryPath, FILE_READ_MAX).text.trim() : "";
+  if (!summary) fail(`orka review: write ${summaryPath} first (from the git diff)`);
+  const payload = {
+    ...payloadOf(view, REVIEW),
+    kind: REVIEW,
+    title: job.title,
+    summary: summary.slice(0, 2000),
+    question: `Sign off "${job.title}"? Approve the result: orka approve ${id}. Request changes: orka steer ${id} "<what to change>".`,
+  };
+  const cfg = readFinishConfig(repo);
+  if (args["dry-run"]) {
+    console.log(`dry-run review ${id}: running -> ${REVIEW}`);
+    console.log(`payload: ${JSON.stringify(payload)}`);
+    console.log(`notify: ${cfg.off ? "off" : cfg.error ? `invalid: ${cfg.error}` : cfg.origin}`);
+    return;
+  }
+  const now = new Date().toISOString();
+  job.status = REVIEW;
+  job.updated = now;
+  delete job.signoff;
+  job.review = { round: roundOf(job), at: now, requests: (job.review?.requests || 0) + 1 };
+  save(repo, job);
+  appendDecision(repo, id, ["review", `request ${job.review.requests}: awaiting sign-off`, verifierLine(job) || "no verifier", summaryPath, REVIEW]);
+  let notified = "off";
+  if (cfg.error) notified = `invalid config: ${cfg.error}`;
+  else if (!cfg.off) {
+    const sent = await postFinish(cfg, payload);
+    notified = `${sent.outcome}${sent.http ? ` (HTTP ${sent.http})` : ""}`;
+  }
+  job.review.notified = notified;
+  save(repo, job);
+  console.log(`${id} ${REVIEW} (round ${roundOf(job)}); notification: ${notified}`);
+  console.log(`sign off: orka approve ${id}   request changes: orka steer ${id} "..."   (orka done waits for the sign-off)`);
+}
+
+// Olaf's verb for a job waiting on him, dispatched on status: at the direction gate it approves the plan
+// (the orchestrator builds), in review it signs off the result (the orchestrator runs orka done).
 function cmdApprove(args) {
   allowFlags(args, ["cwd"]);
   const id = args._[1];
   if (!id) fail('need: orka approve <id> ["note"]');
+  if (brand.env("JOB")) fail("orka approve is Olaf's sign-off; it is refused inside a job pane (ORKA_JOB is set)");
   const note = args._.slice(2).join(" ").trim();
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, id);
-  if (job.status !== AWAITING) fail(`orka approve resumes a job waiting at the direction gate; ${id} is ${job.status}${job.gate?.on ? "" : ` (gate ${job.gate ? `off: ${job.gate.reason}` : "not used"})`}`);
+  if (job.status === AWAITING) return approvePlan(repo, job, note);
+  if (job.status === REVIEW) return approveResult(repo, job, note);
+  fail(`orka approve needs a job waiting for Olaf: ${AWAITING} (approves the plan) or ${REVIEW} (signs off the result); ${id} is ${job.status}${job.gate?.on || job.status !== "queued" ? "" : ` (gate ${job.gate ? `off: ${job.gate.reason}` : "not used"})`}`);
+}
+
+function approvePlan(repo, job, note) {
+  const id = job.id;
   if (!job.agent || !agentExists(job.agent)) fail(`${id}: the orchestrator pane is gone; cannot resume`);
   const text = `Direction approved by Olaf${note ? `: ${note}` : "."}\nBuild it now, following ${join(jobDir(repo, id), "approach.md")}${note ? " and the note above" : ""}: split into worker tasks and continue with the flow in your first prompt.`;
   const sent = promptWithRetry(job.agent, text, { readyStatuses: GATE_READY });
@@ -4623,7 +4713,25 @@ function cmdApprove(args) {
   job.gate = { ...job.gate, state: "approved", approvedAt: now, ...(note ? { note } : {}) };
   save(repo, job);
   appendDecision(repo, id, ["gate", "approved", note || "approach accepted", "orka approve", "building"]);
-  console.log(`approved ${id}; the orchestrator builds now`);
+  console.log(`approved the plan of ${id} (direction gate); the orchestrator builds now`);
+}
+
+// The sign-off is recorded first, so it stands even when the prompt fails: then Olaf runs orka done himself.
+function approveResult(repo, job, note) {
+  const id = job.id;
+  const now = new Date().toISOString();
+  job.signoff = { round: roundOf(job), at: now, ...(note ? { note } : {}) };
+  job.updated = now;
+  save(repo, job);
+  appendDecision(repo, id, ["review", "signed off", note || "result accepted", "orka approve", "finishing"]);
+  const gone = !job.agent || !agentExists(job.agent);
+  const sent = gone ? { ok: false, reason: "the orchestrator pane is gone" } : promptWithRetry(job.agent, `Olaf signed off the result${note ? `: ${note}` : "."}\nRun orka done ${id} now (or ${ORKA} done ${id}). Start no new work.`, { readyStatuses: GATE_READY });
+  if (!sent.ok) {
+    console.error(`signed off ${id} (review), but the orchestrator was not prompted: ${sent.reason}. Run orka done ${id} yourself.`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`signed off the result of ${id} (review); the orchestrator runs orka done now`);
 }
 
 function help() {
@@ -4646,12 +4754,15 @@ function help() {
   orka digest <id> [--cwd <repo>]
   orka steer <id> "message"   (also on a finished job whose orchestrator pane is still open: starts a follow-up round)
   orka propose <id> [--dry-run]   (orchestrator, direction gate: approach.md written; pause and notify Olaf)
-  orka approve <id> ["note"]   (resume a job waiting at the direction gate; orka steer revises the plan instead)
+  orka review <id> [--dry-run]   (orchestrator: verifier passed, summary.txt written; status review, Olaf is notified)
+  orka approve <id> ["note"]   (Olaf only; by status: awaiting-direction -> approves the plan, the orchestrator builds;
+           review -> signs off the result, the orchestrator runs orka done. orka steer revises / requests changes instead)
   orka new ... --no-gate   (skip the direction gate; it is on for new-feature jobs, off for other playbooks and fixes)
   orka stop <id> [reason] [--dry-run] [--keep]
   orka strategy <id> [--premise "<shared premise>"] "<what changed>"
   orka log <id> <phase> <decision> <why> <evidence> <result>   (appends a row to .orka/jobs/<id>/decisions.tsv)
   orka done <id> [reason] [--give-up "<reason>"] [--dry-run] [--keep] [--cwd <repo>]
+           (refused until orka approve signed off the job in review; --give-up and orka stop always work)
   orka cleanup [--dry-run] [--older-than <12h>] [--orphan-hours <2>] [--cwd <repo>]
   orka reap <id> [--worker <name>] [--dry-run] [--cwd <repo>]   (closes browsers only; panes stay)
   orka watch <id> [--dry-run] [--cwd <repo>]   (started by orka run; not for hand use)
@@ -4727,9 +4838,14 @@ Verifier (both kinds)
   It does not change job.verify.
 
 A prompt that is still idle after ~8s is sent once more.
-status reads the job file plus herdr pane list for the host line. One job also prints the finish-wake record and verify.
+status reads the job file; the host line counts Orka's own panes (ORKA_JOB-tagged, from /proc). One job also prints the finish-wake record and verify.
 stop interrupts the lead and workers, then marks stopped. It does not close the workspace.
-done marks a running job done (default reason "completed") and sends the finish wake. It refuses a queued job and leaves a finished one alone.
+review: after the verifier passes and summary.txt is written the orchestrator runs orka review <id>: status review,
+  the finish webhook gets {"kind":"review","status":"review",...,"summary","question"}, panes stay open, the job is not
+  finished. orka steer in review is a change request (back to running, sign-off cleared). orka approve in review
+  records job.signoff {round,at,note} and prompts the orchestrator to run orka done.
+done marks a job done (default reason "completed") and sends the finish wake, only with Olaf's sign-off for the current
+  round; without it, it refuses (exit 1) unless --give-up. It refuses a queued job and leaves a finished one alone.
 done does not close the orchestrator pane or the workspace: Olaf may still want to give feedback (see Follow-up rounds).
 A failed run marks failed after the worktree or pane exists. Idle is not terminal.
 
@@ -4770,7 +4886,7 @@ cleanup (delayed, not close-everything)
   It kills Chrome whose pane or job is gone, and recorded pids (<job dir>/browser-pids.json, same start time) of
   finished jobs and gone panes. It removes the worktrees of past done jobs (the branch stays).
   It also kills orphan agent-browser-chrome-* roots (parent init, older than --orphan-hours, default 2, owned by no running job).
-  The same cleanup runs at the start of orka new and orka run (stderr, a line per thing closed; never untagged Chrome).
+  Only orka cleanup sweeps other jobs: orka new and orka run never do. orka done cleans only its own job.
   No cron, no polling. --keep on new, run, done or stop opts out of everything. --dry-run lists "would close",
   "would kill" and "would remove worktree" lines with sizes. Wrap orka cleanup in timeout in scripts.
 
@@ -4779,7 +4895,8 @@ Shared dependencies
   differs. orka run and every orka worker repair a missing or broken link.
 
 Memory guard
-  orka worker checks MemAvailable and live agent panes before it starts a pane. When tight it queues (.orka/queue/)
+  orka worker checks MemAvailable and Orka's live panes (ORKA_JOB-tagged pane shells on the host, not
+  Olaf's other Herdr panes) before it starts a pane. When tight it queues (.orka/queue/)
   and waits, then refuses past the limit. "memoryGuard": {"minAvailableMb":1024,"maxPanes":20,"wait":"8m","poll":"15s"}
   in .orka/config.json, or ORKA_MIN_MEM_MB, ORKA_MAX_PANES, ORKA_GUARD_WAIT, ORKA_GUARD_POLL, ORKA_MEMORY_GUARD=off.
   Logged to decisions.tsv; orka status shows memory, live panes and the queue. No disk guard.
@@ -4847,6 +4964,7 @@ async function main() {
   else if (cmd === "chain") await cmdChain(args);
   else if (cmd === "propose") await cmdPropose(args);
   else if (cmd === "approve") cmdApprove(args);
+  else if (cmd === "review") await cmdReview(args);
   else if (cmd === "handoff") cmdHandoff(args);
   else fail(`unknown command ${cmd}\nrun: orka help`);
 }

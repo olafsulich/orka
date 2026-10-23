@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { enqueue, guardLimits, guardVerdict, liveQueue, memAvailableMb } from "../lib/guard.mjs";
+import { enqueue, guardLimits, guardVerdict, liveQueue, memAvailableMb, orkaPaneCount } from "../lib/guard.mjs";
 
 const ORKA = join(import.meta.dirname, "..", "bin", "orka.mjs");
 
@@ -44,6 +44,32 @@ test("memAvailableMb reads meminfo; the queue is oldest first and drops dead wai
   rmSync(dir, { recursive: true, force: true });
 });
 
+// A fake /proc: pid -> { ppid, cmdline, env }.
+function fakeProcs(root, procs) {
+  for (const [pid, p] of Object.entries(procs)) {
+    mkdirSync(join(root, pid), { recursive: true });
+    writeFileSync(join(root, pid, "status"), `Name:\tx\nPPid:\t${p.ppid}\n`);
+    writeFileSync(join(root, pid, "cmdline"), p.cmdline.split(" ").join("\0"));
+    writeFileSync(join(root, pid, "environ"), Object.entries(p.env || {}).map(([k, v]) => `${k}=${v}`).join("\0"));
+  }
+}
+
+test("orkaPaneCount counts only ORKA_JOB-tagged pane shells, once per pane", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orka-guard-proc-"));
+  fakeProcs(dir, {
+    10: { ppid: 1, cmdline: "/home/x/.local/bin/herdr server" },
+    11: { ppid: 10, cmdline: "/bin/bash", env: { ORKA_JOB: "j1" } },
+    12: { ppid: 11, cmdline: "claude --model opus", env: { ORKA_JOB: "j1" } },
+    13: { ppid: 10, cmdline: "/bin/bash", env: { ORCA_JOB: "old", ORCA_WORKER: "w" } },
+    14: { ppid: 10, cmdline: "/bin/bash", env: { HOME: "/home/x" } },
+    15: { ppid: 14, cmdline: "claude", env: { HOME: "/home/x" } },
+    16: { ppid: 1, cmdline: "agent-browser-chrome", env: { ORKA_JOB: "j1" } },
+  });
+  assert.equal(orkaPaneCount(dir), 2, "two tagged panes; Olaf's own pane and a detached tagged browser do not count");
+  assert.equal(orkaPaneCount(join(dir, "nope")), null);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 // orka worker against a herdr stub; memory comes from a fake meminfo (ORKA_PROC_ROOT).
 function scratch() {
   const base = mkdtempSync(join(tmpdir(), "orka-guard-cli-"));
@@ -67,6 +93,12 @@ esac
   execFileSync("git", ["init", "-q"], { cwd: repo });
   const meminfo = (mb) => writeFileSync(join(proc, "meminfo"), `MemAvailable: ${mb * 1024} kB\n`);
   meminfo(4096);
+  // One orka pane and one of Olaf's own panes: the guard counts 1.
+  fakeProcs(proc, {
+    10: { ppid: 1, cmdline: "herdr server" },
+    11: { ppid: 10, cmdline: "bash", env: { ORKA_JOB: "j" } },
+    12: { ppid: 10, cmdline: "bash" },
+  });
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_PROMPT_POLL_MS: "50", ORKA_PROC_ROOT: proc, ORKA_GUARD_POLL: "0.2s" };
   const orka = (args, extra = {}) => spawnSync("timeout", ["60", process.execPath, ORKA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...env, ...extra } });
   orka(["init"]);

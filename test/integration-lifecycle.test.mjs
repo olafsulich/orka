@@ -106,7 +106,7 @@ async function until(fn, ms = 15000) {
 test("finish closes browsers and worker panes but not the workspace or orchestrator pane", async () => {
   const box = scratch();
   const job = await newJob(box);
-  patch(job.path, { status: "running", workspace: "w-1", pane: "p-lead", agent: "lead", workers: [{ name: "w1", pane: "p-w1" }] });
+  patch(job.path, { status: "running", signoff: { round: 1, at: "2026-10-23T00:00:00Z" }, workspace: "w-1", pane: "p-lead", agent: "lead", workers: [{ name: "w1", pane: "p-w1" }] });
   const done = await orka(box, ["done", job.id]);
   assert.equal(done.status, 0, done.stderr);
   const calls = box.calls();
@@ -123,7 +123,7 @@ test("done twice (follow-up round) sends the webhook twice, marked followUp on t
   try {
     webhook(box, receiver.port);
     const job = await newJob(box);
-    patch(job.path, { status: "running", workspace: "w-1", pane: "p-lead", agent: "lead" });
+    patch(job.path, { status: "running", signoff: { round: 1, at: "2026-10-23T00:00:00Z" }, workspace: "w-1", pane: "p-lead", agent: "lead" });
     assert.equal((await orka(box, ["done", job.id])).status, 0);
     assert.equal(hits.length, 1);
     assert.deepEqual(hits[0], { job: job.id, status: "done", branch: `orka/${job.id}`, playbook: "feature" });
@@ -144,6 +144,11 @@ test("done twice (follow-up round) sends the webhook twice, marked followUp on t
     assert.ok(lastPrompt.endsWith("one more thing"), lastPrompt.slice(-80));
     assert.equal(mid.steers.at(-1).message, "one more thing");
 
+    // The round-1 sign-off does not cover round 2.
+    const unsigned = await orka(box, ["done", job.id]);
+    assert.equal(unsigned.status, 1);
+    assert.match(unsigned.stderr, /no sign-off from Olaf/);
+    patch(job.path, { signoff: { round: 2, at: "2026-10-23T01:00:00Z" } });
     const again = await orka(box, ["done", job.id]);
     assert.equal(again.status, 0, again.stderr);
     assert.match(again.stdout, /finish webhook: accepted/);
@@ -177,7 +182,7 @@ test("needs-input payload is posted through orka's sender, and the watcher exits
   try {
     webhook(box, receiver.port);
     const job = await newJob(box, "ask");
-    patch(job.path, { status: "running", pane: "p-lead", agent: "lead" });
+    patch(job.path, { status: "running", signoff: { round: 1, at: "2026-10-23T00:00:00Z" }, pane: "p-lead", agent: "lead" });
     box.set("agent-status", "blocked");
     box.set("pane-text", "Some output\n\nStop the stale server on port 3000?\n❯ 1. Yes\n  2. No\n");
     const child = spawn(process.execPath, [ORKA, "watch", job.id, "--cwd", box.repo], { env: { ...process.env, ...box.env, ...TLS } });
@@ -207,7 +212,7 @@ test("needs-input payload is posted through orka's sender, and the watcher exits
 test("watch with no webhook configured logs and skips", async () => {
   const box = scratch();
   const job = await newJob(box);
-  patch(job.path, { status: "running", pane: "p-lead", agent: "lead" });
+  patch(job.path, { status: "running", signoff: { round: 1, at: "2026-10-23T00:00:00Z" }, pane: "p-lead", agent: "lead" });
   const dry = await orka(box, ["watch", job.id, "--dry-run"]);
   assert.equal(dry.status, 0, dry.stderr);
   assert.match(dry.stdout, /no webhook configured: log and skip/);
@@ -263,7 +268,7 @@ test("an older job without a port still works", async () => {
 test("worker and orchestrator prompts state the job port and the decide-yourself rule", async () => {
   const box = scratch();
   const job = await newJob(box);
-  patch(job.path, { status: "running", worktree: box.repo, pane: "p-lead", agent: "lead", workspace: "w-1" });
+  patch(job.path, { status: "running", signoff: { round: 1, at: "2026-10-23T00:00:00Z" }, worktree: box.repo, pane: "p-lead", agent: "lead", workspace: "w-1" });
   const port = read(job.path).port;
   const w = await orka(box, ["worker", "--job", job.id, "--name", "w1", "--task", "do x"]);
   assert.equal(w.status, 0, w.stderr);

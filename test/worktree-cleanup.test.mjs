@@ -31,8 +31,7 @@ function scratch() {
   return { repo, orka, g };
 }
 
-// A job record (orka new). orka new also runs the cleanup, so create every
-// record first, then give each its worktree and status with setup().
+// A job record (orka new); give it its worktree and status with setup().
 function newJob(t, title = "w") {
   const id = t.orka(["new", "--kind", "pi", "--title", title, "--goal", "g"]).stdout.trim();
   const path = join(t.repo, ".orka", "jobs", `${id}.json`);
@@ -47,7 +46,7 @@ function setup(t, j, status, patch = {}) {
   t.g(["add", "file.txt"], j.wt);
   t.g(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "work"], j.wt);
   const rec = JSON.parse(readFileSync(j.path, "utf8"));
-  Object.assign(rec, { status, worktree: j.wt }, patch);
+  Object.assign(rec, { status, worktree: j.wt }, status === "running" ? { signoff: { round: 1, at: "2026-10-23T00:00:00Z" } } : {}, patch);
   writeFileSync(j.path, JSON.stringify(rec));
   return j;
 }
@@ -121,13 +120,15 @@ test("orka cleanup sweeps past done worktrees, dry-run first; running, failed, s
   assert.match(t.orka(["cleanup"]).stdout, /nothing to close/);
 });
 
-test("orka new runs the cleanup on stderr only", () => {
+test("orka new never removes another job's worktree; orka cleanup does", () => {
   const t = scratch();
   const done = job(t, "done");
   const r = t.orka(["new", "--kind", "pi", "--title", "n", "--goal", "g"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout.trim(), /^[0-9]{17}-n$/);
-  assert.match(r.stderr, /cleanup: removed worktree/);
+  assert.doesNotMatch(r.stderr, /cleanup:/);
+  assert.ok(existsSync(done.wt));
+  assert.match(t.orka(["cleanup"]).stdout, /cleanup: removed worktree/);
   assert.ok(!existsSync(done.wt));
 });
 

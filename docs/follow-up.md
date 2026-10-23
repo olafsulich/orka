@@ -1,6 +1,6 @@
 # Follow-up rounds
 
-`orka steer <id> "message"` accepts a finished job as long as its orchestrator agent pane still exists (not if the workspace was already swept). It prompts the orchestrator, sets the status back to `running`, increments `job.round`, and updates the activity time. When the orchestrator calls `orka done` again, the finish wake is sent again for the new round instead of being suppressed as already sent. The payload adds `"round": N` and `"followUp": true` (round 1 payloads are unchanged), for example:
+`orka steer <id> "message"` accepts a finished job as long as its orchestrator agent pane still exists (not if the workspace was already swept). It prompts the orchestrator, sets the status back to `running`, increments `job.round`, and updates the activity time. The round ends like round 1: `orka review`, Olaf's `orka approve` (a new sign-off; the old one covers only its round), then `orka done`. When the orchestrator calls `orka done` again, the finish wake is sent again for the new round instead of being suppressed as already sent. The payload adds `"round": N` and `"followUp": true` (round 1 payloads are unchanged), for example:
 
 ```json
 {"job":"<id>","status":"done","branch":"orka/<id>","round":2,"followUp":true}

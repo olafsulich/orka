@@ -34,8 +34,7 @@ function scratch() {
   return { repo, run, orka, calls, log, bin };
 }
 
-// Creates the record with orka new. Patch it afterwards: a later orka new sweeps
-// stale finished jobs, so create every job before patching any of them stale.
+// Creates the record with orka new, then patch it.
 function newJob(t, extra = {}) {
   const id = t.orka(["new", "--kind", "pi", "--title", "c", "--goal", "g", ...(extra.keep ? ["--keep"] : [])]).stdout.trim();
   return { id, path: join(t.repo, ".orka", "jobs", `${id}.json`), prefix: `orka-${createHash("sha1").update(id).digest("hex").slice(0, 8)}` };
@@ -43,7 +42,8 @@ function newJob(t, extra = {}) {
 
 function patchJob(j, status, extra = {}) {
   const job = JSON.parse(readFileSync(j.path, "utf8"));
-  Object.assign(job, { status, workspace: "w-1", browserSessions: [`${j.prefix}-w1`] }, extra);
+  // A running job carries Olaf's sign-off, so orka done is allowed.
+  Object.assign(job, { status, workspace: "w-1", browserSessions: [`${j.prefix}-w1`] }, status === "running" ? { signoff: { round: 1, at: "2026-10-23T00:00:00Z" } } : {}, extra);
   writeFileSync(j.path, JSON.stringify(job));
   return j;
 }
@@ -168,18 +168,17 @@ test("staleAfter in the orka config sets the default threshold", () => {
   assert.match(t.orka(["cleanup"]).stdout, /closed workspace w-1/);
 });
 
-test("orka new sweeps stale workspaces quietly, on stderr only", () => {
+test("orka new never sweeps: a stale workspace stays until orka cleanup", () => {
   const t = scratch();
   const old = newJob(t);
   patchJob(old, "done", { finished: hoursAgo(40), workspace: "w-old" });
   const r = t.orka(["new", "--kind", "pi", "--title", "n", "--goal", "g"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout.trim(), /^[0-9]{17}-n$/);
-  assert.match(r.stderr, /cleanup: closed workspace w-old/);
-  assert.ok(t.calls().includes("herdr workspace close w-old"));
-  assert.ok(read(old).workspaceClosed);
-  const again = t.orka(["new", "--kind", "pi", "--title", "n2", "--goal", "g"]);
-  assert.equal(again.stderr, "");
+  assert.doesNotMatch(r.stderr, /cleanup:/);
+  assert.ok(!t.calls().includes("herdr workspace close w-old"));
+  assert.ok(!read(old).workspaceClosed);
+  assert.match(t.orka(["cleanup"]).stdout, /cleanup: closed workspace w-old/);
 });
 
 test("cleanup with nothing prints nothing to close", () => {

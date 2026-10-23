@@ -81,7 +81,7 @@ function makeJob(t) {
   const job = JSON.parse(readFileSync(path, "utf8"));
   const worktree = join(t.repo, "wt");
   mkdirSync(worktree, { recursive: true });
-  Object.assign(job, { status: "running", pane: "p-orch", agent: "orch", worktree });
+  Object.assign(job, { status: "running", signoff: { round: 1, at: "2026-10-23T00:00:00Z" }, pane: "p-orch", agent: "orch", worktree });
   writeFileSync(path, JSON.stringify(job));
   t.setPane("orch", "p-orch");
   t.setStatus("orch", "working");
