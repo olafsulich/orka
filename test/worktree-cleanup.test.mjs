@@ -121,13 +121,15 @@ test("orka cleanup sweeps past done worktrees, dry-run first; running, failed, s
   assert.match(t.orka(["cleanup"]).stdout, /nothing to close/);
 });
 
-test("orka new runs the cleanup on stderr only", () => {
+test("orka new never removes another job's worktree; orka cleanup does", () => {
   const t = scratch();
   const done = job(t, "done");
   const r = t.orka(["new", "--kind", "pi", "--title", "n", "--goal", "g"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout.trim(), /^[0-9]{17}-n$/);
-  assert.match(r.stderr, /cleanup: removed worktree/);
+  assert.doesNotMatch(r.stderr, /cleanup:/);
+  assert.ok(existsSync(done.wt));
+  assert.match(t.orka(["cleanup"]).stdout, /cleanup: removed worktree/);
   assert.ok(!existsSync(done.wt));
 });
 

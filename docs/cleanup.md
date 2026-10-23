@@ -20,7 +20,7 @@ cleanup: closed worker pane <p> (w1)
 
 **Later**, `orka cleanup [--dry-run] [--older-than 12h] [--cwd <repo>]` closes the workspace (`herdr workspace close`) of every job that is `done`, `stopped` or `failed`, not `keep`, and idle longer than the threshold. Idle is measured from the latest of the finish time, steers, verifier rounds and follow-up rounds, so a job you just steered is not stale. The threshold is `--older-than` (`30m`, `12h`, `2d`; a bare number is refused), else `"staleAfter"` in `.orka/config.json` (for example `"staleAfter": "6h"`), else 12 hours. A workspace is closed once; `job.workspaceClosed` records it. The same command also closes `orka-` prefixed `agent-browser` sessions of jobs that are not running and orphaned sessions whose owning process is dead. `--dry-run` prints `would close` lines, and `cleanup: nothing to close` is printed when there is nothing.
 
-The same cleanup runs automatically at the start of every `orka new` and `orka run`: browsers of finished jobs, browsers whose owner is gone, orphan watchers, done-job worktrees and stale workspaces. It prints a line per thing it closed, on stderr only (stdout of `new` is the id), has a 30 second budget for closing browser sessions, never kills untagged orphan Chrome (only an explicit `orka cleanup` does), and never fails the command. There is no cron and no polling. In scripts and tests, wrap `orka cleanup` in `timeout` (for example `timeout 120 orka cleanup --dry-run`).
+Only an explicit `orka cleanup` sweeps other jobs. `orka new` and `orka run` never do, and `orka done` cleans only its own job (above). There is no cron and no polling. In scripts and tests, wrap `orka cleanup` in `timeout` (for example `timeout 120 orka cleanup --dry-run`).
 
 `orka cleanup --dry-run` lists every `would close`, `would kill` and `would remove worktree <path> (<size>, branch <branch> kept)` line, then `would free <size> of done-job worktrees`.
 
@@ -48,7 +48,7 @@ This runs at `orka run` and again at every `orka worker`, so a link that went mi
 
 orka records the browser processes it sees for a job (pid, start time, worker, session) in `.orka/jobs/<id>/browser-pids.json`: at every `orka worker`, `orka status <id>`, `orka digest` and `orka reap`, and on every watcher poll. The needs-input watcher of a running job does the same on every poll (at most 30 seconds apart), and when the verifier writes a new `results/verifier.json` it kills that verifier's Chrome right away: the round is over. The verifier also ends each round with `orka reap <id> --worker <name>`, which records and kills every Chrome of its round (its pane stays open); the orchestrator reaps finished workers the same way, a new verifier round reaps the previous one, and `done`, `stop` and `failed` reap the whole job.
 
-`orka cleanup` (and the automatic run at `new`/`run`) also kills Chrome whose owning job or pane no longer exists:
+`orka cleanup` also kills Chrome whose owning job or pane no longer exists:
 
 - a running job's worker or orchestrator pane is gone (recorded `closed`, or missing from `herdr pane list`), matched by `ORKA_WORKER` tag or session name;
 - the `ORKA_JOB` tag names a job this repo no longer has, and the process (or its browser parent) runs with its cwd inside this repo's `.orka/worktrees/`;

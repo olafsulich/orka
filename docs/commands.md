@@ -58,7 +58,7 @@ orka help
 
 `webhook` previews or retries that POST. It does not change job status.
 
-`cleanup` sweeps finished jobs: their browsers, the worktrees of done jobs, and the workspaces idle for a while. It also runs at the start of every `orka new` and `orka run`. `--dry-run` lists what it would delete, with sizes. See [cleanup.md](cleanup.md).
+`cleanup` sweeps finished jobs: their browsers, the worktrees of done jobs, and the workspaces idle for a while. Only `orka cleanup` does this: `orka new` and `orka run` never sweep other jobs. `--dry-run` lists what it would delete, with sizes. See [cleanup.md](cleanup.md).
 
 `watch` is the needs-input watcher that `run` starts in the background. See [needs-input.md](needs-input.md).
 

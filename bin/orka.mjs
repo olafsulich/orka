@@ -272,7 +272,6 @@ function hasBrowserSteps(path) {
 
 const BROWSER_CLOSE_TIMEOUT_MS = 20000;
 const CLEANUP_BUDGET_MS = 120000;
-const AUTO_CLEANUP_BUDGET_MS = 30000;
 const ORPHAN_BROWSER_HOURS = 2;
 const UI_GOAL_RE = /agent-browser|\b(ui|browser|visual)\s+(verification|check|checks|test|tests|testing)\b|\b(verify|check|test)\s+(the\s+)?(ui|user interface|user flows?)\b/i;
 
@@ -2030,7 +2029,6 @@ async function cmdNew(args) {
   };
   if (maxRounds) job.maxRounds = maxRounds;
   if (spec) job.spec = { path: spec.rel, feature: spec.feature, commit: spec.commit, ...(spec.parsed.kind ? { kind: spec.parsed.kind } : {}) };
-  sweepQuietly(repo);
   await assignPorts(repo, job);
   const head = git(repo, ["rev-parse", "--verify", "--quiet", "HEAD"]);
   if (head.code === 0 && head.out.trim()) job.baseCommit = head.out.trim();
@@ -2157,7 +2155,6 @@ async function cmdRun(args) {
   if (playbook) job.playbook = playbook;
   // Jobs filed before the gate existed have no job.gate and run ungated.
   if (job.gate && (playbook || args["no-gate"])) job.gate = decideGate(args, job.playbook || "feature", job.title, job.goal, job.spec?.kind);
-  if (!args["dry-run"]) sweepQuietly(repo);
   if (!args["dry-run"] || job.port == null) await assignPorts(repo, job);
   if (args.keep) job.keep = true;
   const maxRounds = parseMaxRounds(args);
@@ -3935,9 +3932,9 @@ function reapWatchers(repo, jobs, dry, log = console.log) {
 // One pass over this repo's finished jobs: their browser sessions and browser
 // processes, orphan watchers, the worktrees of done jobs (the branch stays),
 // then the workspaces idle longer than the threshold. Returns how many things it
-// closed. quiet: no "nothing to close" line. untagged: also kill orphan
-// agent-browser Chrome no job owns (explicit orka cleanup only).
-function sweep(repo, { dry = false, thresholdMs, quiet = false, untagged = true, log = console.log, budgetMs = CLEANUP_BUDGET_MS, orphanMinAgeMs = ORPHAN_BROWSER_HOURS * 3600000 } = {}) {
+// closed, orphan agent-browser Chrome no job owns included.
+// Only orka cleanup runs it: orka new and orka run never sweep other jobs.
+function sweep(repo, { dry = false, thresholdMs, log = console.log, budgetMs = CLEANUP_BUDGET_MS, orphanMinAgeMs = ORPHAN_BROWSER_HOURS * 3600000 } = {}) {
   const verb = dry ? "would close" : "closed";
   const jobs = loadAllJobs(repo);
   const live = jobs.filter((j) => j.status === "running");
@@ -3949,14 +3946,10 @@ function sweep(repo, { dry = false, thresholdMs, quiet = false, untagged = true,
     const owner = jobs.find((j) => s.startsWith(`${browserPrefix(j)}-`) || s === legacyVerifySession(j));
     if (owner && !live.includes(owner) && !owner.keep) names.add(s);
   }
-  // Dead-daemon sessions of any name only on explicit cleanup; the automatic sweep keeps to orka's own.
-  for (const s of orphanSessions()) if (untagged || brand.SESSION_RE.test(s)) names.add(s);
+  // Dead-daemon sessions of any name.
+  for (const s of orphanSessions()) names.add(s);
   const deadline = Date.now() + budgetMs;
-  const stateful = new Set(browserList());
-  const scanned = quiet ? browsers.scanBrowsers() : [];
   for (const s of names) {
-    // Quiet: a recorded session with no state and nothing running is long gone; do not report it again.
-    if (quiet && !stateful.has(s) && !sessionLive(s, scanned)) continue;
     if (Date.now() > deadline) {
       log(`cleanup: time budget spent, skipping browser ${s}`);
       continue;
@@ -3992,15 +3985,13 @@ function sweep(repo, { dry = false, thresholdMs, quiet = false, untagged = true,
   const goneProcs = gone.filter((p) => !doomed.has(p.pid) && doomed.add(p.pid));
   for (const p of goneProcs) log(`cleanup: browser pid ${p.pid} has no owner left (${p.why})`);
   count += killBrowserProcs(goneProcs, dry, log).length;
-  if (untagged) {
-    const orphanProcs = browsers.selectOrphans(scan.filter((p) => !doomed.has(p.pid)), {
-      minAgeMs: orphanMinAgeMs,
-      liveJobIds: live.map((j) => j.id),
-      livePrefixes: live.map(browserPrefix),
-    });
-    if (orphanProcs.length) log(`cleanup: ${orphanProcs.filter((p) => p.chromeRoot).length} orphan agent-browser Chrome root(s) older than ${orphanMinAgeMs / 3600000}h, no running job`);
-    count += killBrowserProcs(orphanProcs, dry, log).length;
-  }
+  const orphanProcs = browsers.selectOrphans(scan.filter((p) => !doomed.has(p.pid)), {
+    minAgeMs: orphanMinAgeMs,
+    liveJobIds: live.map((j) => j.id),
+    livePrefixes: live.map(browserPrefix),
+  });
+  if (orphanProcs.length) log(`cleanup: ${orphanProcs.filter((p) => p.chromeRoot).length} orphan agent-browser Chrome root(s) older than ${orphanMinAgeMs / 3600000}h, no running job`);
+  count += killBrowserProcs(orphanProcs, dry, log).length;
   count += reapWatchers(repo, jobs, dry, log);
   let freedKb = 0;
   for (const j of jobs.filter(lifecycle.removableWorktree)) {
@@ -4015,7 +4006,7 @@ function sweep(repo, { dry = false, thresholdMs, quiet = false, untagged = true,
     log(`cleanup: ${verb} workspace ${j.workspace} (${j.id}, idle since ${new Date(lifecycle.lastActivity(j) || 0).toISOString()})`);
     count++;
   }
-  if (!count && !quiet) log("cleanup: nothing to close");
+  if (!count) log("cleanup: nothing to close");
   if (dry) return count;
   for (const j of workspaces) {
     // The record first: closing the workspace kills any pane in it.
@@ -4024,17 +4015,6 @@ function sweep(repo, { dry = false, thresholdMs, quiet = false, untagged = true,
     herdr(["workspace", "close", j.workspace]);
   }
   return count;
-}
-
-// The same sweep at the start of orka new and orka run: on stderr (stdout of new
-// is the id), only lines for what it closed, a short time budget, and never
-// untagged browsers. Never fatal.
-function sweepQuietly(repo) {
-  try {
-    sweep(repo, { quiet: true, untagged: false, log: (msg) => console.error(msg), budgetMs: AUTO_CLEANUP_BUDGET_MS, thresholdMs: staleThreshold(repo) });
-  } catch (err) {
-    console.error(`cleanup: skipped (${err?.message || err})`);
-  }
 }
 
 // Closes one job's browsers (or one worker's) without touching panes. Safe mid-job.
@@ -4769,7 +4749,7 @@ cleanup (delayed, not close-everything)
   It kills Chrome whose pane or job is gone, and recorded pids (<job dir>/browser-pids.json, same start time) of
   finished jobs and gone panes. It removes the worktrees of past done jobs (the branch stays).
   It also kills orphan agent-browser-chrome-* roots (parent init, older than --orphan-hours, default 2, owned by no running job).
-  The same cleanup runs at the start of orka new and orka run (stderr, a line per thing closed; never untagged Chrome).
+  Only orka cleanup sweeps other jobs: orka new and orka run never do. orka done cleans only its own job.
   No cron, no polling. --keep on new, run, done or stop opts out of everything. --dry-run lists "would close",
   "would kill" and "would remove worktree" lines with sizes. Wrap orka cleanup in timeout in scripts.
 
