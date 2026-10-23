@@ -46,7 +46,7 @@ This runs at `orka run` and again at every `orka worker`, so a link that went mi
 
 ## Verifier Chrome
 
-orka records the browser processes it sees for a job (pid, start time, worker, session) in `.orka/jobs/<id>/browser-pids.json`: at every `orka worker`, `orka status <id>`, `orka digest` and `orka reap`. The verifier ends each round with `orka reap <id> --worker <name>`, which records and kills every Chrome of its round (its pane stays open); the orchestrator reaps finished workers the same way, a new verifier round reaps the previous one, and `done`, `stop` and `failed` reap the whole job.
+orka records the browser processes it sees for a job (pid, start time, worker, session) in `.orka/jobs/<id>/browser-pids.json`: at every `orka worker`, `orka status <id>`, `orka digest` and `orka reap`, and on every watcher poll. The needs-input watcher of a running job does the same on every poll (at most 30 seconds apart), and when the verifier writes a new `results/verifier.json` it kills that verifier's Chrome right away: the round is over. The verifier also ends each round with `orka reap <id> --worker <name>`, which records and kills every Chrome of its round (its pane stays open); the orchestrator reaps finished workers the same way, a new verifier round reaps the previous one, and `done`, `stop` and `failed` reap the whole job.
 
 `orka cleanup` (and the automatic run at `new`/`run`) also kills Chrome whose owning job or pane no longer exists:
 

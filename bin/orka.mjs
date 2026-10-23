@@ -1157,7 +1157,7 @@ async function assignPorts(repo, job) {
 // Shared prompt rules: each literal lives here once and is interpolated into the prompts that use it.
 const REVERSIBLE_RULE = `Reversible work never waits on a human. Irreversible actions (push, delete outside the worktree, external sends, purchases) stop and ask.`;
 const NEVER_CLOSE_PANES = `Never close panes (yours or anyone's, no herdr pane close): finished panes stay open, and orka frees them when the job is done or stopped.`;
-const COMMIT_BEFORE_DONE = `Commit the work on the job branch before orka done: orka done removes a done job's worktree (the branch stays), and keeps it only when it has uncommitted changes.`;
+const COMMIT_BEFORE_DONE = (job) => `Commit the work on the job branch before orka done: orka done removes a done job's worktree (the branch stays), and keeps it only when it has uncommitted changes.`;
 const SUMMARY_FROM_DIFF = (job) => `Before orka done, run git diff ${job.baseCommit || `$(git merge-base ${brand.jobBranch(job)} main)`} (--stat plus a skim) and write summary.txt from the diff, not from the workers' claims.`;
 
 function portPromptLines(job) {
@@ -1742,7 +1742,7 @@ function orchestratorPrompt(job) {
     ...flow.verify,
     ``,
     SUMMARY_FROM_DIFF(job),
-    COMMIT_BEFORE_DONE,
+    COMMIT_BEFORE_DONE(job),
     `Before orka done, run orka digest ${job.id}, use it only for ${flow.digestUse}; write ${dir}/summary.txt ${flow.summaryFrom} (per the rule above), and set the summary field. Do not load the job JSON into the turn to copy fields.`,
     ...flow.done,
     `Then stop working. Your pane stays open after orka done, so Olaf can still give feedback with orka steer; a follow-up message starts a new round, and you run orka done ${job.id} again when that round is finished (the finish wake is sent again, marked followUp).`,
@@ -3443,11 +3443,40 @@ function cmdReap(args) {
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, id);
   const worker = args.worker ? String(args.worker) : null;
-  const dry = Boolean(args["dry-run"]);
+  const pids = reapWorker(job, worker, Boolean(args["dry-run"]));
+  if (!pids.length) console.log("reap: no browser processes left");
+}
+
+// Closes the sessions and kills (after recording) the browser processes of one worker, or of the whole job.
+function reapWorker(job, worker, dry = false) {
   const sessions = jobSessions(job).filter((s) => !worker || s === `${browserPrefix(job)}-${worker}`);
   for (const s of sessions) if (dry || closeBrowser(s, { jobId: job.id })) console.log(`cleanup: ${dry ? "would close" : "closed"} browser ${s}`);
-  const pids = reapBrowsers(job, { worker, dry });
-  if (!pids.length) console.log("reap: no browser processes left");
+  return reapBrowsers(job, { worker, dry });
+}
+
+// The watcher's per-poll housekeeping for a running job: record its browser pids,
+// and when the verifier wrote a new results/verifier.json (its round is over),
+// kill that verifier's Chrome. The result present at watcher start is not a new round.
+function watchTick(repo, id) {
+  const mtime = () => {
+    try {
+      return statSync(verifierResultPath(repo, id)).mtimeMs;
+    } catch {
+      return 0;
+    }
+  };
+  let seen = mtime();
+  return (job) => {
+    if (!job || job.status !== "running") return;
+    recordBrowserPids(repo, job);
+    const now = mtime();
+    if (!now || now === seen) return;
+    seen = now;
+    const verifier = (job.workers || []).filter((w) => w.role === "verifier").at(-1);
+    if (!verifier) return;
+    console.log(`${new Date().toISOString()} watch ${id}: verifier ${verifier.name} wrote its result; reaping its browsers`);
+    reapWorker(job, verifier.name);
+  };
 }
 
 function cmdCleanup(args) {
@@ -3500,6 +3529,7 @@ async function cmdWatch(args) {
       log(`needs-input ${payload.status}: ${sent.outcome} (${sent.detail})`);
     },
     log,
+    tick: watchTick(repo, id),
   };
   log(`watching agent ${job.agent} pane ${job.pane}`);
   const result = await watch.watchJob({ jobId: id, agent: job.agent, pane: job.pane, deps });

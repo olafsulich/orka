@@ -301,3 +301,33 @@ test("selectRecorded never matches a recycled pid; selectGone ignores unattribut
   assert.equal(selectGone([proc({ job: "nope", cwd: "/r/.orka/worktrees/nope" })], opts).length, 1);
   assert.equal(selectGone([proc({ job: "nope", cwd: "/r/.orka/worktrees2/nope" })], opts).length, 0);
 });
+
+test("the watcher kills a verifier's Chrome once the verifier writes its result, and records pids before", async () => {
+  const t = scratch();
+  const base = join(t.repo, "..");
+  // herdr: the orchestrator is always working, its pane always there.
+  writeFileSync(join(base, "bin", "herdr"), `#!/bin/sh\ncase "$1 $2" in\n  "agent get") echo '{"result":{"agent":{"agent_status":"working"}}}';;\n  *) echo '{}';;\nesac\n`);
+  const j = makeJob(t, "running", { workers: [{ name: "verifier", role: "verifier", pane: "p-v" }] });
+  mkdirSync(join(t.repo, "wt"), { recursive: true });
+  const chrome = t.tree({ session: `${j.prefix}-verifier` });
+  const env = { ...process.env, PATH: `${join(base, "bin")}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_PROC_ROOT: t.proc, ORKA_WATCH_POLL_MS: "200", ORKA_MEMORY_GUARD: "off" };
+  const { spawn } = await import("node:child_process");
+  const watcher = spawn("timeout", ["30", process.execPath, ORKA, "watch", j.id, "--cwd", t.repo], { env });
+  let out = "";
+  watcher.stdout.on("data", (d) => (out += d));
+  const exited = new Promise((res) => watcher.on("exit", res));
+  const pidsFile = join(t.repo, ".orka", "jobs", j.id, "browser-pids.json");
+  for (let i = 0; i < 100 && !existsSync(pidsFile); i++) await new Promise((r) => setTimeout(r, 50));
+  assert.ok(existsSync(pidsFile), "the watcher records the verifier's pids while it runs");
+  for (const pid of chrome.all) assert.ok(alive(pid), "still checking: kept");
+  writeFileSync(join(t.repo, ".orka", "jobs", j.id, "results", "verifier.json"), JSON.stringify({ round: 1, verdict: "pass", failures: [] }));
+  for (const pid of chrome.all) {
+    for (let i = 0; i < 100 && alive(pid); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(!alive(pid), `verifier pid ${pid} should be gone`);
+  }
+  const job = j.read();
+  job.status = "done";
+  writeFileSync(j.path, JSON.stringify(job));
+  await exited;
+  assert.match(out, /verifier verifier wrote its result; reaping its browsers/);
+});
