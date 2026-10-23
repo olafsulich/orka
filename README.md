@@ -99,11 +99,9 @@ Config:
 
 | File | Purpose |
 | --- | --- |
-| `.orka/config.json` | local mark; `verify`, `verifierModel`, `staleAfter` |
 | `~/.config/orka/config.json` | autonomy level per repo path (default L1) |
-| `.orka/config.json` | local mark; `verify`, `verifierModel`, `staleAfter`, `memoryGuard` |
 | `node_modules` in a job worktree | symlink to the main checkout's; real install when the lockfile differs |
-| `.orka/config.json` | local mark; `verify`, `verifierModel`, `staleAfter`, `handoff` |
+| `.orka/config.json` | local mark; `verify`, `verifierModel`, `staleAfter`, `memoryGuard`, `handoff` |
 | `handoff` | `{"threshold": 0.4, "orchestrator": true, "maxHandoffs": 3, "busyPollMs": 5000, "contextWindow": N}` or `false`; builders and the orchestrator past the threshold of their detected window (asked by their own Claude or Pi hook after a tool call, the watcher as fallback) write a note with the handoff skill and hand off to a fresh pane ([handoff.md](docs/handoff.md)) |
 | `orka.verify.json` | browser checks at the worktree root; commit it |
 | ports | 4 per job: `ORKA_PORT`, `ORKA_PORTS` |
