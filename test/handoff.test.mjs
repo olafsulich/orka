@@ -118,12 +118,62 @@ test("orka worker starts the pane with --session-id and records it", () => {
   const w = j.read().workers[0];
   assert.match(w.sessionId, /^[0-9a-f-]{36}$/);
   assert.ok(w.startedAt);
-  assert.ok(t.calls().some((c) => c.startsWith("herdr agent start builder --kind pi --pane p-1") && c.includes(`-- --session-id ${w.sessionId} --skill `) && c.endsWith("plugin/skills/handoff")), t.calls().join("\n"));
+  assert.ok(t.calls().some((c) => c.startsWith("herdr agent start builder --kind pi --pane p-1") && c.includes(`-- --session-id ${w.sessionId} --skill `) && c.includes("plugin/skills/handoff -e ")), t.calls().join("\n"));
+  // The per-job pi extension: the handoff hook on tool_result, bound to this job's files.
+  const ext = readFileSync(join(j.dir, "context", "pi-handoff.mjs"), "utf8");
+  assert.match(ext, /^import \{ piExtension \} from "file:\/\/.*\/lib\/handoff-hook\.mjs";\nexport default piExtension\(\{"jobFile":".*\.json","jobDir":".*","configFile":".*config\.json"\}\);\n$/);
+});
+
+test("a claude pane gets the handoff hook as PostToolUse next to the statusline", () => {
+  const t = scratch();
+  writeFileSync(join(t.base, "bin", "claude"), `#!/bin/sh\necho "  --model <model>   Model alias (e.g. 'sonnet', 'haiku' or 'opus') or full name."\n`);
+  chmodSync(join(t.base, "bin", "claude"), 0o755);
+  const j = makeJob(t);
+  const job = j.read();
+  Object.assign(job, { kind: "claude", workerModel: "haiku" });
+  writeFileSync(j.path, JSON.stringify(job));
+  const r = t.orka(["worker", "--job", j.id, "--name", "builder", "--task", TASK]);
+  assert.equal(r.status, 0, r.stderr);
+  const settings = JSON.parse(readFileSync(join(j.dir, "context", "claude-settings.json"), "utf8"));
+  assert.match(settings.statusLine.command, /lib\/statusline\.mjs/);
+  const hook = settings.hooks.PostToolUse[0];
+  assert.equal(hook.matcher, "*");
+  assert.match(hook.hooks[0].command, /lib\/handoff-hook\.mjs'? '?claude'? \S+\.json'? \S+'? \S+config\.json'?$/);
+});
+
+test("a pane whose own hook already asked is adopted, not asked again; the successor follows as usual", () => {
+  const t = scratch();
+  const j = makeJob(t);
+  startWorker(t, j);
+  const w = j.read().workers[0];
+  const note = join(j.dir, "handoff", "builder-1.md");
+  mkdirSync(join(j.dir, "context"), { recursive: true });
+  writeFileSync(join(j.dir, "context", `${w.sessionId}.hook.json`), JSON.stringify({ sessionId: w.sessionId, kind: "pi", role: "worker", name: "builder", n: 1, note, tokens: 89426, window: 200000, source: "pi runtime xai/grok-4.7", pct: 0.447, at: new Date().toISOString() }));
+  t.setStatus("builder", "working");
+  const r = t.orka(["handoff", j.id]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /its hook asked at 45%/);
+  assert.equal(t.prompts("builder").length, 1, "only the task: the poll path does not ask again");
+  const h = j.read().workers[0].handoff;
+  assert.deepEqual([h.state, h.mode, h.n, h.note, h.pct], ["nudged", "hook", 1, note, 0.447]);
+  assert.ok(j.decisions().some((d) => d.includes("asked by its own pi hook after a tool call")));
+  assert.equal(t.orka(["handoff", j.id]).status, 0);
+  assert.equal(t.prompts("builder").length, 1, "a second pass while the hook ask is in flight asks nothing");
+  mkdirSync(join(j.dir, "handoff"), { recursive: true });
+  writeFileSync(note, "## Remaining slice\nfinish part one\n");
+  t.setStatus("builder", "idle");
+  assert.equal(t.orka(["handoff", j.id]).status, 0);
+  const workers = j.read().workers;
+  assert.equal(workers.length, 2);
+  assert.equal(workers[0].name, "builder-h1");
+  assert.equal(workers[1].name, "builder");
+  assert.equal(workers[1].handoffs[0].mode, "hook");
 });
 
 test("below the threshold: measured and recorded, nobody prompted", () => {
   const t = scratch();
   const j = makeJob(t);
+  t.config({ threshold: 0.5 });
   startWorker(t, j);
   const r = t.orka(["handoff", j.id]);
   assert.equal(r.status, 0, r.stderr);

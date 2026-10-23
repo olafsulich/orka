@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseEnv } from "node:util";
 import { DECISION_ROWS, DIGEST_MAX, FILE_READ_MAX, SUMMARY_MAX, VERIFIER_JSON_MAX, renderDigest, steerText } from "../lib/digest.mjs";
 import * as brand from "../lib/brand.mjs";
@@ -17,6 +17,7 @@ import * as browsers from "../lib/browsers.mjs";
 import * as deps from "../lib/deps.mjs";
 import * as guard from "../lib/guard.mjs";
 import * as context from "../lib/context.mjs";
+import * as handoffHook from "../lib/handoff-hook.mjs";
 import * as lifecycle from "../lib/lifecycle.mjs";
 import * as autonomy from "../lib/autonomy.mjs";
 import * as ports from "../lib/ports.mjs";
@@ -1023,22 +1024,33 @@ function startArgs(name, pane, kind, alias, sessionId, job = null) {
   return args;
 }
 
-// orka's skills (plugin/: the handoff skill) for every pane, and for claude a statusLine that
-// records the window Claude Code reports for the session (lib/statusline.mjs -> <jobdir>/context).
+// orka's skills (plugin/: the handoff skill) for every pane, and the handoff hook
+// (lib/handoff-hook.mjs: after each tool call, past handoff.threshold, the agent is told to hand off
+// once). claude: a settings file with the hook as PostToolUse and a statusLine that records the
+// window Claude Code reports for the session (lib/statusline.mjs -> <jobdir>/context). pi: a
+// per-job extension file loaded with -e.
 const PLUGIN_DIR = join(dirname(ORKA), "..", "plugin");
 const HANDOFF_SKILL = join(PLUGIN_DIR, "skills", "handoff", "SKILL.md");
+const HANDOFF_HOOK = join(dirname(ORKA), "..", "lib", "handoff-hook.mjs");
 
 function captureDir(repo, id) {
   return join(jobDir(repo, id), "context");
 }
 
 function paneExtras(job, kind) {
-  if (kind === "pi") return ["--skill", dirname(HANDOFF_SKILL)];
   const dir = captureDir(job.repo, job.id);
   mkdirSync(dir, { recursive: true });
+  const paths = { jobFile: jobPath(job.repo, job.id), jobDir: jobDir(job.repo, job.id), configFile: configPath(job.repo) };
+  if (kind === "pi") {
+    const ext = join(dir, "pi-handoff.mjs");
+    writeFileSync(ext, `import { piExtension } from ${JSON.stringify(pathToFileURL(HANDOFF_HOOK).href)};\nexport default piExtension(${JSON.stringify(paths)});\n`);
+    return ["--skill", dirname(HANDOFF_SKILL), "-e", ext];
+  }
   const file = join(dir, "claude-settings.json");
   const command = sh([process.execPath, join(dirname(ORKA), "..", "lib", "statusline.mjs"), dir]);
-  writeFileSync(file, `${JSON.stringify({ statusLine: { type: "command", command, padding: 0 } }, null, 2)}\n`);
+  const hook = sh([process.execPath, HANDOFF_HOOK, "claude", paths.jobFile, paths.jobDir, paths.configFile]);
+  const settings = { statusLine: { type: "command", command, padding: 0 }, hooks: { PostToolUse: [{ matcher: "*", hooks: [{ type: "command", command: hook, timeout: 10 }] }] } };
+  writeFileSync(file, `${JSON.stringify(settings, null, 2)}\n`);
   return ["--settings", file, "--plugin-dir", PLUGIN_DIR];
 }
 
@@ -2702,9 +2714,25 @@ function pendingStep(repo, id, slot, rec, { dry, log, seen }) {
   }
 }
 
+// A hook ask becomes a "nudged" handoff (mode hook): pendingStep then waits for the note, starts the
+// successor, and runs the skill itself if the agent ends its turn without a note.
+function adoptHookAsk(repo, job, slot, m, settings, { dry, log, seen }) {
+  seen.push({ name: slot.name, role: slot.role, tokens: m.tokens, window: m.window, source: m.source, pct: m.pct, status: "", due: false, why: `asked by its hook at ${context.pctLabel(m.pct)}` });
+  if (dry) return;
+  updateJob(repo, job.id, (j) => {
+    const r = slotRecord(j, slot);
+    if (r && !r.handoff) r.handoff = { state: "nudged", mode: "hook", n: m.n, note: m.note, tokens: m.tokens, window: m.window, source: m.source, pct: m.pct, at: m.at };
+  });
+  appendDecision(repo, job.id, ["handoff", `ask ${slot.name} for handoff note h${m.n}`, `context ${context.pctLabel(m.pct)} >= ${context.pctLabel(settings.threshold)} of ${m.window} (${m.source}); asked by its own ${slot.kind} hook after a tool call`, m.note, "nudged"]);
+  log(`handoff ${slot.name}: its hook asked at ${context.pctLabel(m.pct)} (${m.tokens}/${m.window}, ${m.source}) -> ${m.note}`);
+}
+
 // Measure one pane and act on it. force: orka handoff <id> <name> (no threshold, no cap; still
 // needs the agent idle, done or working).
 function measureStep(repo, job, slot, rec, settings, { dry, log, seen, force = false }) {
+  // The pane's own hook already asked this session: adopt that ask instead of asking again.
+  const marker = force ? null : handoffHook.readMarker(jobDir(repo, job.id), slot.sessionId);
+  if (marker) return adoptHookAsk(repo, job, slot, marker, settings, { dry, log, seen });
   const ctx = measurePane(repo, job, slot, settings);
   if (!ctx && !force) {
     seen.push({ name: slot.name, role: slot.role, state: "no usage" });
@@ -4806,12 +4834,12 @@ Context handoff (builder workers and the orchestrator, both kinds)
   Every pane starts with --session-id; the watcher reads that transcript's last turn each poll.
   Window per pane, never guessed: Claude's statusline context_window_size (captured per session),
   a [1m] model id, Pi's model registry, then handoff.contextWindow; else "window unknown" and no
-  automatic handoff. At handoff.threshold (default 0.5) the pane runs the handoff skill
+  automatic handoff. At handoff.threshold (default 0.4) the pane runs the handoff skill
   (plugin/skills/handoff): at once when idle, or at its next clean stopping point via a message
   queued mid-turn. The note goes to .orka/jobs/<id>/handoff/<name>-<n>.md, the agent is renamed
   <name>-h<n>, and a fresh <name> continues in a new pane. Old panes stay open until done/stop/cleanup.
   Verifier exempt. At most handoff.maxHandoffs (default 3) per pane.
-  Config: "handoff": {"threshold": 0.5, "orchestrator": true, "maxHandoffs": 3,
+  Config: "handoff": {"threshold": 0.4, "orchestrator": true, "maxHandoffs": 3,
   "contextWindow": N | {"<model substring>": N}} or "handoff": false. See docs/handoff.md.
 
 Verifier (both kinds)
