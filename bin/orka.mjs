@@ -6,7 +6,7 @@
 // if <repo>/.orka/secrets/finish-webhook.env exists. Never a home path.
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -15,6 +15,7 @@ import { DECISION_ROWS, DIGEST_MAX, FILE_READ_MAX, SUMMARY_MAX, VERIFIER_JSON_MA
 import * as brand from "../lib/brand.mjs";
 import * as browsers from "../lib/browsers.mjs";
 import * as deps from "../lib/deps.mjs";
+import * as doctor from "../lib/doctor.mjs";
 import * as guard from "../lib/guard.mjs";
 import * as context from "../lib/context.mjs";
 import * as handoffHook from "../lib/handoff-hook.mjs";
@@ -75,7 +76,7 @@ const VALUE_FLAGS = new Set([
   "spec",
   "hook",
 ]);
-const BOOL_FLAGS = new Set(["dry-run", "help", "force", "keep", "base", "ui", "stdin", "pr", "push", "no-gate"]);
+const BOOL_FLAGS = new Set(["dry-run", "help", "force", "keep", "base", "ui", "stdin", "pr", "push", "no-gate", "fix"]);
 const FINISH_STATUSES = new Set(["done", "failed", "stopped"]);
 // Direction gate: a new-feature job pauses here after planning until orka approve (or orka steer revises the plan).
 const AWAITING = "awaiting-direction";
@@ -1412,6 +1413,7 @@ function verifierLine(job) {
   const v = job.verifier;
   if (!v || !v.verdict) return "";
   const round = Number(v.rounds) || 0;
+  if (v.verdict === "blocked") return `verifier: blocked by the environment, round ${round} (not a code failure; see orka doctor)`;
   if (v.verdict === "pass" && v.stale) return `verifier: pass (STALE, code changed since round ${round})`;
   return v.verdict === "pass" ? `verified by verifier: pass, round ${round}` : `verifier: ${v.verdict}, round ${round}`;
 }
@@ -1455,7 +1457,9 @@ function checkRole(role, name, job) {
   if (role === "verifier" && name !== VERIFIER_NAME) fail(`a verifier worker must be named "${VERIFIER_NAME}", got "${name}"`);
   if (role === "builder" && isVerifierName(name)) fail(`the name "${VERIFIER_NAME}" is reserved; start it with --role verifier`);
   const max = Number(job.maxRounds) || 0;
-  const rounds = verifierState(job).rounds;
+  // A blocked round (environment) does not count toward --max-rounds.
+  const state = verifierState(job);
+  const rounds = state.rounds - state.history.filter((h) => h.verdict === "blocked").length;
   if (role === "verifier" && max && rounds >= max) {
     fail(`verifier already ran ${rounds} rounds for job ${job.id}; --max-rounds ${max} reached, refusing round ${rounds + 1}`);
   }
@@ -1478,7 +1482,7 @@ function readVerifierResult(repo, id) {
   if (!existsSync(path)) return null;
   try {
     const data = JSON.parse(readFileSync(path, "utf8"));
-    if (data?.verdict !== "pass" && data?.verdict !== "fail") return null;
+    if (data?.verdict !== "pass" && data?.verdict !== "fail" && data?.verdict !== "blocked") return null;
     return data;
   } catch {
     return null;
@@ -1509,6 +1513,8 @@ function entryList(list, withExtra) {
 function normaliseResult(result) {
   const failures = entryList(result.failures, false);
   const warnings = entryList(result.warnings, true);
+  // blocked: the environment stopped the verifier, not the code. No failures to route, no stall.
+  if (result.verdict === "blocked") return { verdict: "blocked", failures: [], warnings };
   let verdict = result.verdict;
   if (Array.isArray(result.failures)) {
     if (failures.length) verdict = "fail";
@@ -1588,7 +1594,17 @@ function recordVerifier(repo, job) {
   if (!next) return null;
   job.verifier = next;
   save(repo, job);
+  // A blocked round runs orka doctor once, so the orchestrator and Olaf see what to fix.
+  if (next.verdict === "blocked" && job.doctor?.verifierRound !== next.rounds) {
+    const reason = blockedReason(repo, job);
+    runDoctor(repo, job, { why: `verifier round ${next.rounds} blocked${reason ? `: ${reason}` : ""}`, verifierRound: next.rounds });
+  }
   return job.verifier;
+}
+
+function blockedReason(repo, job) {
+  const b = readVerifierResult(repo, job.id)?.blocked;
+  return b && typeof b === "object" ? String(b.reason || "").slice(0, 200) : typeof b === "string" ? b.slice(0, 200) : "";
 }
 
 // The blocking failures and warnings of the verifier's latest result, with evidence.
@@ -1713,6 +1729,7 @@ function verifierPrompt(job, name, task, alias, round) {
     ``,
     `When finished, write ${result} as JSON:`,
     `{"name":"${name}","role":"verifier","round":${round},"verdict":"pass"|"fail","checks":[{"name":"...","outcome":"pass"|"fail"|"skipped","scope":"job"|"preexisting","notes":"..."}],"failures":[{"check":"<stable check name>","evidence":"<exact error, step, url, command output>"}],"warnings":[{"check":"...","evidence":"...","base":"<sha>","proof":"<how it was shown pre-existing, e.g. fails on base via orka verify --base>"}],"summary":"..."}`,
+    `If you cannot test at all because of the environment (a missing tool, a broken install, a port in use, a browser that will not start, a dialog), do not report a code failure: write "verdict":"blocked" with "blocked":{"reason":"<one line>","evidence":"<exact error or command output>"} and failures empty. orka then runs orka doctor; nothing goes back to the builders.`,
     `verdict is "pass" when failures is empty, even if warnings are present. failures are blocking and cover what this job changed; warnings are pre-existing or unrelated failures proven on the base commit. Use the same check name for the same check every round. Evidence must be concrete: the exact error, step, url or command output.`,
     `Also write one line at ${note}.`,
     `Then send that line to the orchestrator:`,
@@ -1750,6 +1767,7 @@ const FEATURE_FLOW = (job, dir) => ({
     `Build the verifier --task from the builders' ACCEPTANCE lines (copy them in, one per builder), plus the job goal.`,
     `The verifier runs orka verify, the project's own checks and targeted agent-browser checks, and may extend ${verifyFile(job.worktree)} only to cover the acceptance criteria.`,
     `It writes ${dir}/results/${VERIFIER_NAME}.json: "verdict" pass or fail, "failures" (blocking: what this job changed, each with its evidence) and "warnings" (pre-existing failures the verifier showed also fail on the base commit; they never block a pass).`,
+    `If the verdict is blocked, the environment stopped the verifier, not the code: do not route anything to the builders, and it does not count as a round. orka has run orka doctor (see orka digest). If a listed fix is repo-local, run orka doctor ${job.id} --fix or do it, then start the verifier again; anything else (a system package, a trust dialog, sudo) you report to Olaf and wait.`,
     `If the verdict is fail, read ${dir}/results/${VERIFIER_NAME}.json and route each blocking failure WITH its evidence to the builder that owns those files (a new or resumed builder worker). Ignore warnings for routing. Wait for their reports, then start the verifier again.`,
     `Run orka status ${job.id} after each verifier round. If it reports a stall (the same check failing two rounds in a row), do NOT repeat the same instruction.`,
     `Before changing strategy, attack the premise: write in one sentence the premise the failed fixes share, list what else could explain the failure (a census), and pick the strategy that drops that premise.`,
@@ -2214,6 +2232,7 @@ async function cmdRun(args) {
     startWatcher(repo, job);
   } catch (err) {
     if (job.worktree || job.pane || job.agent) {
+      console.error(doctorOnStartFailure(repo, job, "the orchestrator"));
       try {
         const wake = await markTerminal(repo, job, "failed", err.message);
         console.error(finishLine(wake));
@@ -2360,6 +2379,7 @@ function cmdWorker(args) {
   if (started.code !== 0 || started.json?.error) {
     // The pane was split just now and never held an agent: close only that one.
     if (ownPane) herdr(["pane", "close", pane]);
+    console.error(doctorOnStartFailure(repo, job, `worker ${name}`));
     herdrFail(started, "worker start");
   }
   const prompt = role === "verifier" ? verifierPrompt(job, String(name), String(task), alias, round) : workerPrompt(job, String(name), String(task), alias);
@@ -2382,7 +2402,7 @@ function cmdWorker(args) {
   });
   if (!delivered.ok) {
     save(repo, job);
-    fail(`worker ${name} did not start: ${delivered.reason}. Delivery failed; re-issue the task (orka worker ...) instead of waiting for a note.`);
+    fail(`worker ${name} did not start: ${delivered.reason}. Delivery failed; re-issue the task (orka worker ...) instead of waiting for a note.\n${doctorOnStartFailure(repo, job, `worker ${name}`)}`);
   }
   if (role === "verifier") {
     const state = verifierState(job);
@@ -3339,6 +3359,13 @@ async function cmdDone(args) {
     console.log(`${id} is already ${job.status}`);
     return;
   }
+  // An environment block is the more useful answer than a missing sign-off.
+  const early = giveUp ? null : computeVerifier(repo, job) || job.verifier;
+  if (early?.verdict === "blocked") {
+    console.error(`orka done: ${id} not marked done. ${verifierLine({ ...job, verifier: early })}. Fix what orka doctor ${id} reports and re-run the verifier, or: orka done ${id} --give-up "<reason>".`);
+    process.exitCode = 1;
+    return;
+  }
   if (unsigned) {
     console.error(`orka done: ${id} not marked done: ${unsigned}`);
     process.exitCode = 1;
@@ -3347,6 +3374,11 @@ async function cmdDone(args) {
   const verifier = recordVerifier(repo, job);
   if (!giveUp && verifier?.verdict === "pass" && verifier.stale) {
     console.error(`orka done: ${id} not marked done. ${verifierLine(job)}; the verifier pass no longer describes the code. Re-run the verifier (orka worker --job ${id} --name ${VERIFIER_NAME} --role verifier --task "..."), then run orka done again. To stop without a verified result: orka done ${id} --give-up "<reason>".`);
+    process.exitCode = 1;
+    return;
+  }
+  if (!giveUp && verifier?.verdict === "blocked") {
+    console.error(`orka done: ${id} not marked done. ${verifierLine(job)}. Fix what orka doctor ${id} reports and re-run the verifier, or: orka done ${id} --give-up "<reason>".`);
     process.exitCode = 1;
     return;
   }
@@ -4098,6 +4130,83 @@ function sweep(repo, { dry = false, thresholdMs, log = console.log, budgetMs = C
   return count;
 }
 
+// orka doctor (lib/doctor.mjs, docs/doctor.md): this host's probes. Read-only.
+function doctorChecks(repo, job = null) {
+  const env = { ...process.env, PATH: pathPrefix() };
+  const which = (cmd) => {
+    const r = spawnSync("sh", ["-c", `command -v ${q(cmd)}`], { encoding: "utf8", env });
+    return r.status === 0 ? r.stdout.trim() : "";
+  };
+  const nodeVersion = () => spawnSync("node", ["--version"], { encoding: "utf8", env }).stdout?.trim() || "";
+  const checks = [...doctor.cliChecks({ which }), doctor.nodeCheck({ nodeVersion })];
+  const wt = job?.worktree && existsSync(job.worktree) ? job.worktree : null;
+  checks.push(doctor.depsCheck({ repo, worktree: wt, plan: wt ? deps.planDeps(repo, wt) : null, jobId: job?.id }));
+  if (job && (Array.isArray(job.ports) ? job.ports.length : job.port != null)) checks.push(...doctor.portChecks(portUsers(job)));
+  let disk = null;
+  try {
+    const st = statfsSync(repo);
+    disk = { freeBytes: st.bavail * st.bsize, totalBytes: st.blocks * st.bsize };
+  } catch {
+    disk = null;
+  }
+  checks.push(doctor.diskCheck(disk));
+  checks.push(doctor.memoryCheck(guard.memAvailableMb(browsers.procRootOf()), guardLimitsOf(repo).minAvailableMb));
+  if (!job || job.kind !== "pi") checks.push(doctor.trustCheck({ repo, claudeJson: join(homedir(), ".claude.json") }));
+  const live = loadAllJobs(repo).filter((j) => j.status === "running");
+  const orphans = browsers.selectOrphans(browsers.scanBrowsers(), { minAgeMs: ORPHAN_BROWSER_HOURS * 3600000, liveJobIds: live.map((j) => j.id), livePrefixes: live.map(browserPrefix) });
+  checks.push(doctor.chromeCheck(orphans.filter((p) => p.chromeRoot).map((p) => p.pid)));
+  return checks;
+}
+
+// The process listening on each of the job's ports, from ss; "" when free. null when ss is missing.
+function portUsers(job) {
+  const list = Array.isArray(job.ports) && job.ports.length ? job.ports : [job.port];
+  return list.map((port) => {
+    const r = spawnSync("ss", ["-Hltnp", `sport = :${port}`], { encoding: "utf8" });
+    const line = r.status === 0 ? r.stdout.trim().split("\n")[0] || "" : "";
+    const user = line ? (/users:\(\("([^"]+)",pid=(\d+)/.exec(line)?.slice(1).join(" pid ") || "listening") : "";
+    return { port, user };
+  });
+}
+
+// Runs the checks for a job, records them (job.doctor, decisions.tsv) and returns the summary.
+function runDoctor(repo, job, { why = "orka doctor --job", verifierRound, quiet = false } = {}) {
+  const checks = doctorChecks(repo, job);
+  const s = doctor.summary(checks);
+  const at = new Date().toISOString();
+  const fixes = checks.filter((c) => c.status === "fail").map((c) => `${c.name}: ${c.fix}`);
+  job.doctor = { at, why, ok: s.ok, failed: s.failed, warnings: s.warnings, fixes: fixes.slice(0, 6), ...(verifierRound ? { verifierRound } : {}) };
+  save(repo, job);
+  appendDecision(repo, job.id, ["doctor", why, s.ok ? `ok${s.warnings.length ? `; warnings: ${s.warnings.join(", ")}` : ""}` : `failed: ${s.failed.join(", ")}`, fixes.join(" | ").slice(0, 600), s.ok ? "ok" : `${s.failed.length} failed`]);
+  if (!quiet) console.error(`orka doctor (${why}):\n${doctor.render(checks)}`);
+  return { checks, ...s };
+}
+
+function cmdDoctor(args) {
+  allowFlags(args, ["cwd", "job", "fix"]);
+  const repo = requireRepo(args.cwd || process.cwd());
+  const job = args.job ? load(repo, String(args.job)) : null;
+  if (args.fix) {
+    if (!job) fail("--fix needs --job <id>: it only repairs that job's worktree (node_modules link); system packages and Claude's trust stay for you");
+    setupDeps(repo, job);
+    save(repo, job);
+  }
+  console.log(`orka doctor ${repo}${job ? ` job ${job.id}` : ""}`);
+  const checks = job ? runDoctor(repo, job, { why: `orka doctor --job${args.fix ? " --fix" : ""}`, quiet: true }).checks : doctorChecks(repo);
+  console.log(doctor.render(checks));
+  if (!doctor.summary(checks).ok) process.exitCode = 1;
+}
+
+// A pane that did not start (or never took its prompt): run the doctor once and say what it found.
+function doctorOnStartFailure(repo, job, what) {
+  try {
+    const got = runDoctor(repo, job, { why: `${what} did not start`, quiet: true });
+    return got.ok ? "orka doctor found nothing wrong with the environment" : `orka doctor: ${got.failed.join(", ")} failed (${job.doctor.fixes.join(" | ").slice(0, 400)})`;
+  } catch (err) {
+    return `orka doctor could not run: ${err?.message || err}`;
+  }
+}
+
 // Closes one job's browsers (or one worker's) without touching panes. Safe mid-job.
 function cmdReap(args) {
   allowFlags(args, ["cwd", "dry-run", "worker"]);
@@ -4677,6 +4786,7 @@ async function cmdReview(args) {
   const verifier = args["dry-run"] ? computeVerifier(repo, job) || job.verifier : recordVerifier(repo, job) || job.verifier;
   const view = { ...job, verifier };
   if (verifier?.verdict === "fail") fail(`orka review: ${verifierLine(view)}. Route the failures and re-verify, or orka done ${id} --give-up "<reason>"`);
+  if (verifier?.verdict === "blocked") fail(`orka review: ${verifierLine(view)}. Fix what orka doctor ${id} reports, re-run the verifier, or tell Olaf`);
   if (verifier?.verdict === "pass" && verifier.stale) fail(`orka review: ${verifierLine(view)}; the verifier pass no longer describes the code. Re-run the verifier first`);
   const summaryPath = join(jobDir(repo, id), "summary.txt");
   const summary = existsSync(summaryPath) ? readCapped(summaryPath, FILE_READ_MAX).text.trim() : "";
@@ -4793,6 +4903,8 @@ function help() {
            (refused until orka approve signed off the job in review; --give-up and orka stop always work)
   orka cleanup [--dry-run] [--older-than <12h>] [--orphan-hours <2>] [--cwd <repo>]
   orka reap <id> [--worker <name>] [--dry-run] [--cwd <repo>]   (closes browsers only; panes stay)
+  orka doctor [--job <id>] [--fix] [--cwd <repo>]   (environment check with a fix per problem; read-only, --fix
+           only relinks the job's node_modules; runs by itself on a blocked verdict or a pane that did not start)
   orka watch <id> [--dry-run] [--cwd <repo>]   (started by orka run; not for hand use)
   orka handoff <id> [<worker>|orchestrator] [--dry-run] [--cwd <repo>]   (one context-handoff pass; the watcher runs it every poll; a name hands that pane off now)
   orka webhook <id> [--dry-run] [--force] [--cwd <repo>]
@@ -4984,6 +5096,7 @@ async function main() {
   else if (cmd === "verify") cmdVerify(args);
   else if (cmd === "cleanup") cmdCleanup(args);
   else if (cmd === "reap") cmdReap(args);
+  else if (cmd === "doctor") cmdDoctor(args);
   else if (cmd === "watch") await cmdWatch(args);
   else if (cmd === "spec") cmdSpec(args);
   else if (cmd === "autonomy") cmdAutonomy(args);
