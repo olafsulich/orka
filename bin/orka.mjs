@@ -3585,7 +3585,7 @@ Verifier (both kinds)
   It does not change job.verify.
 
 A prompt that is still idle after ~8s is sent once more.
-status reads the job file. It does not poll Herdr. One job also prints the finish-wake record and verify.
+status reads the job file plus herdr pane list for the host line. One job also prints the finish-wake record and verify.
 stop interrupts the lead and workers, then marks stopped. It does not close the workspace.
 done marks a running job done (default reason "completed") and sends the finish wake. It refuses a queued job and leaves a finished one alone.
 done does not close the orchestrator pane or the workspace: Olaf may still want to give feedback (see Follow-up rounds).
@@ -3616,16 +3616,31 @@ cleanup (delayed, not close-everything)
   orka-<8 hex of sha1(id)>; workers use <prefix>-<worker>, verify <prefix>-verify), dev/preview servers whose
   process cwd is inside the job worktree (never orka itself or its ancestors), and the panes of finished
   workers and the verifier (herdr pane close). What was closed is stored in job.cleanup.
-  The orchestrator pane and the Herdr workspace stay open so Olaf can still steer. The record, worktree and branch always stay.
+  On done only, it also removes the worktree (git worktree remove, never --force; a worktree with uncommitted
+  changes is kept). The branch always stays. A steer on a done job checks the branch out again.
+  The orchestrator pane and the Herdr workspace stay open so Olaf can still steer. The record and branch always stay.
   orka cleanup [--dry-run] [--older-than 12h] closes the workspace of jobs that are finished (done, failed,
   stopped) and idle longer than the threshold (default 12h; or "staleAfter": "<duration>" in .orka/config.json).
   Idle is measured from the latest of finished, steer, verifier and follow-up round times. A job is only closed once.
   It also closes orka- (and orca-) browser sessions of jobs that are not running and agent-browser sessions whose pid file names a dead process.
   Closing a session never launches a browser: a session with no live daemon or Chrome only has its state deleted.
   Browsers are found by ORKA_JOB (or ORCA_JOB) tag and by session name (AGENT_BROWSER_SESSION / --session in the process tree).
+  It kills Chrome whose pane or job is gone, and recorded pids (<job dir>/browser-pids.json, same start time) of
+  finished jobs and gone panes. It removes the worktrees of past done jobs (the branch stays).
   It also kills orphan agent-browser-chrome-* roots (parent init, older than --orphan-hours, default 2, owned by no running job).
-  The same stale sweep runs quietly at the start of orka new and orka run (stderr, one line, only if it closed something).
-  No cron, no polling. --keep on new, run, done or stop opts out of everything. --dry-run lists "would close" lines.
+  The same cleanup runs at the start of orka new and orka run (stderr, a line per thing closed; never untagged Chrome).
+  No cron, no polling. --keep on new, run, done or stop opts out of everything. --dry-run lists "would close",
+  "would kill" and "would remove worktree" lines with sizes. Wrap orka cleanup in timeout in scripts.
+
+Shared dependencies
+  A job worktree links node_modules to the main checkout's when the lockfile matches, and runs a real install when it
+  differs. orka run and every orka worker repair a missing or broken link.
+
+Memory guard
+  orka worker checks MemAvailable and live agent panes before it starts a pane. When tight it queues (.orka/queue/)
+  and waits, then refuses past the limit. "memoryGuard": {"minAvailableMb":1024,"maxPanes":20,"wait":"8m","poll":"15s"}
+  in .orka/config.json, or ORKA_MIN_MEM_MB, ORKA_MAX_PANES, ORKA_GUARD_WAIT, ORKA_GUARD_POLL, ORKA_MEMORY_GUARD=off.
+  Logged to decisions.tsv; orka status shows memory, live panes and the queue. No disk guard.
 
 Follow-up rounds
   orka steer <id> "message" works on a done, failed or stopped job whose orchestrator pane still exists. It sets the job

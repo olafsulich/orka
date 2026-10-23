@@ -7,7 +7,7 @@
 - [webhooks.md](webhooks.md): the finish wake and `orka webhook`
 - [needs-input.md](needs-input.md): the needs-input watcher
 - [follow-up.md](follow-up.md): follow-up rounds with `orka steer`
-- [cleanup.md](cleanup.md): what is freed when, and browser processes
+- [cleanup.md](cleanup.md): what is freed when, browser processes, done-job worktrees, shared node_modules, memory guard
 - [ports.md](ports.md): per-job ports
 - [layout.md](layout.md): files on disk, and trust
 - [comparisons.md](comparisons.md): limen, old orch, v0 skips
