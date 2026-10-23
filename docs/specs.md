@@ -39,3 +39,26 @@ orka never writes a spec on its own. `spec init` only scaffolds the file; commit
 
 - **Orchestrator:** the goal above, plus a pointer: the spec is in the worktree, orka pastes it into briefs, and every Done when line goes into the verifier `--task`.
 - **Workers and verifier:** a `SPEC (<path>, ...)` block with the full spec text, read from the job worktree (so it is the job branch copy), capped at 6000 characters with a pointer to the file.
+
+## Lessons
+
+`orka done` on a spec'd job appends what the job learned to a `## Lessons` section at the end of the spec, and commits only that file on the job branch (`Spec lessons: <feature> (job <id>)`). It merges with the rest of the branch, so lessons reach main only when you merge. It never writes on main: it writes in the job worktree only, and only while that worktree is on the job's own branch; otherwise it prints `lessons: skipped (...)`.
+
+Sources, one line each, capped at 180 characters:
+
+| kind | from |
+| --- | --- |
+| `rejected` | `orka strategy` rows (the premise dropped and what replaced it), and decisions.tsv rows whose decision or why says rejected, reverted, abandoned, dropped or ruled out |
+| `steer` | delivered `orka steer` messages |
+| `check` | verifier checks that failed in a round, with the first evidence line: "failed in round N before passing" or "still failing at the end" |
+| `flaky` | checks the verifier showed failing on the base commit too (pre-existing warnings) |
+| `gave-up` | the `--give-up` reason |
+
+Line shape: `- <date> <kind>: <text> (job <id>)`, plus ` xN` when N jobs hit the same lesson.
+
+Kept compact at append time (no nightly pass):
+
+- **Dedupe:** the same kind and text (case and punctuation ignored) is not added twice. A follow-up round of the same job adds only new lessons; another job hitting it bumps ` xN` and the date.
+- **Cap:** at most 20 lesson lines. Over that, the lines with the lowest count, oldest first, fold into one `compressed: N older lessons folded` line. The full text stays in the git history of the spec.
+- The spec is excluded from the job's patch id, so the lessons commit never makes a verifier pass stale.
+- `orka done --dry-run` prints `lessons: would update ...` and writes nothing. `orka status <id>` shows the counts and the commit; decisions.tsv gets a `lessons` row.
