@@ -3070,8 +3070,10 @@ function wakeTick(repo, id, { log = console.log, dry = false } = {}) {
   if (job.status !== "running" || !job.agent) return seen;
   const dir = jobDir(repo, id);
   const leadHandoff = PENDING.has(job.lead?.handoff?.state);
+  // Verifier rounds share results/verifier.json: only the newest worker on a result file owns its wakes.
+  const owner = new Map((job.workers || []).filter((w) => w?.result).map((w) => [w.result, w.name]));
   for (const w of job.workers || []) {
-    if (!w?.result || w.retired) continue;
+    if (!w?.result || w.retired || owner.get(w.result) !== w.name) continue;
     const key = wake.wakeKey(w.name, w.result);
     if (!key || job.wakes?.[key]) continue;
     const status = agentStatus(w.name);

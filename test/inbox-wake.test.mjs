@@ -129,6 +129,25 @@ test("one wake per result: sent when the worker's turn ends, never twice, again 
   assert.equal(t.prompts("orch").length, 2);
 });
 
+test("verifier rounds share verifier.json: round 2's result wakes only round 2's verifier", () => {
+  const t = scratch();
+  const shared = { role: "verifier", result: join(t.dir, "results", "verifier.json") };
+  t.addWorker("verifier", shared);
+  const p = t.result("verifier", { verdict: "fail", failures: [{}], summary: "round one" });
+  t.status("verifier", "done");
+  assert.match(t.orka(["wake", t.id]).stdout, /wake verifier: wake sent/);
+  t.status("orch", "idle");
+  t.addWorker("verifier-2", shared);
+  writeFileSync(p, JSON.stringify({ verdict: "pass", failures: [], summary: "round two" }));
+  utimesSync(p, new Date(), new Date(Date.now() + 5000));
+  t.status("verifier-2", "done");
+  t.orka(["wake", t.id]);
+  const got = t.prompts("orch");
+  assert.equal(got.length, 2, "one wake per round, none for the round-1 verifier");
+  assert.match(got[1], /^orka wake: verifier verifier-2 finished \(verdict pass\)/);
+  assert.equal((t.decisions().match(/wake orchestrator: verifier finished/g) || []).length, 1);
+});
+
 test("a wake is held while the orchestrator hands off, then goes to the successor's pane; a working lead gets it queued", () => {
   const t = scratch();
   t.addWorker("builder");
