@@ -1185,7 +1185,54 @@ function jobEnvArgs(job, worker) {
 // <browserPrefix>-<worker>.
 function reapBrowsers(job, { worker = null, workers = null, dry = false } = {}) {
   const procs = browsers.selectReap(browsers.scanBrowsers(), { jobId: job.id, worker, workers, prefix: browserPrefix(job) });
+  if (!dry) recordBrowserPids(job.repo, job, procs);
   return killBrowserProcs(procs, dry);
+}
+
+// <job dir>/browser-pids.json: every browser process orka has seen for the job
+// ({ pid, startMs, worker, session, at }). orka cleanup kills a recorded pid
+// once its job is finished or its pane is gone, even when the process lost its
+// tag and session. The start time stops a recycled pid from ever matching.
+function browserPidsPath(repo, id) {
+  return join(jobDir(repo, id), "browser-pids.json");
+}
+
+function readBrowserPids(repo, id) {
+  try {
+    const data = JSON.parse(readFileSync(browserPidsPath(repo, id), "utf8"));
+    return Array.isArray(data?.pids) ? data.pids : [];
+  } catch {
+    return [];
+  }
+}
+
+const BROWSER_PIDS_MAX = 200;
+
+// Records the job's browser processes (procs, else a fresh scan). Never fatal.
+function recordBrowserPids(repo, job, procs = null) {
+  try {
+    if (!repo || !job?.id) return;
+    const found = procs || browsers.selectReap(browsers.scanBrowsers(), { jobId: job.id, prefix: browserPrefix(job) });
+    if (!found.length) return;
+    const known = readBrowserPids(repo, job.id);
+    const seen = new Set(known.map((r) => `${r.pid}:${r.startMs}`));
+    const at = new Date().toISOString();
+    const add = found.filter((p) => p.startMs && !seen.has(`${p.pid}:${p.startMs}`)).map((p) => ({ pid: p.pid, startMs: p.startMs, worker: p.worker || brand.SESSION_RE.exec(p.session || "")?.[2] || "", session: p.session || "", at }));
+    if (!add.length) return;
+    mkdirSync(jobDir(repo, job.id), { recursive: true });
+    const path = browserPidsPath(repo, job.id);
+    writeFileSync(`${path}.tmp`, JSON.stringify({ v: 1, pids: [...known, ...add].slice(-BROWSER_PIDS_MAX) }, null, 2) + "\n");
+    renameSync(`${path}.tmp`, path);
+  } catch {
+    // a record is a help for cleanup, never a reason to fail a command
+  }
+}
+
+// Live herdr pane ids, or null when herdr cannot say.
+function livePaneIds() {
+  const got = herdr(["pane", "list"], 10000);
+  const panes = got.json?.result?.panes;
+  return got.code === 0 && Array.isArray(panes) ? new Set(panes.map((p) => p?.pane_id).filter(Boolean)) : null;
 }
 
 function killBrowserProcs(procs, dry, log = console.log) {
@@ -1584,6 +1631,7 @@ function verifierPrompt(job, name, task, alias, round) {
     `Then send that line to the orchestrator:`,
     `herdr agent prompt ${job.agent} "<the one-line note>"`,
     `If that prompt is rejected because the orchestrator is busy, the files are enough.`,
+    `Your round ends with one last command: orka reap ${job.id} --worker ${name} (or ${ORKA} reap ${job.id} --worker ${name}). It records and kills every Chrome your round started; your pane stays open. To check, use a bracketed pattern so pgrep never matches itself: pgrep -af '[a]gent-browser-chrome'.`,
     ``,
     NEVER_CLOSE_PANES,
     `Finish wake is automatic from the orka CLI when it marks the job done, failed, or stopped. That is not your job. Do not run herdr-finish-watch. Do not run orka stop, orka done or orka webhook. Do not start another agent.`,
@@ -2093,6 +2141,7 @@ function cmdWorker(args) {
   if (job.status !== "running") fail(`job ${id} is ${job.status}, not running`);
   ensureJobDir(repo, job.id);
   setupDeps(repo, job);
+  recordBrowserPids(repo, job);
   if (role === "verifier") {
     archiveVerifierResult(repo, job, round - 1);
     reapPreviousVerifier(job);
@@ -2197,6 +2246,7 @@ function cmdStatus(args) {
     printVerifyStatus(repo, job);
     console.log(`  decisions: ${decisionRows(repo, job.id).length}`);
     if (job.verifier?.rounds && job.status === "running") recordVerifier(repo, job);
+    if (job.status === "running") recordBrowserPids(repo, job);
     if (verifierLine(job)) console.log(`  ${verifierLine(job)}`);
     printVerifierDetail(job);
     return;
@@ -2384,6 +2434,7 @@ function cmdDigest(args) {
   if (!id) fail("need: orka digest <id>");
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, id);
+  if (job.status === "running") recordBrowserPids(repo, job);
   const text = renderDigest(digestView(job), collectDigestFiles(repo, job));
   process.stdout.write(text.length < DIGEST_MAX ? `${text}\n` : text);
 }
@@ -3236,6 +3287,22 @@ function sweep(repo, { dry = false, thresholdMs, quiet = false, untagged = true,
     ...finished.flatMap((j) => browsers.selectReap(scan, { prefix: browserPrefix(j) })),
   ].filter((p) => !doomed.has(p.pid) && doomed.add(p.pid));
   count += killBrowserProcs(procs, dry, log).length;
+  // Browsers whose job or pane no longer exists (by tag, session or process cwd),
+  // then recorded pids of finished jobs and of gone panes.
+  const panes = live.length ? livePaneIds() : null;
+  const gone = browsers.selectGone(scan.filter((p) => !doomed.has(p.pid)), { jobs, prefixOf: browserPrefix, worktreesRoot: join(brand.stateDir(repo), "worktrees"), livePanes: panes });
+  const goneWorker = (j, name) => {
+    const w = (j.workers || []).filter((x) => x.name === name).at(-1);
+    return Boolean(w && (w.closed || (panes && w.pane && !panes.has(w.pane))));
+  };
+  for (const j of jobs) {
+    if (j.keep) continue;
+    const records = readBrowserPids(repo, j.id).filter((r) => j.status !== "running" || goneWorker(j, r.worker));
+    if (j.status !== "queued" && records.length) gone.push(...browsers.selectRecorded(scan.filter((p) => !doomed.has(p.pid)), records));
+  }
+  const goneProcs = gone.filter((p) => !doomed.has(p.pid) && doomed.add(p.pid));
+  for (const p of goneProcs) log(`cleanup: browser pid ${p.pid} has no owner left (${p.why})`);
+  count += killBrowserProcs(goneProcs, dry, log).length;
   if (untagged) {
     const orphanProcs = browsers.selectOrphans(scan.filter((p) => !doomed.has(p.pid)), {
       minAgeMs: orphanMinAgeMs,
