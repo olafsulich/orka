@@ -54,7 +54,7 @@ esac`,
 }
 
 async function newJob(box, title = "int") {
-  const created = await orka(box, ["new", "--kind", "pi", "--title", title, "--goal", "g"]);
+  const created = await orka(box, ["new", "--kind", "pi", "--title", title, "--goal", "g", "--no-gate"]);
   assert.equal(created.status, 0, created.stderr);
   const id = created.stdout.trim();
   return { id, path: join(box.repo, ".orka", "jobs", `${id}.json`), record: join(box.repo, ".orka", "jobs", `${id}.finish.json`) };

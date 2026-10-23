@@ -75,7 +75,7 @@ test("new --spec refuses an uncommitted, missing, outside or empty spec", () => 
 test("the spec is pasted into the worker and verifier briefs; the orchestrator gets a pointer", () => {
   const t = specScratch();
   t.writeSpec("dark-mode", SAMPLE);
-  const id = t.orka(["new", "--spec", "specs/dark-mode"]).stdout.trim();
+  const id = t.orka(["new", "--spec", "specs/dark-mode", "--no-gate"]).stdout.trim();
   const run = t.orka(["run", id]);
   assert.equal(run.status, 0, run.stderr);
   const lead = t.calls();

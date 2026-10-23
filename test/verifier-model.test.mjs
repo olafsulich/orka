@@ -58,7 +58,7 @@ echo "  -h, --help        help"
   };
   const jobFile = (id) => join(repo, ".orka", "jobs", `${id}.json`);
   const read = (id) => JSON.parse(readFileSync(jobFile(id), "utf8"));
-  const mk = (...extra) => orka(["new", "--kind", "claude", "--title", "vm", "--goal", "g", ...extra]);
+  const mk = (...extra) => orka(["new", "--kind", "claude", "--title", "vm", "--goal", "g", "--no-gate", ...extra]);
   return { repo, log, orka, config, read, jobFile, mk, calls: () => readFileSync(log, "utf8") };
 }
 
@@ -95,11 +95,11 @@ test("haiku alias is accepted; an unknown alias is still rejected", () => {
   const id = t.mk("--verifier-model", "haiku").stdout.trim();
   assert.equal(t.read(id).verifierModel, "haiku");
   assert.equal(t.mk("--worker-model", "haiku").status, 0);
-  const bad = t.orka(["new", "--kind", "claude", "--title", "bad", "--goal", "g", "--verifier-model", "nope"]);
+  const bad = t.orka(["new", "--kind", "claude", "--title", "bad", "--goal", "g", "--no-gate", "--verifier-model", "nope"]);
   assert.notEqual(bad.status, 0);
   assert.match(bad.stderr, /unknown model alias "nope" for verifier/);
   assert.match(bad.stderr, /haiku/);
-  const pi = t.orka(["new", "--kind", "pi", "--title", "p", "--goal", "g", "--verifier-model", "haiku"]);
+  const pi = t.orka(["new", "--kind", "pi", "--title", "p", "--goal", "g", "--no-gate", "--verifier-model", "haiku"]);
   assert.notEqual(pi.status, 0);
 });
 
@@ -109,7 +109,7 @@ test("repo config verifierModel is the default; the flag beats it", () => {
   const a = t.mk().stdout.trim();
   assert.equal(t.read(a).verifierModel, "haiku");
   assert.equal(t.read(a).workerModel, "sonnet");
-  const b = t.orka(["new", "--kind", "claude", "--title", "vm2", "--goal", "g", "--verifier-model", "opus"]).stdout.trim();
+  const b = t.orka(["new", "--kind", "claude", "--title", "vm2", "--goal", "g", "--no-gate", "--verifier-model", "opus"]).stdout.trim();
   assert.equal(t.read(b).verifierModel, "opus");
   t.config({ verifierModel: "nope" });
   assert.notEqual(t.mk().status, 0, "an invalid configured alias is rejected");
@@ -131,7 +131,7 @@ test("run --verifier-model replaces it; a stored default does not follow a new w
   const r = t.orka(["run", id, "--worker-model", "opus"]);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(t.read(id).verifierModel, "haiku");
-  const id2 = t.orka(["new", "--kind", "claude", "--title", "vm3", "--goal", "g"]).stdout.trim();
+  const id2 = t.orka(["new", "--kind", "claude", "--title", "vm3", "--goal", "g", "--no-gate"]).stdout.trim();
   assert.equal(t.orka(["run", id2, "--verifier-model", "opus"]).status, 0);
   assert.equal(t.read(id2).verifierModel, "opus");
 });

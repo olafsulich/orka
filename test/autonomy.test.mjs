@@ -77,7 +77,7 @@ esac
   const setLevel = (level) => assert.equal(orka(["autonomy", "set", level]).status, 0);
   // A running job with a real worktree and one commit on its branch.
   const runningJob = () => {
-    const id = orka(["new", "--title", "aut", "--goal", "add a file"]).stdout.trim();
+    const id = orka(["new", "--title", "aut", "--goal", "add a file", "--no-gate"]).stdout.trim();
     const r = orka(["run", id]);
     assert.equal(r.status, 0, r.stderr);
     const job = read(id);

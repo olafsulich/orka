@@ -77,7 +77,7 @@ esac
 }
 
 function makeJob(t) {
-  const id = t.orka(["new", "--kind", "pi", "--title", "d", "--goal", "g"]).stdout.trim();
+  const id = t.orka(["new", "--kind", "pi", "--title", "d", "--goal", "g", "--no-gate"]).stdout.trim();
   const path = join(t.repo, ".orka", "jobs", `${id}.json`);
   const job = JSON.parse(readFileSync(path, "utf8"));
   Object.assign(job, { status: "running", pane: "p-orch", agent: "orch", worktree: join(t.repo, "wt") });
@@ -322,7 +322,7 @@ test("digest: delivery failed + results file shows no re-issue text; with nothin
 test("orka run marks the job failed when the orchestrator prompt never starts the agent", () => {
   const t = scratch();
   execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: t.repo });
-  const id = t.orka(["new", "--kind", "pi", "--title", "r", "--goal", "g"]).stdout.trim();
+  const id = t.orka(["new", "--kind", "pi", "--title", "r", "--goal", "g", "--no-gate"]).stdout.trim();
   const jobName = `j${id.replace(/[^a-z0-9]/g, "")}`.slice(0, 32);
   t.set("never", `${jobName}\n`);
   writeFileSync(
@@ -414,7 +414,7 @@ const surfaces = {
   },
   orchestrator: (t, failed) => {
     execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: t.repo });
-    const id = t.orka(["new", "--kind", "pi", "--title", "r", "--goal", "g"]).stdout.trim();
+    const id = t.orka(["new", "--kind", "pi", "--title", "r", "--goal", "g", "--no-gate"]).stdout.trim();
     if (failed) t.set("never", `j${id.replace(/[^a-z0-9]/g, "")}`.slice(0, 32) + "\n");
     withWorkspace(t);
     assert.equal(t.orka(["run", id]).status === 0, !failed);

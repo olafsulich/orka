@@ -95,7 +95,7 @@ function scratch() {
 }
 
 function makeJob(t, status = "running", extra = {}) {
-  const id = t.orka(["new", "--kind", "pi", "--title", "h", "--goal", "g"]).stdout.trim();
+  const id = t.orka(["new", "--kind", "pi", "--title", "h", "--goal", "g", "--no-gate"]).stdout.trim();
   const path = join(t.repo, ".orka", "jobs", `${id}.json`);
   const job = JSON.parse(readFileSync(path, "utf8"));
   Object.assign(job, { status, pane: "p-1", agent: "orch", workspace: "w-1", worktree: join(t.repo, "wt") }, extra);

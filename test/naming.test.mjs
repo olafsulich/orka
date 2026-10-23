@@ -52,7 +52,7 @@ echo '{}'
 }
 
 function makeJob(t) {
-  const id = t.orka(["new", "--kind", "pi", "--title", "n", "--goal", "g"]).stdout.trim();
+  const id = t.orka(["new", "--kind", "pi", "--title", "n", "--goal", "g", "--no-gate"]).stdout.trim();
   const path = join(t.repo, ".orka", "jobs", `${id}.json`);
   const job = JSON.parse(readFileSync(path, "utf8"));
   Object.assign(job, { status: "running", pane: "p-1", agent: "orch", worktree: join(t.repo, "wt") });
@@ -203,7 +203,7 @@ echo "  -h, --help        help"
   const cache = join(t.repo, ".orka", "cache", "claude-models.json");
   const orka = (args) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", t.repo], { encoding: "utf8", env: { ...process.env, ...t.env, XDG_CACHE_HOME: join(t.base, "xdg") } });
   const calls = () => readFileSync(counter, "utf8").split("\n").filter(Boolean).length;
-  const mk = (model) => orka(["new", "--kind", "claude", "--title", "m", "--goal", "g", "--worker-model", model]);
+  const mk = (model) => orka(["new", "--kind", "claude", "--title", "m", "--goal", "g", "--no-gate", "--worker-model", model]);
   assert.equal(mk("sonnet").status, 0);
   const first = calls();
   assert.ok(first >= 1);
