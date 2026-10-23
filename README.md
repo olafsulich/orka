@@ -44,7 +44,7 @@ Commands (full flags in [commands.md](docs/commands.md)):
 | `orka reap` / `cleanup` | free browsers / close stale workspaces |
 | `orka webhook <id>` | preview or retry the finish POST |
 | `orka watch <id>` | needs-input watcher and context handoff (started by `run`) |
-| `orka handoff <id>` | one context-handoff pass; `--dry-run` shows each worker's % |
+| `orka handoff <id> [<worker>\|orchestrator]` | one context-handoff pass; `--dry-run` shows each pane's %, window and its source; a name hands that pane off now |
 
 Key flags:
 
@@ -88,7 +88,7 @@ Config:
 | File | Purpose |
 | --- | --- |
 | `.orka/config.json` | local mark; `verify`, `verifierModel`, `staleAfter`, `handoff` |
-| `handoff` | `{"threshold": 0.5, "contextWindow": 200000, "orchestrator": false}` or `false`; idle builders past the threshold hand off to a fresh pane ([handoff.md](docs/handoff.md)) |
+| `handoff` | `{"threshold": 0.5, "orchestrator": true, "maxHandoffs": 3, "contextWindow": N}` or `false`; builders and the orchestrator past the threshold of their detected window write a note with the handoff skill and hand off to a fresh pane ([handoff.md](docs/handoff.md)) |
 | `orka.verify.json` | browser checks at the worktree root; commit it |
 | ports | 4 per job: `ORKA_PORT`, `ORKA_PORTS` |
 
