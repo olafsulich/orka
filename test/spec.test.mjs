@@ -103,3 +103,22 @@ test("a job without a spec gets no SPEC block", () => {
   t.orka(["worker", "--job", id, "--name", "builder", "--task", "GOAL: x\nSCOPE: a\nACCEPTANCE: b"]);
   assert.doesNotMatch(t.calls(), /SPEC \(/);
 });
+
+test("the direction gate reads Kind: from the spec: bugfix and trivial specs run ungated, feature specs are gated", () => {
+  const t = specScratch();
+  t.writeSpec("dark-mode", SAMPLE);
+  t.writeSpec("header-overlap", SAMPLE.replace("# Dark mode", "# Header overlap").replace("Kind: feature", "Kind: bugfix"));
+  t.writeSpec("readme-typo", SAMPLE.replace("# Dark mode", "# Readme typo").replace("Kind: feature", "Kind: trivial"));
+  const feature = t.read(t.orka(["new", "--spec", "specs/dark-mode"]).stdout.trim());
+  assert.equal(feature.spec.kind, "feature");
+  assert.deepEqual(feature.gate, { on: true, reason: "new feature", state: "planning" });
+  const bug = t.read(t.orka(["new", "--spec", "specs/header-overlap"]).stdout.trim());
+  assert.equal(bug.spec.kind, "bugfix");
+  assert.deepEqual(bug.gate, { on: false, reason: "spec: Kind: bugfix" });
+  assert.deepEqual(t.read(t.orka(["new", "--spec", "specs/readme-typo"]).stdout.trim()).gate, { on: false, reason: "spec: Kind: trivial" });
+  // orka run --playbook re-decides the gate, and still reads the spec's kind.
+  const run = t.orka(["run", bug.id, "--playbook", "feature"]);
+  assert.equal(run.status, 0, run.stderr);
+  assert.deepEqual(t.read(bug.id).gate, { on: false, reason: "spec: Kind: bugfix" });
+  assert.match(t.orka(["status", bug.id]).stdout, /gate: off \(spec: Kind: bugfix\)/);
+});

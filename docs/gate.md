@@ -10,6 +10,7 @@ On by default for `--playbook feature` (the default). Off, with the reason store
 | --- | --- |
 | `orka new --no-gate` (or `orka run --no-gate` on a queued job) | `--no-gate` |
 | `--playbook bug-fix`, `investigation` or `hillclimb` | `playbook <name>` |
+| `orka new --spec` whose spec header says `Kind: bugfix`, `fix` or `trivial` | `spec: Kind: ...` |
 | title starts with fix, bug, bugfix, hotfix, typo or trivial | `intake: title names a fix or trivial change` |
 | a goal line `Kind: bugfix`, `Kind: fix` or `Kind: trivial` | `intake: Kind: ...` |
 
