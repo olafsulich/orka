@@ -1,0 +1,6 @@
+{"type":"user","message":{"role":"user","content":"You are a worker for orka job 1 (claude --model sonnet). Do this task and stop."},"sessionId":"s1"}
+{"type":"assistant","message":{"model":"claude-sonnet-5-5","role":"assistant","content":[{"type":"text","text":"reading"}],"usage":{"input_tokens":12,"cache_creation_input_tokens":4000,"cache_read_input_tokens":20000,"output_tokens":300}},"sessionId":"s1"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"a usage string inside a tool result"}]},"sessionId":"s1"}
+{"type":"assistant","message":{"model":"claude-sonnet-5-5","role":"assistant","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":5,"cache_creation_input_tokens":1824,"cache_read_input_tokens":123000,"output_tokens":90}},"sessionId":"s1"}
+{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"aborted"}],"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}},"sessionId":"s1"}
+{"type":"system","subtype":"turn_duration","durationMs":1200}

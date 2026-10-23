@@ -1,0 +1,5 @@
+{"type":"session","version":3,"id":"01a15980-0b1e-7754-8120-05f99223023b","timestamp":"2026-10-20T13:28:46.111Z","cwd":"/home/olaf/projects/orca"}
+{"type":"model_change","id":"8a3acb88","parentId":null,"provider":"xai","modelId":"grok-4.7"}
+{"type":"message","id":"m1","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}
+{"type":"message","id":"m2","message":{"role":"assistant","model":"grok-4.7","provider":"xai","content":[{"type":"text","text":"ok"}],"usage":{"input":82,"output":182,"cacheRead":89344,"cacheWrite":0,"reasoning":109,"totalTokens":89608}}}
+{"type":"message","id":"m3","message":{"role":"toolResult","content":[{"type":"text","text":"usage: foo"}]}}

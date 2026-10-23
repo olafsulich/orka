@@ -51,6 +51,8 @@ Commands (full flags in [commands.md](docs/commands.md)):
 | `orka push <id> [--pr]` | push the job branch, open a PR (L2) |
 | `orka land <id> [--push]` | merge into main, test, push (L3) |
 | `orka chain` | run the task queue one job at a time, land per level |
+| `orka watch <id>` | needs-input watcher and context handoff (started by `run`) |
+| `orka handoff <id> [<worker>\|orchestrator]` | one context-handoff pass; `--dry-run` shows each pane's %, window and its source; a name hands that pane off now |
 
 Key flags:
 
@@ -99,6 +101,8 @@ Config:
 | `~/.config/orka/config.json` | autonomy level per repo path (default L1) |
 | `.orka/config.json` | local mark; `verify`, `verifierModel`, `staleAfter`, `memoryGuard` |
 | `node_modules` in a job worktree | symlink to the main checkout's; real install when the lockfile differs |
+| `.orka/config.json` | local mark; `verify`, `verifierModel`, `staleAfter`, `handoff` |
+| `handoff` | `{"threshold": 0.5, "orchestrator": true, "maxHandoffs": 3, "busyPollMs": 5000, "contextWindow": N}` or `false`; builders and the orchestrator past the threshold of their detected window write a note with the handoff skill and hand off to a fresh pane ([handoff.md](docs/handoff.md)) |
 | `orka.verify.json` | browser checks at the worktree root; commit it |
 | ports | 4 per job: `ORKA_PORT`, `ORKA_PORTS` |
 

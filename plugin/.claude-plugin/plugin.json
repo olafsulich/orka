@@ -1,0 +1,5 @@
+{
+  "name": "orka",
+  "description": "Skills orka loads into its agent panes (claude --plugin-dir, pi --skill).",
+  "version": "0.0.1"
+}
