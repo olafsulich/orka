@@ -30,6 +30,7 @@ case "$1 $2" in
   "agent get")
     if [ ! -e "${base}/prompted" ]; then
       if [ ! -e "${base}/seen-$3" ]; then touch "${base}/seen-$3"; echo '{"error":{"code":"agent_not_found","message":"no"}}'; exit 1; fi
+      if [ -e "${base}/done-$3" ]; then echo '{"result":{"agent":{"agent_status":"done","interactive_ready":true,"pane_id":"p-split"}}}'; exit 0; fi
       echo '{"result":{"agent":{"agent_status":"idle","interactive_ready":true,"pane_id":"p-split"}}}'; exit 0
     fi
     echo '{"result":{"agent":{"agent_status":"working","pane_id":"p-split"}}}';;
@@ -66,6 +67,11 @@ esac
     fresh();
     writeFileSync(join(base, `seen-${agent}`), "");
   };
+  // Its turn ended and nobody looked: herdr reports done, not idle (what a real paused orchestrator shows).
+  const turnDone = (agent) => {
+    ready(agent);
+    writeFileSync(join(base, `done-${agent}`), "");
+  };
   const started = (...extra) => {
     const id = orka(["new", "--title", "dark mode", "--goal", "Add a dark mode toggle.", ...extra]).stdout.trim();
     const r = orka(["run", id]);
@@ -77,7 +83,7 @@ esac
     writeFileSync(join(dir(id), "approach.md"), text);
   };
   const decisions = (id) => (existsSync(join(dir(id), "decisions.tsv")) ? readFileSync(join(dir(id), "decisions.tsv"), "utf8") : "");
-  return { base, repo, orka, orkaAsync, read, dir, fresh, ready, started, writeApproach, decisions, calls: () => readFileSync(log, "utf8") };
+  return { base, repo, orka, orkaAsync, read, dir, fresh, ready, turnDone, started, writeApproach, decisions, calls: () => readFileSync(log, "utf8") };
 }
 
 function listen(hits) {
@@ -188,6 +194,21 @@ test("approve resumes the orchestrator and unlocks builders", () => {
   assert.equal(b.status, 0, b.stderr);
   assert.match(t.decisions(id), /\tgate\tapproved\tkeep it under 30 lines\t/);
   assert.match(t.orka(["propose", id]).stderr, /already approved/);
+});
+
+test("approve and the gate steer reach an orchestrator herdr reports as done (turn ended, not idle)", () => {
+  const t = scratch();
+  const id = t.started();
+  t.writeApproach(id);
+  t.orka(["propose", id]);
+  t.turnDone(t.read(id).agent);
+  const s = t.orka(["steer", id, "smaller"]);
+  assert.equal(s.status, 0, s.stderr);
+  t.orka(["propose", id]);
+  t.turnDone(t.read(id).agent);
+  const a = t.orka(["approve", id]);
+  assert.equal(a.status, 0, a.stderr);
+  assert.equal(t.read(id).gate.state, "approved");
 });
 
 test("approve refuses a job that is not waiting at the gate", () => {

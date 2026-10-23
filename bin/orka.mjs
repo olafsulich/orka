@@ -978,8 +978,8 @@ function agentInfo(name) {
 
 // The prompt gate: interactive_ready must be exactly true AND the status exactly idle. A missing
 // key or status, an error, blocked, working or done all mean "not ready".
-function isAgentReady(info) {
-  return Boolean(info) && info.interactive_ready === true && info.agent_status === "idle";
+function isAgentReady(info, statuses = ["idle"]) {
+  return Boolean(info) && info.interactive_ready === true && statuses.includes(info.agent_status);
 }
 
 // After the prompt was sent: working means it took. Blocked also counts: the agent received the
@@ -990,11 +990,11 @@ function isDelivered(status, sawWorking) {
 }
 
 // Blocks until isAgentReady(info), polling until READY_WAIT_MS; anything else keeps polling.
-function waitAgentReady(name) {
+function waitAgentReady(name, statuses) {
   const deadline = Date.now() + READY_WAIT_MS;
   let info = agentInfo(name);
   for (;;) {
-    if (isAgentReady(info)) return { ready: true };
+    if (isAgentReady(info, statuses)) return { ready: true };
     if (Date.now() >= deadline) return { ready: false, status: info.agent_status, interactiveReady: info.interactive_ready };
     sleep(PROMPT_POLL_MS);
     info = agentInfo(name);
@@ -1034,8 +1034,9 @@ function sendAndWatch(name, text, attempt) {
 // agent_status working as delivered (the text showing up in the pane is not enough). Up to
 // ORKA_PROMPT_ATTEMPTS attempts with backoff. Returns { ok, attempts, reason }; never throws on a
 // missed start, so callers can record delivery: failed before exiting.
-function promptWithRetry(name, text) {
-  const ready = waitAgentReady(name);
+// readyStatuses: the handoff also prompts an agent herdr reports as done (finished, not looked at).
+function promptWithRetry(name, text, { readyStatuses } = {}) {
+  const ready = waitAgentReady(name, readyStatuses);
   if (!ready.ready) {
     return { ok: false, attempts: 0, reason: `delivery failed: agent ${name} not ready after ${Math.round(READY_WAIT_MS / 1000)}s (last status ${ready.status}, interactive_ready ${ready.interactiveReady})` };
   }
@@ -1725,6 +1726,8 @@ function gateLine(job) {
 }
 
 const gatePending = (job) => Boolean(job.gate?.on) && job.gate.state !== "approved";
+// An orchestrator paused at the gate has ended its turn; herdr reports that as done, never idle.
+const GATE_READY = ["idle", "done"];
 
 async function cmdNew(args) {
   if ("model" in args) fail("use --worker-model on orka new, not --model");
@@ -2331,7 +2334,7 @@ function cmdSteer(args) {
   const digest = renderDigest(digestView(job), collectDigestFiles(repo, job));
   // At the gate a steer revises the plan: the orchestrator rewrites approach.md and proposes again.
   const text = awaiting ? `Direction gate: Olaf asks you to revise the approach, not to build yet.\n${message}\nUpdate ${join(jobDir(repo, id), "approach.md")}, run orka propose ${id} again, and wait.` : message;
-  const sent = promptWithRetry(job.agent, steerText(digest, text));
+  const sent = promptWithRetry(job.agent, steerText(digest, text), awaiting ? { readyStatuses: GATE_READY } : {});
   const now = new Date().toISOString();
   if (!sent.ok) {
     job.steers = job.steers || [];
@@ -3341,7 +3344,7 @@ function cmdApprove(args) {
   if (job.status !== AWAITING) fail(`orka approve resumes a job waiting at the direction gate; ${id} is ${job.status}${job.gate?.on ? "" : ` (gate ${job.gate ? `off: ${job.gate.reason}` : "not used"})`}`);
   if (!job.agent || !agentExists(job.agent)) fail(`${id}: the orchestrator pane is gone; cannot resume`);
   const text = `Direction approved by Olaf${note ? `: ${note}` : "."}\nBuild it now, following ${join(jobDir(repo, id), "approach.md")}${note ? " and the note above" : ""}: split into worker tasks and continue with the flow in your first prompt.`;
-  const sent = promptWithRetry(job.agent, text);
+  const sent = promptWithRetry(job.agent, text, { readyStatuses: GATE_READY });
   if (!sent.ok) fail(`approve not delivered: ${sent.reason}; the job stays ${AWAITING}`);
   const now = new Date().toISOString();
   job.status = "running";
