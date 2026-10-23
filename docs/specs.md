@@ -61,4 +61,5 @@ Kept compact at append time (no nightly pass):
 - **Dedupe:** the same kind and text (case and punctuation ignored) is not added twice. A follow-up round of the same job adds only new lessons; another job hitting it bumps ` xN` and the date.
 - **Cap:** at most 20 lesson lines. Over that, the lines with the lowest count, oldest first, fold into one `compressed: N older lessons folded` line. The full text stays in the git history of the spec.
 - The spec is excluded from the job's patch id, so the lessons commit never makes a verifier pass stale.
+- At autonomy L0 (read-only, see [autonomy.md](autonomy.md)) nothing is written or committed: `lessons: skipped (N found; the repo is at autonomy L0, read-only: no lessons commit)`, plus a `lessons ... skipped` row in decisions.tsv.
 - `orka done --dry-run` prints `lessons: would update ...` and writes nothing. `orka status <id>` shows the counts and the commit; decisions.tsv gets a `lessons` row.

@@ -2546,6 +2546,12 @@ function appendSpecLessons(repo, job, { dry = false } = {}) {
   const rows = decisionRows(repo, job.id).map((row) => row.split("\t"));
   const lessons = specs.collectLessons({ job, rows, evidence: checkEvidence(repo, job) });
   if (!lessons.length) return say("none to add");
+  // L0 is read-only: the commit would be refused, and a written but uncommitted spec would dirty the worktree.
+  const { level } = autonomy.readLevel(repo);
+  if (!autonomy.allows(level, "commit").ok) {
+    if (!dry) appendDecision(repo, job.id, ["lessons", `${lessons.length} not written`, `repo at autonomy ${level}, read-only`, "-", "skipped"]);
+    return say(`skipped (${lessons.length} found; the repo is at autonomy ${level}, read-only: no lessons commit)`);
+  }
   const before = readFileSync(path, "utf8");
   const merged = specs.mergeLessons(before, lessons, { date: new Date().toISOString().slice(0, 10), jobId: job.id });
   if (!merged.added && !merged.bumped) return say(`${lessons.length} already in ${job.spec.path}`);
