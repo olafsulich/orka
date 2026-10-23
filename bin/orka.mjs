@@ -1157,7 +1157,8 @@ async function assignPorts(repo, job) {
 // Shared prompt rules: each literal lives here once and is interpolated into the prompts that use it.
 const REVERSIBLE_RULE = `Reversible work never waits on a human. Irreversible actions (push, delete outside the worktree, external sends, purchases) stop and ask.`;
 const NEVER_CLOSE_PANES = `Never close panes (yours or anyone's, no herdr pane close): finished panes stay open, and orka frees them when the job is done or stopped.`;
-const COMMIT_BEFORE_DONE = (job) => `Commit the work on the job branch before orka done: orka done removes a done job's worktree (the branch stays), and keeps it only when it has uncommitted changes.`;
+const COMMIT_BEFORE_DONE = (job) =>
+  `Before orka done, commit everything in the worktree on the job branch${job.playbook === "investigation" ? "" : `, including the checks file and feature map the verifier wrote (${verifyFile(job.worktree)}, ${featureMapFile(job.worktree)}): they are meant to be committed`}. orka done removes a done job's worktree (the branch stays), and keeps it only when something is left uncommitted.`;
 const SUMMARY_FROM_DIFF = (job) => `Before orka done, run git diff ${job.baseCommit || `$(git merge-base ${brand.jobBranch(job)} main)`} (--stat plus a skim) and write summary.txt from the diff, not from the workers' claims.`;
 
 function portPromptLines(job) {
