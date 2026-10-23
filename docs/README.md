@@ -6,6 +6,7 @@
 - [autonomy.md](autonomy.md): L0-L3 per repo, the guard hooks, `orka push`, `orka land`, `orka chain`
 - [gate.md](gate.md): the direction gate, `orka propose`, `orka approve`, `--no-gate`
 - [review.md](review.md): review and sign-off, `orka review`, `orka approve` on a finished result, when `orka done` is refused
+- [doctor.md](doctor.md): `orka doctor`, the verifier's `blocked` verdict, what runs on a pane that does not start
 - [verify.md](verify.md): `orka verify` and `orka.verify.json`
 - [verifier.md](verifier.md): the verifier worker, rounds, stall, strategy, patch-id guard
 - [webhooks.md](webhooks.md): the finish wake and `orka webhook`

@@ -8,7 +8,7 @@ The verifier gets a fresh context in the same worktree. It runs:
 - the project's own checks (`npm test`, `npm run check`, when present in `package.json`);
 - targeted `agent-browser` checks against the goal's acceptance criteria, in one session named `<prefix>-verifier`, closed at the end.
 
-It must not edit product code. For every failing check it tests whether the failure is pre-existing: `orka verify <id> --base`, or the same project command at the base commit. It may author or extend `orka.verify.json` only to cover the goal's acceptance criteria. It never weakens or deletes a check to make it pass. It writes `results/verifier.json` and `notes/verifier.txt`, then prompts the orchestrator like any worker.
+It must not edit product code. For every failing check it tests whether the failure is pre-existing: `orka verify <id> --base`, or the same project command at the base commit. It may author or extend `orka.verify.json` only to cover the goal's acceptance criteria. It never weakens or deletes a check to make it pass. When it cannot test at all because of the environment it writes `"verdict": "blocked"` with the evidence instead: not a code failure, not a round, and orka runs `orka doctor` ([doctor.md](doctor.md)). It writes `results/verifier.json` and `notes/verifier.txt`, then prompts the orchestrator like any worker.
 
 ```json
 {
