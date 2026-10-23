@@ -4599,7 +4599,8 @@ async function cmdChain(args) {
       return true;
     }
     const models = [["orchestrator-model", brand.env("CHAIN_ORCHESTRATOR_MODEL")], ["worker-model", brand.env("CHAIN_WORKER_MODEL")]].flatMap(([flag, alias]) => (alias ? [`--${flag}`, alias] : []));
-    const made = self(["new", "--title", title, "--goal", goal, ...models, ...(vm ? ["--verifier-model", vm] : []), ...(on ? ["--stack-on", on] : [])]);
+    // The task file Olaf wrote is the approved direction: chained jobs skip the direction gate.
+    const made = self(["new", "--title", title, "--goal", goal, "--no-gate", ...models, ...(vm ? ["--verifier-model", vm] : []), ...(on ? ["--stack-on", on] : [])]);
     const id = (made.stdout || "").trim().split("\n").find((l) => /^\d{17}-/.test(l));
     if (!id) await stop(`orka new failed for task ${nn} (it is no longer in the queue; re-add the line '${nn}${vm ? ` ${vm}` : ""}' at the top): ${(made.stderr || "").trim().slice(0, 300)}`);
     writeFileSync(p.current, `${nn} ${id} ${attempt} ${vm || "-"}\n`);
