@@ -281,6 +281,31 @@ test("handoff.orchestrator is only a flag: logged, orchestrator untouched", () =
   assert.ok(!t.calls().some((c) => / orch( |$)/.test(c)));
 });
 
+test("the watcher follows the orchestrator to its new pane and asks no question while it hands off", async () => {
+  const { watchJob } = await import("../lib/watch.mjs");
+  const jobs = [
+    { id: "1", status: "running", pane: "p1", lead: { handoff: { state: "writing" } } },
+    { id: "1", status: "running", pane: "p1", lead: { handoff: { state: "writing" } } },
+    { id: "1", status: "running", pane: "p2", lead: { handoffs: [{ n: 1 }] } },
+    { id: "1", status: "done" },
+  ];
+  let i = 0;
+  const posted = [];
+  const read = [];
+  const logs = [];
+  const deps = {
+    loadJob: async () => jobs[Math.min(i++, jobs.length - 1)],
+    waitAgent: async () => "idle",
+    readPane: async (p) => (read.push(p), "question?"),
+    post: async (x) => posted.push(x),
+    log: (m) => logs.push(m),
+    sleep: async () => {},
+  };
+  await watchJob({ jobId: "1", agent: "orch", pane: "p1", deps, waitMs: 1, graceMs: 1 });
+  assert.equal(posted.length, 0);
+  assert.ok(logs.some((m) => /orchestrator pane is now p2 \(was p1\)/.test(m)), logs.join("\n"));
+});
+
 test("the watcher runs the handoff tick every poll, and a throwing tick does not stop it", async () => {
   const { watchJob } = await import("../lib/watch.mjs");
   let polls = 0;
