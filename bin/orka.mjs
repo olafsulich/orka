@@ -1208,6 +1208,15 @@ const REVERSIBLE_RULE = `Reversible work never waits on a human. Irreversible ac
 const NEVER_CLOSE_PANES = `Never close panes (yours or anyone's, no herdr pane close): finished panes stay open, and orka frees them when the job is done or stopped.`;
 const COMMIT_BEFORE_DONE = (job) =>
   `Before orka review, commit everything in the worktree on the job branch${job.playbook === "investigation" ? "" : `, including the checks file and feature map the verifier wrote (${verifyFile(job.worktree)}, ${featureMapFile(job.worktree)}): they are meant to be committed`}. orka done removes a done job's worktree (the branch stays), and keeps it only when something is left uncommitted.`;
+// Checkable acceptance and the choices made on Olaf's behalf: generic across CLIs, libraries, web apps,
+// research and visual work. Never a reason to wait for a human.
+const ACCEPTANCE_LINES = (job) => [
+  `ACCEPTANCE must be checkable: each line names its proof, preferably one outside the agents (a command and its expected output, a test, a number or threshold, an HTTP response, a file diff, or the job's reference artifact such as an image or golden file). When the goal, spec or incoming brief already names the proof, copy it as-is; do not re-interpret the goal.`,
+  `When no outside proof exists (taste or visual judgement), do not invent one and do not wait for an answer: make your first status line orka log ${job.id} plan "no external proof: <what is subjective>" "<why>" "-" "review is Olaf's", and say the same in the result, so Olaf knows that review is his.`,
+  `Every REPORT asks the worker to list its choices made: one line each, "chose X over Y because Z", for decisions the task left open.`,
+];
+const CHOICES_MADE = `summary.txt ends with "Choices made:", one line per decision you or the workers made on Olaf's behalf that the goal left open ("chose X over Y because Z", merged from the workers' REPORTs; "none" if there were none), so review targets those, not the whole diff.`;
+
 const SUMMARY_FROM_DIFF = (job) => `Before orka review, run git diff ${job.baseCommit || `$(git merge-base ${brand.jobBranch(job)} main)`} (--stat plus a skim) and write summary.txt from the diff, not from the workers' claims.`;
 
 function portPromptLines(job) {
@@ -1747,7 +1756,7 @@ const FEATURE_FLOW = (job, dir) => ({
   verify: [
     `When every builder has reported, start ONE verifier. It has fresh context and checks the work against the goal. Every round uses the same command; orka names the panes verifier, verifier-2, verifier-3... and each round overwrites ${dir}/results/${VERIFIER_NAME}.json (the previous one is kept as verifier.round-N.json):`,
     `  orka worker --job ${job.id} --name ${VERIFIER_NAME} --role verifier --task "<what was built and the acceptance criteria>"`,
-    `Build the verifier --task from the builders' ACCEPTANCE lines (copy them in, one per builder), plus the job goal.`,
+    `Build the verifier --task from the builders' ACCEPTANCE lines (copy them in with their proof, one per builder), plus the job goal.`,
     `The verifier runs orka verify, the project's own checks and targeted agent-browser checks, and may extend ${verifyFile(job.worktree)} only to cover the acceptance criteria.`,
     `It writes ${dir}/results/${VERIFIER_NAME}.json: "verdict" pass or fail, "failures" (blocking: what this job changed, each with its evidence) and "warnings" (pre-existing failures the verifier showed also fail on the base commit; they never block a pass).`,
     `If the verdict is fail, read ${dir}/results/${VERIFIER_NAME}.json and route each blocking failure WITH its evidence to the builder that owns those files (a new or resumed builder worker). Ignore warnings for routing. Wait for their reports, then start the verifier again.`,
@@ -1826,6 +1835,7 @@ function orchestratorPrompt(job) {
     `If orka is not on PATH, run ${ORKA} instead. The binary is the same file.`,
     `orka worker waits (queues) while memory or panes are tight, up to ${Math.round(guardLimitsOf(job.repo).waitMs / 60000)} minutes, then refuses. Give that call a long timeout (600000 ms) or run it in the background.`,
     `Write every worker --task as this brief, one labelled section per line: GOAL / SCOPE (files it owns) / CONTEXT (file pointers, not pasted text) / ACCEPTANCE / VERIFY / TIMEBOX / FORBIDDEN / REPORT. Workers cannot ask questions, so a vague task fails quietly.`,
+    ...ACCEPTANCE_LINES(job),
     `When ${featureMapFile(job.worktree)} exists at the repo root, point workers at it in CONTEXT.`,
     ...(job.spec?.path ? [`This job has a spec: ${job.spec.path} in the worktree. orka pastes it into every worker and verifier brief, so do not copy it into a --task. Every "Done when" line of it goes into the verifier --task as an acceptance criterion.`] : []),
     ...(PLAYBOOK_ORCHESTRATOR_LINES[job.playbook] || PLAYBOOK_ORCHESTRATOR_LINES.feature)(dir),
@@ -1850,6 +1860,7 @@ function orchestratorPrompt(job) {
     ...flow.verify,
     ``,
     SUMMARY_FROM_DIFF(job),
+    CHOICES_MADE,
     COMMIT_BEFORE_DONE(job),
     `Before orka review, run orka digest ${job.id}, use it only for ${flow.digestUse}; write ${dir}/summary.txt ${flow.summaryFrom} (per the rule above), and set the summary field. Do not load the job JSON into the turn to copy fields.`,
     ...flow.done,
