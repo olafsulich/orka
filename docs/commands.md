@@ -19,7 +19,7 @@ orka log <id> <phase> <decision> <why> <evidence> <result>
 orka cleanup [--dry-run] [--older-than 12h] [--orphan-hours 2] [--cwd <repo>]
 orka reap <id> [--worker <name>] [--dry-run] [--cwd <repo>]   # closes browsers only; panes stay
 orka watch <id> [--dry-run] [--cwd <repo>]   # started by orka run, not for hand use
-orka handoff <id> [<worker>|orchestrator] [--dry-run] [--cwd <repo>]   # one context-handoff pass; the watcher runs it every poll
+orka handoff <id> [<worker>|orchestrator] [--dry-run] [--cwd <repo>]   # one context-handoff pass; the watcher runs it every poll (5 s while a measured pane works)
 orka webhook <id> [--dry-run] [--force] [--cwd <repo>]
 orka verify <id> [--base] [--dry-run] [--cwd <repo>]
 orka help

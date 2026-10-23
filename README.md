@@ -88,7 +88,7 @@ Config:
 | File | Purpose |
 | --- | --- |
 | `.orka/config.json` | local mark; `verify`, `verifierModel`, `staleAfter`, `handoff` |
-| `handoff` | `{"threshold": 0.5, "orchestrator": true, "maxHandoffs": 3, "contextWindow": N}` or `false`; builders and the orchestrator past the threshold of their detected window write a note with the handoff skill and hand off to a fresh pane ([handoff.md](docs/handoff.md)) |
+| `handoff` | `{"threshold": 0.5, "orchestrator": true, "maxHandoffs": 3, "busyPollMs": 5000, "contextWindow": N}` or `false`; builders and the orchestrator past the threshold of their detected window write a note with the handoff skill and hand off to a fresh pane ([handoff.md](docs/handoff.md)) |
 | `orka.verify.json` | browser checks at the worktree root; commit it |
 | ports | 4 per job: `ORKA_PORT`, `ORKA_PORTS` |
 

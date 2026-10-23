@@ -31,7 +31,7 @@ The captures are in `test/fixtures/context/statusline-measured.json`. At the def
 
 ## When
 
-The watcher (`orka watch`, every poll, 30 s) runs one pass. `orka handoff <id>` runs the same pass by hand; `--dry-run` prints each pane's tokens, window, source, status and decision, and changes nothing. `orka handoff <id> <worker>|orchestrator` asks that pane now, with no threshold and no cap.
+The watcher (`orka watch`) runs one pass every poll: every `handoff.busyPollMs` (default 5 s) while the orchestrator or a measured builder is working (one `herdr agent list` tells), every 30 s otherwise. The 60 s idle grace before a needs-input alert is cut into the same slices, so a busy worker is still measured while the lead waits. `orka handoff <id>` runs the same pass by hand; `--dry-run` prints each pane's tokens, window, source, status and decision, and changes nothing. `orka handoff <id> <worker>|orchestrator` asks that pane now, with no threshold and no cap.
 
 A pane is due when all hold:
 - it is a builder worker (the verifier is exempt, since it is fresh each round) that is not closed or retired, has a session id and has no `results/<name>.json` yet; or it is the orchestrator, unless `"orchestrator": false`;
@@ -43,7 +43,16 @@ What happens then depends on the herdr status:
 - `working`: orka types a message without waiting for idle. Claude and Pi queue it and give it to the model after the current tool call, so the turn is not interrupted. The message asks the agent to run the handoff skill at its next clean stopping point, then end its turn. State `nudged`. If the agent ends its turn without a note, orka runs the skill command itself after `ORKA_HANDOFF_NUDGE_GRACE_MS` (20 s) of idle.
 - `blocked` or unknown: wait.
 
-Overshoot: the check runs once per watcher poll, so the pane can grow by whatever it reads in one poll. One parallel batch of reads can take it far past the cap (measured: 5% to 95% in one haiku turn).
+Overshoot: a working pane is measured within about `busyPollMs` of each new turn in its transcript, so the ask comes on the first turn past the cap. Two limits remain:
+- One parallel batch is atomic. Claude writes its messages to the transcript only when the whole batch is done, so a single batch of 30 large reads (5% to 73%) cannot be stopped halfway.
+- The ask is queued after the current tool call, and the agent decides when it has reached a clean stopping point. Haiku finished its batch, or its whole step, before writing the note.
+
+Smoke, haiku, threshold 0.5, reads in parallel batches of 10 (~22% each):
+
+| Pane | 30 s poll (before) asked / note | 5 s busy poll asked / note |
+|---|---|---|
+| orchestrator | 95% / 95% | 58% / 95% |
+| worker | 52% / 59% (one read per call) | 58% / finished its task at 65% before writing the note |
 
 ## The note
 
@@ -71,10 +80,10 @@ No handoff closes a pane. Old worker and old orchestrator panes stay open and id
 ## Config
 
 ```json
-"handoff": { "threshold": 0.5, "orchestrator": true, "maxHandoffs": 3, "contextWindow": 1000000 }
+"handoff": { "threshold": 0.5, "orchestrator": true, "maxHandoffs": 3, "busyPollMs": 5000, "contextWindow": 1000000 }
 ```
 
-`"handoff": false` (or `"enabled": false`) turns it off. Every key is optional.
+`"handoff": false` (or `"enabled": false`) turns it off. `"busyPollMs": 0` keeps the 30 s poll while panes work. Every key is optional.
 
 ## Not built
 
