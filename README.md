@@ -34,6 +34,7 @@ Commands (full flags in [commands.md](docs/commands.md)):
 | --- | --- |
 | `orka init` | mark the repo, gitignore `.orka/` |
 | `orka new` | file a job (title, goal) |
+| `orka spec init <feature>` | scaffold `specs/<feature>/spec.md` ([specs.md](docs/specs.md)) |
 | `orka run <id>` | worktree, pane, orchestrator, watcher |
 | `orka worker` | start a builder or verifier worker |
 | `orka status` / `digest` | show a job / capped snapshot |
@@ -52,6 +53,7 @@ Key flags:
 | `--kind claude\|pi` | agent kind (default `claude`) |
 | `--*-model <alias>` | orchestrator, worker or verifier model |
 | `--max-rounds N` | opt-in ceiling on verifier rounds |
+| `--spec <path>` | build the job from a committed spec |
 | `--ui`, `--playbook` | UI job; feature, bug-fix, investigation, hillclimb |
 | `--keep` | skip cleanup for this job |
 | `--dry-run` | print the plan, change nothing |
