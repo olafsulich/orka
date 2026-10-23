@@ -47,7 +47,6 @@ Commands (full flags in [commands.md](docs/commands.md)):
 | `orka verify <id>` | browser checks in the worktree |
 | `orka reap` / `cleanup` | free browsers / sweep finished jobs: browsers, done worktrees, stale workspaces (only when you run it) |
 | `orka webhook <id>` | preview or retry the finish POST |
-| `orka watch <id>` | needs-input watcher (started by `run`) |
 | `orka autonomy [set <L0-L3>]` | per-repo level, CLI-enforced ([autonomy.md](docs/autonomy.md)) |
 | `orka push <id> [--pr]` | push the job branch, open a PR (L2) |
 | `orka land <id> [--push]` | merge into main, test, push (L3) |
@@ -98,11 +97,9 @@ Config:
 
 | File | Purpose |
 | --- | --- |
-| `.orka/config.json` | local mark; `verify`, `verifierModel`, `staleAfter` |
 | `~/.config/orka/config.json` | autonomy level per repo path (default L1) |
-| `.orka/config.json` | local mark; `verify`, `verifierModel`, `staleAfter`, `memoryGuard` |
 | `node_modules` in a job worktree | symlink to the main checkout's; real install when the lockfile differs |
-| `.orka/config.json` | local mark; `verify`, `verifierModel`, `staleAfter`, `handoff` |
+| `.orka/config.json` | local mark; `verify`, `verifierModel`, `staleAfter`, `memoryGuard`, `handoff` |
 | `handoff` | `{"threshold": 0.4, "orchestrator": true, "maxHandoffs": 3, "busyPollMs": 5000, "contextWindow": N}` or `false`; builders and the orchestrator past the threshold of their detected window (asked by their own Claude or Pi hook after a tool call, the watcher as fallback) write a note with the handoff skill and hand off to a fresh pane ([handoff.md](docs/handoff.md)) |
 | `orka.verify.json` | browser checks at the worktree root; commit it |
 | ports | 4 per job: `ORKA_PORT`, `ORKA_PORTS` |
