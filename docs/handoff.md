@@ -95,6 +95,10 @@ The note goes to `<jobdir>/handoff/<name>-<n>.md` (`orchestrator-<n>.md` for the
 
 If the rename fails, nothing else happens (`handoff.state = "failed"`, reason recorded). If the split or the start fails, the rename is undone.
 
+## Wakes and steers across a handoff
+
+Worker finish wakes and queued steers go to whoever holds the orchestrator's name now. While the lead's handoff is in flight they are held, and the successor gets them once it is up: its hook delivers inbox steers at its first tool call ([workers.md](workers.md)). In the smoke, a steer sent during a forced `orka handoff <id> orchestrator` was delivered by the successor's Claude hook one second after it started.
+
 ## Panes
 
 No handoff closes a pane. Old worker and old orchestrator panes stay open and idle until `orka done`, `orka stop` or cleanup closes them with the other worker panes (never the current orchestrator pane). Each handoff keeps one more idle agent process (~300 MB) until then.

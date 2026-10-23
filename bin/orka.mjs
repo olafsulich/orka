@@ -19,6 +19,8 @@ import * as gatesLib from "../lib/gates.mjs";
 import * as guard from "../lib/guard.mjs";
 import * as context from "../lib/context.mjs";
 import * as handoffHook from "../lib/handoff-hook.mjs";
+import * as inbox from "../lib/inbox.mjs";
+import * as wake from "../lib/wake.mjs";
 import * as lifecycle from "../lib/lifecycle.mjs";
 import * as autonomy from "../lib/autonomy.mjs";
 import * as ports from "../lib/ports.mjs";
@@ -74,6 +76,7 @@ const VALUE_FLAGS = new Set([
   "orphan-hours",
   "worker",
   "spec",
+  "to",
   "hook",
   "accept",
 ]);
@@ -1385,11 +1388,9 @@ function workerPrompt(job, name, task, alias) {
     ...specPromptLines(job),
     `When finished, write ${result} as JSON:`,
     `{"worker":"${name}","ok":true,"result":"<what you did, a few sentences>"}`,
-    `Also write one line at ${note}.`,
-    `Then send that line to the orchestrator:`,
-    `herdr agent prompt ${job.agent} "<the one-line note>"`,
-    `If that prompt is rejected because the orchestrator is busy, the files are enough.`,
-    `The note and the herdr prompt are one line, at most 200 characters. Do not paste logs, diffs, or the job file. The orchestrator will run orka digest.`,
+    `Also write one line at ${note}: at most 200 characters, no logs, diffs or the job file.`,
+    `Do not message the orchestrator. When your turn ends with the result file written, orka sends it a short wake with your result; it runs orka digest for the rest.`,
+    `Messages for you (from the orchestrator or Olaf) may arrive between your tool calls as "orka inbox" text: read them and follow them.`,
     ``,
     `If SCOPE or ACCEPTANCE is missing from the task above, do the narrowest reading of it and say so in the result.`,
     ``,
@@ -1720,9 +1721,7 @@ function verifierPrompt(job, name, task, alias, round) {
     `{"name":"${name}","role":"verifier","round":${round},"verdict":"pass"|"fail","checks":[{"name":"...","outcome":"pass"|"fail"|"skipped","scope":"job"|"preexisting","notes":"..."}],"failures":[{"check":"<stable check name>","evidence":"<exact error, step, url, command output>"}],"warnings":[{"check":"...","evidence":"...","base":"<sha>","proof":"<how it was shown pre-existing, e.g. fails on base via orka verify --base>"}],"summary":"..."}`,
     `verdict is "pass" when failures is empty, even if warnings are present. failures are blocking and cover what this job changed; warnings are pre-existing or unrelated failures proven on the base commit. Use the same check name for the same check every round. Evidence must be concrete: the exact error, step, url or command output.`,
     `Also write one line at ${note}.`,
-    `Then send that line to the orchestrator:`,
-    `herdr agent prompt ${job.agent} "<the one-line note>"`,
-    `If that prompt is rejected because the orchestrator is busy, the files are enough.`,
+    `Do not message the orchestrator. When your turn ends with the result file written, orka sends it a short wake with your verdict.`,
     `Your round ends with one last command: orka reap ${job.id} --worker ${name} (or ${ORKA} reap ${job.id} --worker ${name}). It records and kills every Chrome your round started; your pane stays open. To check, use a bracketed pattern so pgrep never matches itself: pgrep -af '[a]gent-browser-chrome'.`,
     ``,
     NEVER_CLOSE_PANES,
@@ -1849,8 +1848,8 @@ function orchestratorPrompt(job) {
           ...flow.modelNote,
         ]),
     ``,
-    `Each worker writes ${dir}/results/<name>.json and a one-line note at ${dir}/notes/<name>.txt,`,
-    `then prompts you with that note. Do not trust a worker that skipped them.`,
+    `Each worker writes ${dir}/results/<name>.json and a one-line note at ${dir}/notes/<name>.txt. Workers never message you: when a worker's turn ends with its result file written, orka sends you one short "orka wake: worker <name> finished" message (state, commits, the start of the result; the full text stays on disk). Do not poll for results or wait on a worker ping.`,
+    `To send a worker a message mid-task, use orka steer ${job.id} --to <worker> "<message>": it lands in that worker's inbox and reaches it at its next tool call (or at once when it is idle). Never type into a worker pane yourself.`,
     flow.digest,
     `The finish wake is sent by the orka CLI when orka done marks the job done (or when the job goes failed or stopped). Do not run herdr-finish-watch. Do not run orka stop or orka webhook.`,
     ``,
@@ -2992,6 +2991,99 @@ function handoffBusy(repo, id) {
   return agents.some((a) => names.has(a.name) && a.agent_status === "working");
 }
 
+// Harness-sent wake and inbox delivery (docs/workers.md). The watcher runs this every poll:
+// 1. a worker or verifier whose turn ended with its result file written gets one wake to the current
+//    orchestrator (held while the orchestrator hands off; queued mid-turn while it works);
+// 2. steers waiting in an inbox go to an idle target with herdr agent prompt (its hook delivers them
+//    between tool calls while it works). Always to whichever pane holds the name now.
+function wakeTick(repo, id, { log = console.log, dry = false } = {}) {
+  const job = load(repo, id);
+  const seen = [];
+  if (job.status !== "running" || !job.agent) return seen;
+  const dir = jobDir(repo, id);
+  const leadHandoff = PENDING.has(job.lead?.handoff?.state);
+  for (const w of job.workers || []) {
+    if (!w?.result || w.retired) continue;
+    const key = wake.wakeKey(w.name, w.result);
+    if (!key || job.wakes?.[key]) continue;
+    const status = agentStatus(w.name);
+    if (status === "working" || status === "blocked") {
+      seen.push({ kind: "wake", worker: w.name, state: `waiting: ${w.name} is ${status}` });
+      continue;
+    }
+    if (leadHandoff) {
+      seen.push({ kind: "wake", worker: w.name, state: "held: the orchestrator is handing off" });
+      continue;
+    }
+    const lead = agentStatus(job.agent);
+    const mode = context.SAFE_STATUSES.includes(lead) ? "now" : lead === "working" ? "queue" : "";
+    if (!mode) {
+      seen.push({ kind: "wake", worker: w.name, state: `held: orchestrator ${lead}` });
+      continue;
+    }
+    let raw = "";
+    try {
+      raw = readFileSync(w.result, "utf8");
+    } catch {
+      continue;
+    }
+    const got = wake.readResult(raw);
+    const commits = w.startedAt && job.worktree && existsSync(job.worktree) ? git(job.worktree, ["log", "--oneline", `-${wake.COMMIT_LINES}`, `--since=${w.startedAt}`]) : null;
+    const text = wake.wakeText({ jobId: id, worker: w.name, role: w.role, state: got.state, text: got.text, path: w.result, commits: commits && commits.code === 0 ? commits.out.split("\n").filter(Boolean) : null, undelivered: inbox.pendingTotal(dir) });
+    seen.push({ kind: "wake", worker: w.name, state: `wake ${mode === "now" ? "sent" : "queued mid-turn"}`, text });
+    if (dry) continue;
+    const sent = mode === "now" ? promptWithRetry(job.agent, text, { readyStatuses: context.SAFE_STATUSES }) : queuePrompt(job.agent, text);
+    if (!sent.ok) {
+      log(`wake ${w.name}: not delivered (${sent.reason}); retrying next poll`);
+      continue;
+    }
+    const at = new Date().toISOString();
+    updateJob(repo, id, (j) => {
+      j.wakes = { ...(j.wakes || {}), [key]: { worker: w.name, at, mode, agent: j.agent, pane: j.pane } };
+    });
+    appendDecision(repo, id, ["wake", `wake orchestrator: ${w.name} finished`, got.state, w.result, mode === "now" ? `delivered to ${job.agent} (${job.pane})` : `queued mid-turn for ${job.agent} (${job.pane})`]);
+    log(`wake ${w.name} -> ${job.agent} (${job.pane}): ${mode === "now" ? "delivered" : "queued mid-turn"}`);
+  }
+  for (const target of Object.keys(inbox.pendingCounts(dir))) {
+    const lead = target === "orchestrator";
+    const rec = lead ? job.lead : (job.workers || []).filter((w) => w.name === target && !w.retired).at(-1);
+    const name = lead ? job.agent : rec?.name;
+    if (!name) continue;
+    if (PENDING.has(rec?.handoff?.state)) {
+      seen.push({ kind: "steer", target, state: "held: handing off" });
+      continue;
+    }
+    const status = agentStatus(name);
+    if (!context.SAFE_STATUSES.includes(status)) {
+      seen.push({ kind: "steer", target, state: `left for its hook: ${status}` });
+      continue;
+    }
+    seen.push({ kind: "steer", target, state: "delivered by the watcher" });
+    if (dry) continue;
+    const entries = inbox.claim(dir, target, "watcher");
+    if (!entries.length) continue;
+    const sent = promptWithRetry(name, inbox.deliveryText(entries), { readyStatuses: context.SAFE_STATUSES });
+    if (!sent.ok) {
+      inbox.release(dir, target, entries);
+      log(`inbox ${target}: not delivered (${sent.reason}); back in the inbox`);
+      continue;
+    }
+    appendDecision(repo, id, ["steer", `inbox delivered to ${target}`, `${entries.length} message(s), agent idle`, inbox.deliveredDir(dir, target), `herdr prompt ${name}`]);
+    log(`inbox ${target}: ${entries.length} message(s) delivered to idle ${name}`);
+  }
+  return seen;
+}
+
+function cmdWake(args) {
+  allowFlags(args, ["cwd", "dry-run"]);
+  const id = args._[1];
+  if (!id) fail("need: orka wake <id> [--dry-run]");
+  const repo = requireRepo(args.cwd || process.cwd());
+  const seen = wakeTick(repo, String(id), { dry: Boolean(args["dry-run"]) });
+  for (const s of seen) console.log(`${s.kind} ${s.worker || s.target}: ${s.state}`);
+  if (!seen.length) console.log("nothing to wake or deliver");
+}
+
 function cmdHandoff(args) {
   allowFlags(args, ["cwd", "dry-run"]);
   const id = args._[1];
@@ -3062,6 +3154,8 @@ function cmdStatus(args) {
     for (const r of job.retiredLeads || []) console.log(`  orchestrator: ${r.name} pane=${r.pane} handed-off->${job.agent} (h${r.n}, pane open)`);
     for (const worker of job.workers || []) console.log(`  worker: ${worker.name} pane=${worker.pane} ${worker.model ? `model=${worker.model}` : "kind=pi"}${worker.role === "verifier" ? " role=verifier" : ""}${worker.delivery ? ` delivery=${worker.delivery}` : ""}${worker.closedUnused ? ` closed-unused (${worker.closedUnused.reason})` : ""}${worker.delivery === "failed" && worker.deliveryReason ? ` [${worker.deliveryReason}]` : ""}${handoffLabel(worker)}`);
     for (const steer of (job.steers || []).filter((x) => x?.delivery === "failed")) console.log(`  steer: ${String(steer.message ?? "").slice(0, 200).replace(/[\r\n]+/g, " ")} delivery=failed${steer.deliveryReason ? ` [${steer.deliveryReason}]` : ""}`);
+    const queued = inbox.pendingCounts(jobDir(repo, job.id));
+    if (Object.keys(queued).length) console.log(`  steer inbox: ${Object.entries(queued).map(([t, n]) => `${t} ${n}`).join(", ")} undelivered`);
     const summary = summaryOf(repo, job);
     if (summary) console.log(`  summary: ${summary}`);
     if (job.stopReason) console.log(`  stop: ${job.stopReason}`);
@@ -3173,7 +3267,7 @@ function digestView(job) {
   const workers = Array.isArray(job.workers)
     ? job.workers.map((worker) => ({ name: worker?.name, role: worker?.role, ...(worker?.retired ? { handedOffTo: worker.retired.by, handoffPct: worker.handoff?.pct } : {}) }))
     : [];
-  return { ...job, workers };
+  return { ...job, workers, inboxPending: inbox.pendingCounts(jobDir(job.repo, job.id)) };
 }
 
 function readCapped(path, maxBytes) {
@@ -3276,13 +3370,58 @@ function cmdDigest(args) {
   process.stdout.write(text.length < DIGEST_MAX ? `${text}\n` : text);
 }
 
+// A running job's steer goes through the inbox: delivered now when the target is idle, else by its
+// hook at the next tool call (or by the watcher once it is idle). --to <worker>: a worker's inbox.
+function steerInbox(repo, job, target, message) {
+  const id = job.id;
+  const dir = jobDir(repo, id);
+  const lead = target === "orchestrator";
+  const rec = lead ? job.lead : (job.workers || []).filter((w) => w.name === target && !w.retired).at(-1);
+  if (!lead && !rec) fail(`job ${id} has no live worker named ${target}`);
+  const name = lead ? job.agent : rec.name;
+  const from = brand.env("JOB") ? "orchestrator" : "olaf";
+  const text = lead ? steerText(renderDigest(digestView(job), collectDigestFiles(repo, job)), message) : `orka inbox: a message for you from the ${from}:\n${message}`;
+  const file = inbox.enqueue(dir, target, { from, message, text });
+  let delivery = "inbox";
+  let reason = "";
+  const status = agentStatus(name);
+  if (!PENDING.has(rec?.handoff?.state) && context.SAFE_STATUSES.includes(status)) {
+    const entries = inbox.claim(dir, target, "orka steer");
+    if (entries.length) {
+      const sent = promptWithRetry(name, inbox.deliveryText(entries), { readyStatuses: context.SAFE_STATUSES });
+      // A prompt that never started the agent may still sit in its input box: not re-queued, so it is
+      // never sent twice. The failure is recorded and reported, as before the inbox.
+      delivery = sent.ok ? "delivered" : "failed";
+      reason = sent.ok ? "" : sent.reason;
+    }
+  }
+  const now = new Date().toISOString();
+  job.steers = job.steers || [];
+  job.steers.push({ at: now, message, ...(lead ? {} : { to: target }), from, delivery, file, ...(reason ? { deliveryReason: reason } : {}) });
+  if (delivery === "failed") {
+    save(repo, job);
+    fail(`steer not delivered: ${reason}`);
+  }
+  if (lead) job.steered = now;
+  job.updated = now;
+  save(repo, job);
+  appendDecision(repo, id, ["steer", `steer ${target}`, message.slice(0, 200), file, delivery === "delivered" ? `delivered to idle ${name}` : `in the inbox (${status}); its hook delivers it at the next tool call, the watcher once it is idle`]);
+  console.log(delivery === "delivered" ? `steered ${id}${lead ? "" : ` (${target})`}` : `steer for ${target} queued in the inbox (${name} is ${status}); delivered at its next tool call, or by the watcher once idle`);
+}
+
 function cmdSteer(args) {
-  allowFlags(args, ["cwd"]);
+  allowFlags(args, ["cwd", "to"]);
   const id = args._[1];
   const message = args._.slice(2).join(" ").trim();
-  if (!id || !message) fail('need: orka steer <id> "message"');
+  if (!id || !message) fail('need: orka steer <id> [--to <worker>] "message"');
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, id);
+  if (args.to !== undefined) {
+    if (typeof args.to !== "string" || !args.to.trim()) fail("--to needs a worker name");
+    if (job.status !== "running") fail(`${id} is ${job.status}; a worker steer needs a running job`);
+    return steerInbox(repo, job, String(args.to).trim(), message);
+  }
+  if (job.status === "running" && job.agent) return steerInbox(repo, job, "orchestrator", message);
   const finished = FINISH_STATUSES.has(job.status);
   const awaiting = job.status === AWAITING;
   const inReview = job.status === REVIEW;
@@ -4360,7 +4499,10 @@ async function cmdWatch(args) {
     },
     repoExists: () => existsSync(repo),
     pathExists: (p) => existsSync(p),
-    tick: () => handoffTick(repo, id, { log }),
+    tick: () => {
+      wakeTick(repo, id, { log });
+      handoffTick(repo, id, { log });
+    },
     busy: () => handoffBusy(repo, id),
     post: async (payload) => {
       const cfg = readFinishConfig(repo);
@@ -4958,7 +5100,9 @@ function help() {
            never closed while the job runs; orka frees them on done/stop.
   orka status [id] [--cwd <repo>]
   orka digest <id> [--cwd <repo>]
-  orka steer <id> "message"   (also on a finished job whose orchestrator pane is still open: starts a follow-up round)
+  orka steer <id> [--to <worker>] "message"   (running job: via the target's inbox, delivered between tool calls or when idle;
+           also on a finished job whose orchestrator pane is still open: starts a follow-up round)
+  orka wake <id> [--dry-run]   (one pass of the watcher's finish wakes and inbox delivery; docs/workers.md)
   orka propose <id> [--dry-run]   (orchestrator, direction gate: approach.md written; pause and notify Olaf)
   orka review <id> [--dry-run]   (orchestrator: verifier passed, summary.txt written; status review, Olaf is notified)
   orka approve <id> ["note"]   (Olaf only; by status: awaiting-direction -> approves the plan, the orchestrator builds;
@@ -5173,6 +5317,7 @@ async function main() {
   else if (cmd === "approve") cmdApprove(args);
   else if (cmd === "review") await cmdReview(args);
   else if (cmd === "handoff") cmdHandoff(args);
+  else if (cmd === "wake") cmdWake(args);
   else fail(`unknown command ${cmd}\nrun: orka help`);
 }
 

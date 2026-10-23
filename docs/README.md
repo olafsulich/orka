@@ -6,6 +6,7 @@
 - [autonomy.md](autonomy.md): L0-L3 per repo, the guard hooks, `orka push`, `orka land`, `orka chain`
 - [gate.md](gate.md): the direction gate, `orka propose`, `orka approve`, `--no-gate`
 - [review.md](review.md): review and sign-off, `orka review`, `orka approve` on a finished result, when `orka done` is refused
+- [workers.md](workers.md): the harness-sent finish wake and the steer inbox (`orka steer --to`, hooks, watcher)
 - [verify.md](verify.md): `orka verify` and `orka.verify.json`
 - [gates.md](gates.md): static gates before every verifier round, base comparison, acceptance by gate
 - [verifier.md](verifier.md): the verifier worker, rounds, stall, strategy, patch-id guard
