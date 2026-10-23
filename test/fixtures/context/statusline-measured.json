@@ -1,0 +1,5 @@
+[
+  {"model":"claude-haiku-5-5","window":1000000,"note":"handoff smoke h2, Claude Code 2.1.309"},
+  {"at":"2026-10-23T09:29:09.739Z","sessionId":"ebd0e30e-e0ff-415c-94aa-f5ac48199850","model":"claude-opus-5-5","window":1000000,"tokens":50811,"pct":0.05},
+  {"at":"2026-10-23T09:29:03.912Z","sessionId":"f0d4bf7a-cfc5-4ec8-80a8-ae7930ee6d53","model":"claude-sonnet-5-5","window":1000000,"tokens":48184,"pct":0.05}
+]

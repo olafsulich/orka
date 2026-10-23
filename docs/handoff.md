@@ -19,7 +19,15 @@ The transcript holds no window size, and orka never guesses one. Per pane, the f
 2. `handoff.contextWindow`, an explicit user override: a number for every model, or `{"opus": 1000000, "/^grok-/": 256000}` (substring or `/regex/` on the model id).
 3. Nothing: the window is unknown. `orka status` shows `ctx=window-unknown`, one `decisions.tsv` row says so, and the pane is never handed off automatically. `orka handoff <id> <name>` still works.
 
-`orka status` shows `ctx=NN% of <W>k (<source>)` per worker and on the orchestrator's `agent:` line. Measured on Claude Code 2.1.309: `claude-haiku-5-5` reports 1,000k.
+`orka status` shows `ctx=NN% of <W>k (<source>)` per worker and on the orchestrator's `agent:` line. Measured on Claude Code 2.1.309 (statusline `context_window.context_window_size`, real orka panes, no `[1m]` suffix):
+
+| Model id | Window |
+|---|---|
+| `claude-haiku-5-5` | 1,000,000 |
+| `claude-opus-5-5` | 1,000,000 |
+| `claude-sonnet-5-5` | 1,000,000 |
+
+The captures are in `test/fixtures/context/statusline-measured.json`. At the default 0.5 every Claude pane hands off near 500k tokens.
 
 ## When
 

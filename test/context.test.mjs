@@ -67,6 +67,12 @@ test("window from the runtime: claude statusline capture first, then a [1m] mode
   assert.deepEqual(ctx.detectWindow({ kind: "claude", model: "claude-opus-5-5", alias: "opus[1m]" }), { window: 1000000, source: "model id opus[1m]" });
 });
 
+test("measured statusline captures (Claude Code 2.1.309): haiku, opus and sonnet all report 1,000k", () => {
+  const measured = JSON.parse(readFileSync(join(FIX, "statusline-measured.json"), "utf8"));
+  assert.deepEqual(measured.map((m) => m.model), ["claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5"]);
+  for (const capture of measured) assert.deepEqual(ctx.detectWindow({ kind: "claude", model: capture.model, capture }), { window: 1000000, source: "claude statusline" });
+});
+
 test("window from pi's model registry: models-store.json and models.json, provider/model of the session", () => {
   const h = home();
   mkdirSync(join(h, ".pi", "agent"), { recursive: true });
