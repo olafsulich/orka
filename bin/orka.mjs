@@ -17,6 +17,7 @@ import * as browsers from "../lib/browsers.mjs";
 import * as deps from "../lib/deps.mjs";
 import * as guard from "../lib/guard.mjs";
 import * as context from "../lib/context.mjs";
+import * as handoffHook from "../lib/handoff-hook.mjs";
 import * as lifecycle from "../lib/lifecycle.mjs";
 import * as autonomy from "../lib/autonomy.mjs";
 import * as ports from "../lib/ports.mjs";
@@ -2699,9 +2700,25 @@ function pendingStep(repo, id, slot, rec, { dry, log, seen }) {
   }
 }
 
+// A hook ask becomes a "nudged" handoff (mode hook): pendingStep then waits for the note, starts the
+// successor, and runs the skill itself if the agent ends its turn without a note.
+function adoptHookAsk(repo, job, slot, m, settings, { dry, log, seen }) {
+  seen.push({ name: slot.name, role: slot.role, tokens: m.tokens, window: m.window, source: m.source, pct: m.pct, status: "", due: false, why: `asked by its hook at ${context.pctLabel(m.pct)}` });
+  if (dry) return;
+  updateJob(repo, job.id, (j) => {
+    const r = slotRecord(j, slot);
+    if (r && !r.handoff) r.handoff = { state: "nudged", mode: "hook", n: m.n, note: m.note, tokens: m.tokens, window: m.window, source: m.source, pct: m.pct, at: m.at };
+  });
+  appendDecision(repo, job.id, ["handoff", `ask ${slot.name} for handoff note h${m.n}`, `context ${context.pctLabel(m.pct)} >= ${context.pctLabel(settings.threshold)} of ${m.window} (${m.source}); asked by its own ${slot.kind} hook after a tool call`, m.note, "nudged"]);
+  log(`handoff ${slot.name}: its hook asked at ${context.pctLabel(m.pct)} (${m.tokens}/${m.window}, ${m.source}) -> ${m.note}`);
+}
+
 // Measure one pane and act on it. force: orka handoff <id> <name> (no threshold, no cap; still
 // needs the agent idle, done or working).
 function measureStep(repo, job, slot, rec, settings, { dry, log, seen, force = false }) {
+  // The pane's own hook already asked this session: adopt that ask instead of asking again.
+  const marker = force ? null : handoffHook.readMarker(jobDir(repo, job.id), slot.sessionId);
+  if (marker) return adoptHookAsk(repo, job, slot, marker, settings, { dry, log, seen });
   const ctx = measurePane(repo, job, slot, settings);
   if (!ctx && !force) {
     seen.push({ name: slot.name, role: slot.role, state: "no usage" });

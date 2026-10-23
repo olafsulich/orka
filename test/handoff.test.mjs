@@ -141,6 +141,35 @@ test("a claude pane gets the handoff hook as PostToolUse next to the statusline"
   assert.match(hook.hooks[0].command, /lib\/handoff-hook\.mjs'? '?claude'? \S+\.json'? \S+'? \S+config\.json'?$/);
 });
 
+test("a pane whose own hook already asked is adopted, not asked again; the successor follows as usual", () => {
+  const t = scratch();
+  const j = makeJob(t);
+  startWorker(t, j);
+  const w = j.read().workers[0];
+  const note = join(j.dir, "handoff", "builder-1.md");
+  mkdirSync(join(j.dir, "context"), { recursive: true });
+  writeFileSync(join(j.dir, "context", `${w.sessionId}.hook.json`), JSON.stringify({ sessionId: w.sessionId, kind: "pi", role: "worker", name: "builder", n: 1, note, tokens: 89426, window: 200000, source: "pi runtime xai/grok-4.7", pct: 0.447, at: new Date().toISOString() }));
+  t.setStatus("builder", "working");
+  const r = t.orka(["handoff", j.id]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /its hook asked at 45%/);
+  assert.equal(t.prompts("builder").length, 1, "only the task: the poll path does not ask again");
+  const h = j.read().workers[0].handoff;
+  assert.deepEqual([h.state, h.mode, h.n, h.note, h.pct], ["nudged", "hook", 1, note, 0.447]);
+  assert.ok(j.decisions().some((d) => d.includes("asked by its own pi hook after a tool call")));
+  assert.equal(t.orka(["handoff", j.id]).status, 0);
+  assert.equal(t.prompts("builder").length, 1, "a second pass while the hook ask is in flight asks nothing");
+  mkdirSync(join(j.dir, "handoff"), { recursive: true });
+  writeFileSync(note, "## Remaining slice\nfinish part one\n");
+  t.setStatus("builder", "idle");
+  assert.equal(t.orka(["handoff", j.id]).status, 0);
+  const workers = j.read().workers;
+  assert.equal(workers.length, 2);
+  assert.equal(workers[0].name, "builder-h1");
+  assert.equal(workers[1].name, "builder");
+  assert.equal(workers[1].handoffs[0].mode, "hook");
+});
+
 test("below the threshold: measured and recorded, nobody prompted", () => {
   const t = scratch();
   const j = makeJob(t);
