@@ -2355,6 +2355,26 @@ function handoffTick(repo, id, { log = console.log, dry = false, only = "" } = {
   return seen;
 }
 
+// True when a pane the tick measures is working: the watcher then polls every handoff.busyPollMs
+// instead of every 30 s, so one batch of reads cannot run far past the cap between two checks.
+// One herdr agent list per call.
+function handoffBusy(repo, id) {
+  const settings = handoffSettingsOf(repo);
+  if (!settings.enabled || !settings.busyPollMs) return false;
+  const job = load(repo, id);
+  if (job.status !== "running" || !job.worktree) return false;
+  const names = new Set();
+  if (settings.orchestrator && job.agent && job.sessionId) names.add(job.agent);
+  for (const w of job.workers || []) {
+    if (!w?.sessionId) continue;
+    const resultExists = existsSync(join(jobDir(repo, id), "results", `${w.name}.json`));
+    if (PENDING.has(w.handoff?.state) || context.handoffCandidate(w, { resultExists })) names.add(w.name);
+  }
+  if (!names.size) return false;
+  const agents = herdr(["agent", "list"]).json?.result?.agents || [];
+  return agents.some((a) => names.has(a.name) && a.agent_status === "working");
+}
+
 function cmdHandoff(args) {
   allowFlags(args, ["cwd", "dry-run"]);
   const id = args._[1];
@@ -3570,7 +3590,10 @@ async function cmdWatch(args) {
     },
     repoExists: () => existsSync(repo),
     pathExists: (p) => existsSync(p),
-    tick: () => handoffTick(repo, id, { log }),
+    tick: () => {
+      handoffTick(repo, id, { log });
+      return { busy: handoffBusy(repo, id) };
+    },
     post: async (payload) => {
       const cfg = readFinishConfig(repo);
       if (cfg.off) return log("no finish webhook configured; needs-input not sent");
@@ -3581,7 +3604,7 @@ async function cmdWatch(args) {
     log,
   };
   log(`watching agent ${job.agent} pane ${job.pane}`);
-  const result = await watch.watchJob({ jobId: id, agent: job.agent, pane: job.pane, deps });
+  const result = await watch.watchJob({ jobId: id, agent: job.agent, pane: job.pane, deps, busyMs: handoffSettingsOf(repo).busyPollMs });
   log(`exit: ${result.exit}`);
 }
 

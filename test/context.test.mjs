@@ -109,7 +109,7 @@ test("statusline capture: readCapture gives the window lib/statusline.mjs wrote;
 });
 
 test("settings: default threshold 0.5, orchestrator on, cap 3, false or enabled:false turns it off, bad values fall back", () => {
-  assert.deepEqual(ctx.handoffSettings(undefined), { enabled: true, threshold: 0.5, orchestrator: true, contextWindow: null, maxHandoffs: 3 });
+  assert.deepEqual(ctx.handoffSettings(undefined), { enabled: true, threshold: 0.5, orchestrator: true, contextWindow: null, maxHandoffs: 3, busyPollMs: 5000 });
   assert.equal(ctx.handoffSettings(false).enabled, false);
   assert.equal(ctx.handoffSettings({ enabled: false }).enabled, false);
   assert.equal(ctx.handoffSettings({ threshold: 0.01 }).threshold, 0.01);
@@ -118,6 +118,10 @@ test("settings: default threshold 0.5, orchestrator on, cap 3, false or enabled:
   assert.equal(ctx.handoffSettings({ orchestrator: false }).orchestrator, false);
   assert.equal(ctx.handoffSettings({ maxHandoffs: 1 }).maxHandoffs, 1);
   assert.equal(ctx.handoffSettings({ maxHandoffs: -2 }).maxHandoffs, 3);
+  assert.equal(ctx.handoffSettings({ busyPollMs: 8000 }).busyPollMs, 8000);
+  assert.equal(ctx.handoffSettings({ busyPollMs: 0 }).busyPollMs, 0);
+  assert.equal(ctx.handoffSettings({ busyPollMs: 10 }).busyPollMs, 5000);
+  assert.equal(ctx.handoffSettings(false).busyPollMs, 0);
   assert.equal(ctx.capReached([{ n: 1 }], 1), true);
   assert.equal(ctx.capReached(undefined, 1), false);
 });
