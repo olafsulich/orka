@@ -4342,7 +4342,10 @@ function landJob(repo, job, { push = false, log = console.log, chainAuto = false
   const merged = git(repo, ["merge", "--no-ff", "--no-commit", branch]);
   if (merged.code !== 0) {
     git(repo, ["merge", "--abort"]);
-    fail(`merge conflict for ${branch}; merge aborted\n${(merged.out || merged.err).slice(0, 400)}`);
+    const text = `${merged.out}\n${merged.err}`;
+    // Only a real conflict is called one: a missing git identity or a dirty file fails here too.
+    const why = /CONFLICT/.test(text) ? "merge conflict" : `git merge failed: ${(merged.err || merged.out).split("\n").find((l) => l.trim()) || "unknown error"}`;
+    fail(`${why} for ${branch}; merge aborted\n${text.trim().slice(0, 400)}`);
   }
   let tested = "no test script";
   if (hasTestScript(repo)) {
