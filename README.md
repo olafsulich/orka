@@ -38,7 +38,7 @@ Commands (full flags in [commands.md](docs/commands.md)):
 | `orka run <id>` | worktree, pane, orchestrator, watcher |
 | `orka worker` | start a builder or verifier worker |
 | `orka status` / `digest` | show a job, free memory, live panes, worker queue / capped snapshot |
-| `orka steer <id> "msg"` | message the lead; follow-up round on a finished job |
+| `orka steer <id> [--to <worker>] "msg"` | message the lead (or a worker) through its inbox; follow-up round on a finished job ([workers.md](docs/workers.md)) |
 | `orka propose <id>` | orchestrator: pause at the direction gate, notify ([gate.md](docs/gate.md)) |
 | `orka approve <id>` | resume a job waiting at the direction gate |
 | `orka stop` / `done` | end a job; send the finish wake |

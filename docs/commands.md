@@ -13,7 +13,8 @@ orka worker --job <id> --name <agent> --task "..." [--model <alias>] [--dry-run]
 orka worker --job <id> --name verifier --role verifier --task "<built + acceptance criteria>"
 orka status [id] [--cwd <repo>]
 orka digest <id> [--cwd <repo>]
-orka steer <id> "message"
+orka steer <id> [--to <worker>] "message"
+orka wake <id> [--dry-run]
 orka propose <id> [--dry-run]
 orka approve <id> ["note"]
 orka stop <id> [reason] [--dry-run] [--keep]
@@ -43,7 +44,7 @@ orka help
 
 `digest` prints a capped snapshot of the job and does not change it.
 
-`steer` prompts the lead agent with a capped digest plus the message, and records only that message on the job. It also works on a `done`, `failed` or `stopped` job whose orchestrator pane still exists: that starts a follow-up round (see [follow-up.md](follow-up.md)).
+`steer` on a running job writes the message (with a capped digest for the lead) to the target's steer inbox: delivered at once when the target is idle, else by its hook between tool calls or by the watcher once idle. `--to <worker>` messages a worker the same way. It records only the message on the job; digest and status count what is still undelivered. `wake` runs one pass of the watcher's finish wakes and inbox delivery ([workers.md](workers.md)). It also works on a `done`, `failed` or `stopped` job whose orchestrator pane still exists: that starts a follow-up round (see [follow-up.md](follow-up.md)).
 
 `propose` is run by the orchestrator of a gated job after planning: it reads `approach.md` from the job dir, sets `awaiting-direction` and POSTs the approach once. `approve` resumes that job; `steer` on it asks for a revised approach instead. Builders and the verifier are refused until approval; `--no-gate` on `new` (or `run`) skips the gate. See [gate.md](gate.md).
 

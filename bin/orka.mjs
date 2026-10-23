@@ -4814,7 +4814,9 @@ function help() {
            never closed while the job runs; orka frees them on done/stop.
   orka status [id] [--cwd <repo>]
   orka digest <id> [--cwd <repo>]
-  orka steer <id> "message"   (also on a finished job whose orchestrator pane is still open: starts a follow-up round)
+  orka steer <id> [--to <worker>] "message"   (running job: via the target's inbox, delivered between tool calls or when idle;
+           also on a finished job whose orchestrator pane is still open: starts a follow-up round)
+  orka wake <id> [--dry-run]   (one pass of the watcher's finish wakes and inbox delivery; docs/workers.md)
   orka propose <id> [--dry-run]   (orchestrator, direction gate: approach.md written; pause and notify Olaf)
   orka approve <id> ["note"]   (resume a job waiting at the direction gate; orka steer revises the plan instead)
   orka new ... --no-gate   (skip the direction gate; it is on for new-feature jobs, off for other playbooks and fixes)

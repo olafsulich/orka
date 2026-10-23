@@ -5,6 +5,7 @@
 - [specs.md](specs.md): committed feature specs, `orka spec init`, `orka new --spec`
 - [autonomy.md](autonomy.md): L0-L3 per repo, the guard hooks, `orka push`, `orka land`, `orka chain`
 - [gate.md](gate.md): the direction gate, `orka propose`, `orka approve`, `--no-gate`
+- [workers.md](workers.md): the harness-sent finish wake and the steer inbox (`orka steer --to`, hooks, watcher)
 - [verify.md](verify.md): `orka verify` and `orka.verify.json`
 - [verifier.md](verifier.md): the verifier worker, rounds, stall, strategy, patch-id guard
 - [webhooks.md](webhooks.md): the finish wake and `orka webhook`
