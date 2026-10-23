@@ -9,7 +9,8 @@
     "orca": "./bin/orca.mjs"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "lint": "node scripts/lint.mjs"
   },
   "engines": {
     "node": ">=22"

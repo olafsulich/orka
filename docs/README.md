@@ -2,6 +2,7 @@
 
 - [commands.md](commands.md): every command and flag, in detail
 - [models.md](models.md): model aliases, defaults, the verifier model, Pi jobs
+- [specs.md](specs.md): committed feature specs, `orka spec init`, `orka new --spec`
 - [verify.md](verify.md): `orka verify` and `orka.verify.json`
 - [verifier.md](verifier.md): the verifier worker, rounds, stall, strategy, patch-id guard
 - [webhooks.md](webhooks.md): the finish wake and `orka webhook`
