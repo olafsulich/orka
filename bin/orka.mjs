@@ -13,6 +13,7 @@ import { parseEnv } from "node:util";
 import { DECISION_ROWS, DIGEST_MAX, FILE_READ_MAX, SUMMARY_MAX, VERIFIER_JSON_MAX, renderDigest, steerText } from "../lib/digest.mjs";
 import * as brand from "../lib/brand.mjs";
 import * as browsers from "../lib/browsers.mjs";
+import * as deps from "../lib/deps.mjs";
 import * as lifecycle from "../lib/lifecycle.mjs";
 import * as ports from "../lib/ports.mjs";
 import * as watch from "../lib/watch.mjs";
@@ -894,7 +895,7 @@ function removeWorktree(repo, job, { dry = false, log = console.log } = {}) {
     return { kept: "unregistered" };
   }
   const status = git(path, ["status", "--porcelain"]);
-  const changes = status.out.split("\n").filter(Boolean);
+  const changes = status.out.split("\n").filter(Boolean).filter((l) => !deps.isLinkStatusLine(path, l));
   if (status.code !== 0 || changes.length) {
     const why = status.code !== 0 ? "git status failed" : `${changes.length} uncommitted change${changes.length === 1 ? "" : "s"}; commit or discard, then orka cleanup`;
     log(`cleanup: kept worktree ${path} (${why})`);
@@ -905,6 +906,7 @@ function removeWorktree(repo, job, { dry = false, log = console.log } = {}) {
     log(`cleanup: would remove worktree ${path} (${lifecycle.formatKb(kb)}, branch ${branch} kept)`);
     return { removed: true, kb };
   }
+  deps.unlinkLinks(path);
   const removed = git(repo, ["worktree", "remove", path]);
   if (removed.code !== 0) {
     log(`cleanup: kept worktree ${path} (git worktree remove: ${(removed.err || removed.out).split("\n")[0]})`);
@@ -924,6 +926,8 @@ function restoreWorktree(repo, job) {
   delete job.worktreeRemoved;
   save(repo, job);
   console.log(`restored worktree ${job.worktree} from branch ${brand.jobBranch(job)}`);
+  setupDeps(repo, job);
+  save(repo, job);
 }
 
 function killWatcher(job) {
@@ -1236,6 +1240,7 @@ function workerPrompt(job, name, task, alias) {
     `Work only in this shared checkout: ${job.worktree}`,
     `Branch: ${job.branch}`,
     `Other workers share this worktree. Do not revert their files. Do not create a branch, worktree, or push.`,
+    ...depLinkLines(job),
     `Browser checks, if this task needs them, go in ${verifyFile(job.worktree)} at the worktree root, or the path in ${configPath(job.repo)} "verify".`,
     `Shape: {"steps":[["open","http://HOST:PORT/"],{"visible":"SELECTOR"},{"text":"SELECTOR","includes":"EXPECTED"}]}`,
     `Use this project's URL. Do not copy a host or port from another repo. Do not run orka verify unless the task says so.`,
@@ -1844,6 +1849,51 @@ function addWorktree(repo, job) {
   return path;
 }
 
+const DEPS_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
+
+// Links node_modules (lib/deps.mjs DEP_DIRS) to the main checkout, or runs a real
+// install when the worktree's lockfile differs from main's; repairs a missing or
+// broken link. Runs at orka run, at every orka worker and on a restored worktree.
+// Lines go to stderr. Never fatal: a job without shared deps still runs.
+function setupDeps(repo, job) {
+  if (!job.worktree || !existsSync(job.worktree)) return;
+  try {
+    const plan = deps.planDeps(repo, job.worktree);
+    const done = deps.applyDeps(repo, job.worktree, plan, { run: runInstall, log: (msg) => console.error(msg) });
+    for (const d of done) if (d.action !== "install") ensureIgnored(job.worktree, d.dir);
+    if (done.length) job.deps = [...(job.deps || []), ...done.map((d) => ({ ...d, at: new Date().toISOString() }))].slice(-10);
+  } catch (err) {
+    console.error(`deps: skipped (${err?.message || err})`);
+  }
+}
+
+function runInstall(cmd, cwd) {
+  const r = spawnSync(cmd[0], cmd.slice(1), { cwd, encoding: "utf8", timeout: DEPS_INSTALL_TIMEOUT_MS, killSignal: "SIGKILL", env: { ...process.env, PATH: pathPrefix() } });
+  if (r.error) return { ok: false, detail: r.error.code === "ENOENT" ? `${cmd[0]} is not on PATH` : r.error.message };
+  if (r.status === 0) return { ok: true, detail: "" };
+  return { ok: false, detail: `exit ${r.status}: ${String(r.stderr || r.stdout || "").trim().split("\n").at(-1) || "no output"}` };
+}
+
+// "node_modules/" in .gitignore matches only a real directory, so a link would be
+// untracked and could be committed by git add -A. Such a link goes into the repo's
+// local info/exclude (never committed), once.
+function ensureIgnored(wt, name) {
+  if (git(wt, ["check-ignore", "-q", name]).code === 0) return;
+  const path = git(wt, ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"]).out;
+  if (!path) return;
+  mkdirSync(dirname(path), { recursive: true });
+  const cur = existsSync(path) ? readFileSync(path, "utf8") : "";
+  if (cur.split("\n").includes(`/${name}`)) return;
+  appendFileSync(path, `${cur && !cur.endsWith("\n") ? "\n" : ""}# orka: dependency links in job worktrees\n/${name}\n`);
+}
+
+// Worker prompt lines when the worktree shares a dep dir with the main checkout.
+function depLinkLines(job) {
+  const linked = deps.linkNames().filter((name) => deps.linkState(join(job.worktree || "", name), join(job.repo, name)) === "link");
+  if (!linked.length) return [];
+  return [`${linked.join(", ")} in this worktree is a symlink to the main checkout's. Never install into it. Before you add, remove or upgrade a dependency, replace the link with an install of its own: rm ${linked[0]}, then the repo's install command (npm install, pnpm install...).`];
+}
+
 function createWorkspace(job) {
   const label = brand.workspaceLabel(job.id);
   const got = herdr([
@@ -1907,6 +1957,7 @@ async function cmdRun(args) {
   if (job.kind === "claude") save(repo, job);
   try {
     job.worktree = addWorktree(repo, job);
+    setupDeps(repo, job);
     save(repo, job);
     ensureJobDir(repo, id);
     const place = createWorkspace(job);
@@ -2041,6 +2092,7 @@ function cmdWorker(args) {
   if (!job.pane || !job.agent || !job.worktree) fail("orchestrator is not running");
   if (job.status !== "running") fail(`job ${id} is ${job.status}, not running`);
   ensureJobDir(repo, job.id);
+  setupDeps(repo, job);
   if (role === "verifier") {
     archiveVerifierResult(repo, job, round - 1);
     reapPreviousVerifier(job);
