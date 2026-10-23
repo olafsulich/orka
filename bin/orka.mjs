@@ -14,6 +14,7 @@ import { DECISION_ROWS, DIGEST_MAX, FILE_READ_MAX, SUMMARY_MAX, VERIFIER_JSON_MA
 import * as brand from "../lib/brand.mjs";
 import * as browsers from "../lib/browsers.mjs";
 import * as lifecycle from "../lib/lifecycle.mjs";
+import * as autonomy from "../lib/autonomy.mjs";
 import * as ports from "../lib/ports.mjs";
 import * as specs from "../lib/spec.mjs";
 import * as watch from "../lib/watch.mjs";
@@ -67,8 +68,9 @@ const VALUE_FLAGS = new Set([
   "orphan-hours",
   "worker",
   "spec",
+  "hook",
 ]);
-const BOOL_FLAGS = new Set(["dry-run", "help", "force", "keep", "base", "ui"]);
+const BOOL_FLAGS = new Set(["dry-run", "help", "force", "keep", "base", "ui", "stdin", "pr", "push"]);
 const FINISH_STATUSES = new Set(["done", "failed", "stopped"]);
 const VERIFIER_NAME = "verifier";
 const FINISH_TIMEOUT_MS = 8000;
@@ -1092,7 +1094,9 @@ function portPromptLines(job) {
     lines.push(`Your job port${list.length > 1 ? "s" : ""}: ${list.join(", ")} (env ORKA_PORT=${job.port ?? list[0]}${list.length > 1 ? `, ORKA_PORTS=${list.join(",")}` : ""}).`);
     lines.push(`Use your job port(s) ($ORKA_PORT / the ports listed above) for any dev or preview server, never a fixed default like 3000 or 5173, so concurrent orka jobs never collide.`);
   }
+  const { level } = autonomy.readLevel(job.repo);
   lines.push(
+    `Autonomy: this repo is at ${level} (${autonomy.LEVEL_TEXT[level]}). orka's git hooks in your pane refuse any commit, merge or push above it and log the refusal; never bypass them (no --no-verify, no other hooksPath).`,
     `Decide operational questions yourself by choosing the safe recommended option instead of asking. Examples: stop a stale server left by a finished orka job, or pick your own job port when one is busy.`,
     `Only ask when a genuine human decision or a secret is required. A question nobody sees leaves the job stuck.`,
     REVERSIBLE_RULE,
@@ -1130,6 +1134,37 @@ function killBrowserProcs(procs, dry) {
     }
   }
   return procs.map((p) => p.pid);
+}
+
+// Autonomy guard: job panes get core.hooksPath pointing at orka's generated hooks (they chain to the
+// repo's own hooks). Written into the repo's state dir, never into the tracked tree.
+function hooksDir(repo) {
+  return join(brand.stateDir(repo), "hooks");
+}
+
+function installHooks(repo) {
+  const dir = hooksDir(repo);
+  mkdirSync(dir, { recursive: true });
+  for (const [name, text] of Object.entries(autonomy.hookScripts(process.execPath, ORKA))) {
+    const path = join(dir, name);
+    writeFileSync(path, text);
+    chmodSync(path, 0o755);
+  }
+  return dir;
+}
+
+function guardEnvArgs(repo) {
+  const dir = installHooks(repo);
+  return ["--env", "GIT_CONFIG_COUNT=1", "--env", "GIT_CONFIG_KEY_0=core.hooksPath", "--env", `GIT_CONFIG_VALUE_0=${dir}`];
+}
+
+// Refuses an action above the repo's level: logs it to the job's decisions.tsv (when there is a job) and fails.
+function requireLevel(repo, action, { jobId = "", evidence = "" } = {}) {
+  const { level, source } = autonomy.readLevel(repo);
+  const { ok, need } = autonomy.allows(level, action);
+  if (ok) return level;
+  if (jobId && existsSync(jobPath(repo, jobId))) appendDecision(repo, jobId, ["autonomy", `refused ${action}`, `repo at ${level}; ${action} needs ${need}`, evidence, "refused"]);
+  fail(autonomy.refusal(repo, level, source, action, need));
 }
 
 function portEnvArgs(job) {
@@ -1835,6 +1870,7 @@ function createWorkspace(job) {
     `PATH=${pathPrefix()}`,
     ...portEnvArgs(job),
     ...jobEnvArgs(job, "orchestrator"),
+    ...guardEnvArgs(job.repo),
   ]);
   const pane = got.json?.result?.root_pane?.pane_id;
   const workspace = got.json?.result?.workspace?.workspace_id;
@@ -1917,7 +1953,7 @@ async function cmdRun(args) {
 }
 
 function splitPane(fromPane, cwd, job, worker) {
-  const split = herdr(["pane", "split", "--pane", fromPane, "--direction", "right", "--cwd", cwd, "--no-focus", "--env", `PATH=${pathPrefix()}`, ...portEnvArgs(job), ...jobEnvArgs(job, worker)]);
+  const split = herdr(["pane", "split", "--pane", fromPane, "--direction", "right", "--cwd", cwd, "--no-focus", "--env", `PATH=${pathPrefix()}`, ...portEnvArgs(job), ...jobEnvArgs(job, worker), ...guardEnvArgs(job.repo)]);
   const pane = split.json?.result?.pane?.pane_id;
   if (!pane) herdrFail(split, "pane split");
   return pane;
@@ -3338,6 +3374,400 @@ function cmdSpec(args) {
   console.log(`fill What, Why, Limits and Done when, commit it, then: orka new --spec ${rel}`);
 }
 
+function currentBranch(cwd) {
+  return git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]).out;
+}
+
+// main and master, plus origin's HEAD branch when it names another.
+function mainBranches(repo) {
+  const set = new Set(autonomy.MAIN_BRANCHES);
+  const head = git(repo, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
+  if (head.code === 0 && head.out) set.add(head.out.replace(/^origin\//, ""));
+  return [...set];
+}
+
+// The repo's main branch: the first of mainBranches that exists locally.
+function mainOf(repo) {
+  return mainBranches(repo).find((b) => git(repo, ["show-ref", "--verify", "--quiet", `refs/heads/${b}`]).code === 0) || "main";
+}
+
+function readStdin() {
+  try {
+    return readFileSync(0, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+function cmdAutonomy(args) {
+  allowFlags(args, ["cwd", "hook", "stdin", "job"]);
+  const sub = args._[1] || "show";
+  const cwd = args.cwd || process.cwd();
+  const repo = requireRepo(cwd);
+  if (sub === "show") {
+    const { level, source } = autonomy.readLevel(repo);
+    console.log(`autonomy: ${level} (${autonomy.LEVEL_TEXT[level]}) for ${repo}`);
+    console.log(`source: ${source === "default" ? `default (no entry in ${autonomy.configFile()})` : source}`);
+    for (const l of autonomy.LEVELS) console.log(`  ${l === level ? "*" : " "} ${l}  ${autonomy.LEVEL_TEXT[l]}`);
+    return;
+  }
+  if (sub === "set") {
+    const level = String(args._[2] || "").toUpperCase();
+    if (!autonomy.LEVELS.includes(level)) fail(`need: orka autonomy set <${autonomy.LEVELS.join("|")}>`);
+    if (brand.env("JOB")) fail("orka autonomy set is refused inside a job pane (ORKA_JOB is set); Olaf sets levels from his own shell");
+    const path = autonomy.writeLevel(repo, level);
+    console.log(`autonomy: ${repo} set to ${level} (${autonomy.LEVEL_TEXT[level]}) in ${path}`);
+    return;
+  }
+  if (sub === "check") {
+    // Called by the guard hooks. Exit 0 allows. A refusal prints why on stderr, is logged to the job's decisions.tsv, and exits 1.
+    const action = args._[2];
+    if (!action) fail("need: orka autonomy check <action>");
+    const jobId = flagValue(args, "job") || brand.env("JOB") || "";
+    const branch = currentBranch(cwd);
+    const mains = mainBranches(repo);
+    let actions = [action];
+    if (action === "push" && args.stdin) actions = autonomy.pushActions(readStdin(), mains);
+    else if (action === "commit" && mains.includes(branch)) actions = ["commit-main"];
+    // A merge commit on a job branch is a branch commit; on main it is landing.
+    else if (action === "merge") actions = [mains.includes(branch) ? "merge" : "commit"];
+    for (const a of actions) requireLevel(repo, a, { jobId, evidence: `${args.hook || "check"} on ${branch || "?"} in ${cwd}` });
+    return;
+  }
+  fail("need: orka autonomy [show] | set <L0|L1|L2|L3> | check <action>");
+}
+
+// L2: push the job branch to origin, and with --pr open a PR for it.
+function cmdPush(args) {
+  allowFlags(args, ["cwd", "dry-run", "pr"]);
+  const id = args._[1];
+  if (!id) fail("need: orka push <id> [--pr]");
+  const repo = requireRepo(args.cwd || process.cwd());
+  const job = load(repo, id);
+  const branch = brand.jobBranch(job);
+  const level = requireLevel(repo, args.pr ? "pr" : "push", { jobId: id, evidence: `orka push ${id}${args.pr ? " --pr" : ""}` });
+  if (git(repo, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]).code !== 0) fail(`branch ${branch} does not exist`);
+  const base = mainOf(repo);
+  if (args["dry-run"]) {
+    console.log(`dry-run push ${id} (autonomy ${level}): git push -u origin ${branch}${args.pr ? `; gh pr create --head ${branch} --base ${base}` : ""}`);
+    return;
+  }
+  const pushed = git(repo, ["push", "-u", "origin", `${branch}:${branch}`]);
+  if (pushed.code !== 0) fail(`git push failed:\n${(pushed.err || pushed.out).slice(0, 800)}`);
+  appendDecision(repo, id, ["autonomy", `pushed ${branch}`, `repo at ${level}`, "git push -u origin", "ok"]);
+  console.log(`pushed ${branch} to origin`);
+  if (!args.pr) return;
+  const r = spawnSync("gh", ["pr", "create", "--head", branch, "--base", base, "--title", job.title, "--body", summaryOf(repo, job) || String(job.goal).slice(0, 2000)], { cwd: repo, encoding: "utf8", env: { ...process.env, PATH: pathPrefix() }, timeout: 120000 });
+  if (r.error || r.status !== 0) fail(`gh pr create failed:\n${String(r.stderr || r.error?.message || "").slice(0, 800)}`);
+  appendDecision(repo, id, ["autonomy", `opened PR for ${branch}`, `repo at ${level}`, r.stdout.trim().slice(0, 200), "ok"]);
+  console.log(r.stdout.trim());
+}
+
+const LAND_TEST_TIMEOUT_MS = 1800000;
+
+function hasTestScript(dir) {
+  try {
+    return Boolean(JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).scripts?.test);
+  } catch {
+    return false;
+  }
+}
+
+// L3: merge --no-ff the job branch into main in the primary checkout, run npm test when the repo has one
+// (twice before giving up, to rule out a flaky run), commit, and with push push main. Aborts the merge on
+// a conflict or red tests. Throws an orka error with the reason.
+function landJob(repo, job, { push = false, log = console.log } = {}) {
+  const branch = brand.jobBranch(job);
+  const base = mainOf(repo);
+  const evidence = `orka land ${job.id}${push ? " --push" : ""}`;
+  requireLevel(repo, "merge", { jobId: job.id, evidence });
+  if (push) requireLevel(repo, "push-main", { jobId: job.id, evidence });
+  const on = currentBranch(repo);
+  if (on !== base) fail(`primary checkout ${repo} is on ${on}, not ${base}; land merges there`);
+  if (git(repo, ["diff", "--quiet"]).code !== 0 || git(repo, ["diff", "--cached", "--quiet"]).code !== 0) fail(`${base} has uncommitted tracked changes; land refused`);
+  log(`merging ${branch} into ${base}`);
+  const merged = git(repo, ["merge", "--no-ff", "--no-commit", branch]);
+  if (merged.code !== 0) {
+    git(repo, ["merge", "--abort"]);
+    fail(`merge conflict for ${branch}; merge aborted\n${(merged.out || merged.err).slice(0, 400)}`);
+  }
+  let tested = "no test script";
+  if (hasTestScript(repo)) {
+    const out = join(brand.stateDir(repo), "land-test.out");
+    let ok = false;
+    for (let run = 1; run <= 2 && !ok; run++) {
+      const r = spawnSync("npm", ["test"], { cwd: repo, encoding: "utf8", timeout: LAND_TEST_TIMEOUT_MS, env: { ...process.env, PATH: pathPrefix() } });
+      writeFileSync(out, `${r.stdout || ""}${r.stderr || ""}`);
+      ok = r.status === 0;
+      log(`npm test (run ${run}): ${ok ? "green" : "red"}`);
+    }
+    if (!ok) {
+      git(repo, ["merge", "--abort"]);
+      fail(`npm test red after merging ${branch}; merge aborted, see ${out}`);
+    }
+    tested = "npm test green";
+  }
+  const committed = git(repo, ["commit", "-q", "--no-edit", "-m", `Merge ${branch}: ${job.title}`]);
+  if (committed.code !== 0) {
+    git(repo, ["merge", "--abort"]);
+    fail(`merge commit failed for ${branch}; merge aborted\n${committed.err.slice(0, 400)}`);
+  }
+  const sha = git(repo, ["rev-parse", "--short", "HEAD"]).out;
+  appendDecision(repo, job.id, ["autonomy", `landed ${branch} on ${base}`, `repo at ${autonomy.readLevel(repo).level}`, `${sha}; ${tested}`, "ok"]);
+  log(`landed ${branch} on ${base} as ${sha} (${tested})`);
+  if (push) {
+    const pushed = git(repo, ["push", "origin", base]);
+    if (pushed.code !== 0) fail(`git push origin ${base} failed after landing ${sha}\n${(pushed.err || pushed.out).slice(0, 400)}`);
+    appendDecision(repo, job.id, ["autonomy", `pushed ${base}`, "after land", sha, "ok"]);
+    log(`pushed ${base} to origin`);
+  }
+  return { sha, tested, pushed: push };
+}
+
+function cmdLand(args) {
+  allowFlags(args, ["cwd", "dry-run", "push"]);
+  const id = args._[1];
+  if (!id) fail("need: orka land <id> [--push]");
+  const repo = requireRepo(args.cwd || process.cwd());
+  const job = load(repo, id);
+  if (job.status !== "done") fail(`job ${id} is ${job.status}; land merges only a done job`);
+  if (args["dry-run"]) {
+    const level = requireLevel(repo, "merge", { jobId: id, evidence: `orka land ${id} --dry-run` });
+    if (args.push) requireLevel(repo, "push-main", { jobId: id, evidence: `orka land ${id} --dry-run` });
+    console.log(`dry-run land ${id} (autonomy ${level}): git merge --no-ff ${brand.jobBranch(job)} into ${mainOf(repo)}${hasTestScript(repo) ? ", npm test" : ""}${args.push ? `, git push origin ${mainOf(repo)}` : ""}`);
+    return;
+  }
+  landJob(repo, job, { push: Boolean(args.push) });
+}
+
+// orka chain: runs a queue of tasks one job at a time (the old ~/bin/orca-chain, generalised). What happens
+// on a verifier pass depends on the repo's autonomy level: L0/L1 keep the branch for review, L2 pushes it
+// and opens a PR, L3 merges into main, tests and pushes main.
+//   queue   <state>/chain-queue    lines "NN [verifier-model]" (tasks/NN-*.md; first line runs next)
+//   current <state>/chain-current  "NN job-id attempt verifier-model"
+//   log     <state>/chain.log
+const CHAIN_POLL_MS = Number(brand.env("CHAIN_POLL_MS")) || 60000;
+const CHAIN_RESOURCE_WAIT_MS = Number(brand.env("CHAIN_RESOURCE_WAIT_MS")) || 300000;
+const CHAIN_MIN_MEM_MB = Number(brand.env("CHAIN_MIN_MEM_MB") ?? 1200);
+const CHAIN_MAX_LOAD = Number(brand.env("CHAIN_MAX_LOAD")) || 6;
+const CHAIN_WAIT_WARN_MS = 4 * 3600000;
+
+class ChainStop extends Error {}
+
+function chainPaths(repo) {
+  const d = brand.stateDir(repo);
+  return { queue: join(d, "chain-queue"), current: join(d, "chain-current"), log: join(d, "chain.log"), lock: join(d, "chain.lock") };
+}
+
+function takeChainLock(path) {
+  try {
+    writeFileSync(path, `${process.pid}\n`, { flag: "wx" });
+  } catch (err) {
+    if (err.code !== "EEXIST") throw err;
+    const pid = Number.parseInt(readFileSync(path, "utf8"), 10);
+    if (Number.isInteger(pid) && pid > 1 && pid !== process.pid && pidAlive(pid)) fail(`orka chain already running (pid ${pid}, lock ${path})`);
+    writeFileSync(path, `${process.pid}\n`);
+  }
+  process.on("exit", () => {
+    try {
+      if (readFileSync(path, "utf8").trim() === String(process.pid)) rmSync(path, { force: true });
+    } catch {}
+  });
+}
+
+function chainGoal(file, attempt, failure) {
+  let goal = `Implement task ${basenameOf(file).split("-")[0]} exactly as specified in tasks/${basenameOf(file)} (read it first, and tasks/README.md when it exists). Meet every acceptance criterion in that file; nothing beyond its scope. Earlier tasks are already on main; locate code by function name, not line number.
+
+Wrap-up:
+- Tests for the new behaviour; keep the project's tests green.
+- Mark the task done in its file (Status: done plus a short Done note: what changed, test counts).
+- Commit on the job branch. Do NOT merge and do NOT push: orka chain lands the branch after a verifier pass, as far as the repo's autonomy level allows.
+- summary.txt: what changed and the test pass/fail counts.
+
+Resources: ONE builder worker at a time plus ONE verifier. No browsers unless the task file asks for them; then one named agent-browser session, closed before reporting.`;
+  if (failure) goal += `\n\nRETRY (attempt ${attempt}): the previous job for this task failed. Its failure summary: ${failure}\nStart from main, change the approach that failed, and fix the failing checks.`;
+  return goal;
+}
+
+const basenameOf = (path) => String(path).split(sep).at(-1);
+
+async function cmdChain(args) {
+  allowFlags(args, ["cwd", "dry-run"]);
+  const repo = requireRepo(args.cwd || process.cwd());
+  const dry = Boolean(args["dry-run"]);
+  const p = chainPaths(repo);
+  const log = (msg) => {
+    const text = `${new Date().toISOString().replace("T", " ").slice(0, 19)}Z ${msg}`;
+    console.error(text);
+    if (!dry) appendFileSync(p.log, `${text}\n`);
+  };
+  const self = (argv, timeout) => spawnSync(process.execPath, [ORKA, ...argv, "--cwd", repo], { encoding: "utf8", env: { ...process.env, PATH: pathPrefix() }, timeout });
+  const { level } = autonomy.readLevel(repo);
+  const onPass = level === "L3" ? "merge into main, test, push main" : level === "L2" ? "push the branch and open a PR" : "keep the branch for review";
+  const notify = async (status, message) => {
+    log(`NOTIFY [${status}] ${message}`);
+    if (dry) return;
+    const cfg = readFinishConfig(repo);
+    if (cfg.off || cfg.error) return log(`no webhook (${cfg.error || "off"}), skipped`);
+    const sent = await postFinish(cfg, { kind: status === "done" ? "orka-chain" : "needs-input", job: "orka-chain", title: `orka chain ${basenameOf(repo)}`, status, question: message, log: p.log });
+    log(`webhook ${sent.outcome}${sent.http ? ` http=${sent.http}` : ""}`);
+  };
+  const stop = async (why) => {
+    await notify("blocked", why);
+    log(`CHAIN STOPPED: ${why}`);
+    throw new ChainStop(why);
+  };
+  const readJob = (id) => {
+    try {
+      return JSON.parse(readFileSync(jobPath(repo, id), "utf8"));
+    } catch {
+      return null;
+    }
+  };
+  const waitResources = async () => {
+    for (let waited = 1; ; waited++) {
+      let avail = Infinity;
+      let load = 0;
+      try {
+        avail = Math.floor(Number(/MemAvailable:\s+(\d+)/.exec(readFileSync("/proc/meminfo", "utf8"))[1]) / 1024);
+        load = Number(readFileSync("/proc/loadavg", "utf8").split(" ")[0]);
+      } catch {}
+      if (avail >= CHAIN_MIN_MEM_MB && load < CHAIN_MAX_LOAD) return log(`resources ok: avail=${avail}MB load=${load}`);
+      log(`waiting for resources: avail=${avail}MB (need ${CHAIN_MIN_MEM_MB}) load=${load} (need <${CHAIN_MAX_LOAD})`);
+      if (dry) return;
+      if (waited === 12) await notify("blocked", `chain waiting >1h for RAM/load (avail=${avail}MB load=${load})`);
+      sleep(CHAIN_RESOURCE_WAIT_MS);
+    }
+  };
+  const nextFromQueue = () => {
+    if (!existsSync(p.queue)) return "";
+    const lines = readFileSync(p.queue, "utf8").split("\n");
+    const i = lines.findIndex((l) => l.trim() && !l.trim().startsWith("#"));
+    if (i < 0) return "";
+    const line = lines[i].trim();
+    if (!dry) {
+      lines.splice(i, 1);
+      writeFileSync(`${p.queue}.tmp`, lines.join("\n"));
+      renameSync(`${p.queue}.tmp`, p.queue);
+    }
+    return line;
+  };
+  const startTask = async (nn, vm, attempt, failure = "") => {
+    const file = existsSync(join(repo, "tasks")) ? readdirSync(join(repo, "tasks")).find((f) => f.startsWith(`${nn}-`) && f.endsWith(".md")) : null;
+    if (!file) {
+      log(`task ${nn}: no tasks/${nn}-*.md, skipped`);
+      return false;
+    }
+    const title = `task ${file.replace(/\.md$/, "").replace("-", " ")}`;
+    const goal = chainGoal(file, attempt, failure);
+    log(`starting task ${nn} (${file}) attempt ${attempt}${vm ? `, verifier ${vm}` : ""}`);
+    if (dry) {
+      log(`dry-run: orka new --title '${title}'${vm ? ` --verifier-model ${vm}` : ""} --goal <${goal.length} chars>; orka run <id>`);
+      return true;
+    }
+    const made = self(["new", "--title", title, "--goal", goal, ...(vm ? ["--verifier-model", vm] : [])]);
+    const id = (made.stdout || "").trim().split("\n").find((l) => /^\d{17}-/.test(l));
+    if (!id) await stop(`orka new failed for task ${nn} (it is no longer in the queue; re-add the line '${nn}${vm ? ` ${vm}` : ""}' at the top): ${(made.stderr || "").trim().slice(0, 300)}`);
+    writeFileSync(p.current, `${nn} ${id} ${attempt} ${vm || "-"}\n`);
+    const ran = self(["run", id]);
+    appendFileSync(p.log, `${ran.stdout || ""}${ran.stderr || ""}`);
+    if (ran.status !== 0) log(`orka run ${id} exited ${ran.status} (job status decides)`);
+    log(`task ${nn} running as ${id}`);
+    return true;
+  };
+  const waitTerminal = async (id) => {
+    const started = Date.now();
+    let warned = false;
+    for (;;) {
+      const job = readJob(id);
+      if (!job || FINISH_STATUSES.has(job.status) || dry) return job;
+      if (!warned && Date.now() - started > CHAIN_WAIT_WARN_MS) {
+        warned = true;
+        await notify("blocked", `job ${id} still '${job.status}' after 4h of chain waiting`);
+      }
+      sleep(CHAIN_POLL_MS);
+    }
+  };
+  const failureSummary = (job) => `${String(job?.stopReason || job?.summary || "").slice(0, 600)}; failing checks: ${(job?.verifier?.history?.at(-1)?.failing || []).join(", ")}`;
+  const land = async (nn, job) => {
+    const branch = brand.jobBranch(job);
+    if (dry) return log(`dry-run: autonomy ${level}: would ${onPass} for ${branch}`);
+    if (level === "L3") {
+      try {
+        landJob(repo, job, { push: true, log });
+      } catch (err) {
+        await stop(`land failed for task ${nn} (${branch}): ${err.message}`);
+      }
+    } else if (level === "L2") {
+      const r = self(["push", job.id, "--pr"], 180000);
+      if (r.status !== 0) await stop(`push/PR failed for task ${nn} (${branch}): ${(r.stderr || "").trim().slice(0, 400)}`);
+      log(`task ${nn}: pushed ${branch}; ${(r.stdout || "").trim().split("\n").at(-1)}`);
+    } else {
+      appendDecision(repo, job.id, ["autonomy", `chain kept ${branch} for review`, `repo at ${level}; landing needs L2 (push, PR) or L3 (merge)`, "orka chain", "kept"]);
+      log(`task ${nn}: verifier pass; kept on ${branch} for review (autonomy ${level}: no push, no merge)`);
+    }
+  };
+  const cleanup = () => {
+    if (dry) return;
+    const r = spawnSync("timeout", ["120", process.execPath, ORKA, "cleanup", "--older-than", "1m", "--cwd", repo], { encoding: "utf8", env: { ...process.env, PATH: pathPrefix() } });
+    appendFileSync(p.log, `${r.stdout || ""}${r.stderr || ""}`);
+  };
+
+  if (!dry) takeChainLock(p.lock);
+  log(`orka chain start (pid ${process.pid}, autonomy ${level}: on a verifier pass ${onPass}, dry-run=${dry})`);
+  try {
+    for (;;) {
+      const cur = existsSync(p.current) ? readFileSync(p.current, "utf8").trim() : "";
+      if (!cur) {
+        const line = nextFromQueue();
+        if (!line) {
+          await notify("done", `orka chain finished: queue empty. See ${p.log}`);
+          log("queue empty, chain done");
+          return;
+        }
+        const [nn, vm] = line.split(/\s+/);
+        await waitResources();
+        await startTask(nn, vm, 1);
+        if (dry) return log("dry-run end");
+        continue;
+      }
+      const [nn, id, attemptText, vmText] = cur.split(/\s+/);
+      const attempt = Number(attemptText) || 1;
+      const vm = vmText && vmText !== "-" ? vmText : "";
+      log(`watching task ${nn} job ${id} (attempt ${attempt})`);
+      const job = await waitTerminal(id);
+      const v = job?.verifier || {};
+      log(`task ${nn} job ${id}: status=${job?.status || "missing"} verdict=${v.verdict || "none"} stale=${Boolean(v.stale)}`);
+      if (dry) {
+        log(`dry-run: on done + pass the chain would ${onPass} (autonomy ${level}), then start the next queue item`);
+        return log("dry-run end");
+      }
+      if (job?.status === "done" && v.verdict === "pass" && !v.stale) await land(nn, job);
+      else {
+        const summary = failureSummary(job);
+        log(`task ${nn} did not pass: ${summary}`);
+        if (attempt < 2) {
+          cleanup();
+          await waitResources();
+          writeFileSync(p.current, "");
+          await startTask(nn, vm, 2, `status=${job?.status} verdict=${v.verdict || "none"}. ${summary}`);
+          continue;
+        }
+        log(`SKIPPED task ${nn} after 2 failed attempts`);
+        await notify("blocked", `task ${nn} skipped after 2 failed attempts (last job ${id}): ${summary}. Chain continues.`);
+      }
+      cleanup();
+      writeFileSync(p.current, "");
+    }
+  } catch (err) {
+    if (err instanceof ChainStop) {
+      process.exitCode = 2;
+      return;
+    }
+    throw err;
+  }
+}
+
 function help() {
   console.log(`orka — one job in a linked worktree
 
@@ -3366,6 +3796,10 @@ function help() {
   orka watch <id> [--dry-run] [--cwd <repo>]   (started by orka run; not for hand use)
   orka webhook <id> [--dry-run] [--force] [--cwd <repo>]
   orka verify <id> [--base] [--dry-run] [--cwd <repo>]
+  orka autonomy [--cwd <repo>] | autonomy set <L0|L1|L2|L3>   (per-repo level, kept in ~/.config/orka/config.json)
+  orka push <id> [--pr] [--dry-run]   (L2: push the job branch, --pr opens a PR)
+  orka land <id> [--push] [--dry-run]   (L3: merge the job branch into main, npm test, --push pushes main)
+  orka chain [--dry-run] [--cwd <repo>]   (runs <state>/chain-queue one job at a time; lands per the level)
   orka help
 
 digest prints a capped snapshot and does not change the job.
@@ -3518,6 +3952,10 @@ async function main() {
   else if (cmd === "reap") cmdReap(args);
   else if (cmd === "watch") await cmdWatch(args);
   else if (cmd === "spec") cmdSpec(args);
+  else if (cmd === "autonomy") cmdAutonomy(args);
+  else if (cmd === "push") cmdPush(args);
+  else if (cmd === "land") cmdLand(args);
+  else if (cmd === "chain") await cmdChain(args);
   else fail(`unknown command ${cmd}\nrun: orka help`);
 }
 

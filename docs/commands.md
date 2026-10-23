@@ -23,6 +23,11 @@ orka reap <id> [--worker <name>] [--dry-run] [--cwd <repo>]   # closes browsers 
 orka watch <id> [--dry-run] [--cwd <repo>]   # started by orka run, not for hand use
 orka webhook <id> [--dry-run] [--force] [--cwd <repo>]
 orka verify <id> [--base] [--dry-run] [--cwd <repo>]
+orka autonomy [--cwd <repo>]
+orka autonomy set <L0|L1|L2|L3> [--cwd <repo>]
+orka push <id> [--pr] [--dry-run] [--cwd <repo>]
+orka land <id> [--push] [--dry-run] [--cwd <repo>]
+orka chain [--dry-run] [--cwd <repo>]
 orka help
 ```
 
@@ -51,6 +56,8 @@ orka help
 `watch` is the needs-input watcher that `run` starts in the background. See [needs-input.md](needs-input.md).
 
 `verify` runs project browser checks in the job worktree. See [verify.md](verify.md). It does not set the job to `done`; `orka done` does. The verifier worker runs it, not the orchestrator. `--base` runs the same checks against the base commit instead (see [verify.md](verify.md)).
+
+`autonomy` shows or sets the repo's level (L0 read-only, L1 branch and commit (default), L2 push and PR, L3 merge and push main), kept in orka's own config, never in the repo. `push` and `land` refuse above the level and log the refusal to decisions.tsv; job panes get git hooks that do the same for commits, merges and pushes. `chain` runs `<state>/chain-queue` one job at a time and lands each pass as far as the level allows. See [autonomy.md](autonomy.md).
 
 `claude` must already be on `PATH` inside the pane, and on `PATH` here so aliases can be checked. This CLI does not install it. `agent-browser` must be on `PATH` for `verify` and the verifier. This CLI does not install that either.
 

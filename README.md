@@ -45,6 +45,10 @@ Commands (full flags in [commands.md](docs/commands.md)):
 | `orka reap` / `cleanup` | free browsers / close stale workspaces |
 | `orka webhook <id>` | preview or retry the finish POST |
 | `orka watch <id>` | needs-input watcher (started by `run`) |
+| `orka autonomy [set <L0-L3>]` | per-repo level, CLI-enforced ([autonomy.md](docs/autonomy.md)) |
+| `orka push <id> [--pr]` | push the job branch, open a PR (L2) |
+| `orka land <id> [--push]` | merge into main, test, push (L3) |
+| `orka chain` | run the task queue one job at a time, land per level |
 
 Key flags:
 
@@ -89,6 +93,7 @@ Config:
 | File | Purpose |
 | --- | --- |
 | `.orka/config.json` | local mark; `verify`, `verifierModel`, `staleAfter` |
+| `~/.config/orka/config.json` | autonomy level per repo path (default L1) |
 | `orka.verify.json` | browser checks at the worktree root; commit it |
 | ports | 4 per job: `ORKA_PORT`, `ORKA_PORTS` |
 
