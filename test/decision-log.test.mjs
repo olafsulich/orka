@@ -16,7 +16,7 @@ function scratch() {
   for (const d of [repo, join(base, "home"), join(base, "run")]) mkdirSync(d, { recursive: true });
   execFileSync("git", ["init", "-q"], { cwd: repo });
   execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: repo });
-  const env = { ...process.env, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), ORKA_NO_WATCH: "1" };
+  const env = { ...process.env, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off" };
   const orka = (args) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", repo], { encoding: "utf8", env });
   orka(["init"]);
   const id = orka(["new", "--kind", "claude", "--title", "dl", "--goal", "log decisions"]).stdout.trim();

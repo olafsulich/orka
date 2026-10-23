@@ -1,11 +1,11 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { scanBrowsers, selectOrphans, selectReap, stateSessions } from "../lib/browsers.mjs";
+import { scanBrowsers, selectGone, selectOrphans, selectRecorded, selectReap, stateSessions } from "../lib/browsers.mjs";
 
 const ORKA = join(import.meta.dirname, "..", "bin", "orka.mjs");
 
@@ -61,7 +61,7 @@ function scratch() {
   }
   writeFileSync(join(proc, "stat"), "btime 1000000000\n");
   execFileSync("git", ["init", "-q"], { cwd: repo });
-  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: run, AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_PROC_ROOT: proc };
+  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: run, AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off", ORKA_PROC_ROOT: proc };
   const orka = (args) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...process.env, ...env } });
   orka(["init"]);
   const calls = () => readFileSync(log, "utf8").trim().split("\n").filter(Boolean);
@@ -217,4 +217,117 @@ test("every agent-browser launch in orka.mjs carries ORKA_JOB (and ORCA_JOB)", (
   for (const l of launches) assert.match(l, /browserEnv\(/, l.slice(0, 80));
   assert.match(src, /brand\.envPair\("JOB", String\(job\)\)/);
   assert.doesNotMatch(src, /"session", "list"/);
+});
+
+test("the verifier's round-end reap records its Chrome pids and kills them", () => {
+  const t = scratch();
+  const j = makeJob(t, "running", { workers: [{ name: "verifier", role: "verifier", pane: "p-v" }] });
+  const chrome = t.tree({ session: `${j.prefix}-verifier` });
+  const r = t.orka(["reap", j.id, "--worker", "verifier"]);
+  assert.equal(r.status, 0, r.stderr);
+  for (const pid of chrome.all) assert.ok(waitDead(pid), `verifier pid ${pid} should be gone`);
+  const recorded = JSON.parse(readFileSync(join(t.repo, ".orka", "jobs", j.id, "browser-pids.json"), "utf8")).pids;
+  assert.deepEqual(recorded.map((p) => p.pid).sort(), chrome.all.sort());
+  assert.ok(recorded.every((p) => p.worker === "verifier" && p.startMs > 0));
+});
+
+test("the verifier prompt ends the round with orka reap and a bracketed pgrep", () => {
+  const src = readFileSync(ORKA, "utf8");
+  assert.match(src, /Your round ends with one last command: orka reap \$\{job\.id\} --worker \$\{name\}/);
+  assert.match(src, /pgrep -af '\[a\]gent-browser-chrome'/);
+});
+
+test("cleanup kills Chrome whose worker pane is gone; a live pane's Chrome stays", () => {
+  const t = scratch();
+  const j = makeJob(t, "running", { workers: [{ name: "api", pane: "p-a", closed: new Date().toISOString() }, { name: "web", pane: "p-w" }] });
+  const api = t.tree({ session: `${j.prefix}-api` });
+  const web = t.tree({ session: `${j.prefix}-web`, jobTag: j.id });
+  const dry = t.orka(["cleanup", "--dry-run"]);
+  assert.match(dry.stdout, new RegExp(`browser pid ${api.daemon} has no owner left \\(pane p-a of api is gone\\)`));
+  const r = t.orka(["cleanup"]);
+  assert.equal(r.status, 0, r.stderr);
+  for (const pid of api.all) assert.ok(waitDead(pid), `api pid ${pid} should be gone`);
+  for (const pid of web.all) assert.ok(alive(pid), `web pid ${pid} must live`);
+});
+
+test("cleanup kills Chrome tagged for a job that no longer exists, only inside this repo's worktrees", () => {
+  const t = scratch();
+  makeJob(t, "running");
+  const here = t.tree({ session: "default", jobTag: "20260101000000000-gone" });
+  const elsewhere = t.tree({ session: "default", jobTag: "20260101000000000-other-repo" });
+  const wt = join(t.repo, ".orka", "worktrees", "20260101000000000-gone");
+  mkdirSync(wt, { recursive: true });
+  for (const pid of here.all) symlinkSync(wt, join(t.proc, String(pid), "cwd"));
+  for (const pid of elsewhere.all) symlinkSync(tmpdir(), join(t.proc, String(pid), "cwd"));
+  const r = t.orka(["cleanup"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /job 20260101000000000-gone no longer exists/);
+  for (const pid of [here.root, here.renderer]) assert.ok(waitDead(pid), `pid ${pid} should be gone`);
+  for (const pid of elsewhere.all) assert.ok(alive(pid), `another repo's pid ${pid} must live`);
+});
+
+test("a recorded pid that lost its tag and session is killed once its pane is closed", () => {
+  const t = scratch();
+  const j = makeJob(t, "running", { workers: [{ name: "verifier", role: "verifier", pane: "p-v" }] });
+  const chrome = t.tree({ session: `${j.prefix}-verifier` });
+  assert.equal(t.orka(["status", j.id]).status, 0);
+  assert.ok(existsSync(join(t.repo, ".orka", "jobs", j.id, "browser-pids.json")));
+  // The daemon goes, Chrome is reparented and carries nothing that names the job.
+  rmSync(join(t.proc, String(chrome.daemon)), { recursive: true });
+  for (const pid of [chrome.root, chrome.renderer]) t.entry(pid, { cmd: `/c/chrome --type=x --user-data-dir=/tmp/agent-browser-chrome-z`, ppid: 1 });
+  const before = t.orka(["cleanup"]);
+  for (const pid of [chrome.root, chrome.renderer]) assert.ok(alive(pid), "pane still open: kept");
+  assert.doesNotMatch(before.stdout, /no owner left/);
+  const job = j.read();
+  job.workers[0].closed = new Date().toISOString();
+  writeFileSync(j.path, JSON.stringify(job));
+  const r = t.orka(["cleanup"]);
+  assert.match(r.stdout, /recorded pid of verifier/);
+  for (const pid of [chrome.root, chrome.renderer]) assert.ok(waitDead(pid), `pid ${pid} should be gone`);
+});
+
+test("selectRecorded never matches a recycled pid; selectGone ignores unattributed and live-pane processes", () => {
+  const proc = (o) => ({ pid: 50, ppid: 1, cmdline: "chrome", job: "", worker: "", session: "", startMs: 1000000, cwd: "", ...o });
+  assert.equal(selectRecorded([proc({})], [{ pid: 50, startMs: 1000000 }]).length, 1);
+  assert.equal(selectRecorded([proc({})], [{ pid: 50, startMs: 9000000 }]).length, 0);
+  assert.equal(selectRecorded([proc({})], [{ pid: 51, startMs: 1000000 }]).length, 0);
+  const job = { id: "j1", status: "running", pane: "p-o", workers: [{ name: "w1", pane: "p-1" }] };
+  const opts = { jobs: [job], prefixOf: () => "orka-12345678", worktreesRoot: "/r/.orka/worktrees", livePanes: new Set(["p-o", "p-1"]) };
+  assert.equal(selectGone([proc({})], opts).length, 0);
+  assert.equal(selectGone([proc({ job: "j1", worker: "w1" })], opts).length, 0);
+  assert.equal(selectGone([proc({ job: "j1", worker: "w1" })], { ...opts, livePanes: new Set(["p-o"]) }).length, 1);
+  assert.equal(selectGone([proc({ session: "orka-12345678-orchestrator" })], { ...opts, livePanes: new Set() }).length, 1);
+  assert.equal(selectGone([proc({ job: "j1", worker: "w1" })], { ...opts, livePanes: null }).length, 0);
+  assert.equal(selectGone([proc({ job: "nope", cwd: "/r/.orka/worktrees/nope" })], opts).length, 1);
+  assert.equal(selectGone([proc({ job: "nope", cwd: "/r/.orka/worktrees2/nope" })], opts).length, 0);
+});
+
+test("the watcher kills a verifier's Chrome once the verifier writes its result, and records pids before", async () => {
+  const t = scratch();
+  const base = join(t.repo, "..");
+  // herdr: the orchestrator is always working, its pane always there.
+  writeFileSync(join(base, "bin", "herdr"), `#!/bin/sh\ncase "$1 $2" in\n  "agent get") echo '{"result":{"agent":{"agent_status":"working"}}}';;\n  *) echo '{}';;\nesac\n`);
+  const j = makeJob(t, "running", { workers: [{ name: "verifier", role: "verifier", pane: "p-v" }] });
+  mkdirSync(join(t.repo, "wt"), { recursive: true });
+  const chrome = t.tree({ session: `${j.prefix}-verifier` });
+  const env = { ...process.env, PATH: `${join(base, "bin")}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_PROC_ROOT: t.proc, ORKA_WATCH_POLL_MS: "200", ORKA_MEMORY_GUARD: "off" };
+  const { spawn } = await import("node:child_process");
+  const watcher = spawn("timeout", ["30", process.execPath, ORKA, "watch", j.id, "--cwd", t.repo], { env });
+  let out = "";
+  watcher.stdout.on("data", (d) => (out += d));
+  const exited = new Promise((res) => watcher.on("exit", res));
+  const pidsFile = join(t.repo, ".orka", "jobs", j.id, "browser-pids.json");
+  for (let i = 0; i < 100 && !existsSync(pidsFile); i++) await new Promise((r) => setTimeout(r, 50));
+  assert.ok(existsSync(pidsFile), "the watcher records the verifier's pids while it runs");
+  for (const pid of chrome.all) assert.ok(alive(pid), "still checking: kept");
+  writeFileSync(join(t.repo, ".orka", "jobs", j.id, "results", "verifier.json"), JSON.stringify({ round: 1, verdict: "pass", failures: [] }));
+  for (const pid of chrome.all) {
+    for (let i = 0; i < 100 && alive(pid); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(!alive(pid), `verifier pid ${pid} should be gone`);
+  }
+  const job = j.read();
+  job.status = "done";
+  writeFileSync(j.path, JSON.stringify(job));
+  await exited;
+  assert.match(out, /verifier verifier wrote its result; reaping its browsers/);
 });

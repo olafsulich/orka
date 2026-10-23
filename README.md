@@ -37,14 +37,14 @@ Commands (full flags in [commands.md](docs/commands.md)):
 | `orka spec init <feature>` | scaffold `specs/<feature>/spec.md` ([specs.md](docs/specs.md)) |
 | `orka run <id>` | worktree, pane, orchestrator, watcher |
 | `orka worker` | start a builder or verifier worker |
-| `orka status` / `digest` | show a job / capped snapshot |
+| `orka status` / `digest` | show a job, free memory, live panes, worker queue / capped snapshot |
 | `orka steer <id> "msg"` | message the lead; follow-up round on a finished job |
 | `orka propose <id>` | orchestrator: pause at the direction gate, notify ([gate.md](docs/gate.md)) |
 | `orka approve <id>` | resume a job waiting at the direction gate |
 | `orka stop` / `done` | end a job; send the finish wake |
 | `orka strategy` / `log` | record a strategy change / a decision |
 | `orka verify <id>` | browser checks in the worktree |
-| `orka reap` / `cleanup` | free browsers / close stale workspaces |
+| `orka reap` / `cleanup` | free browsers / sweep finished jobs: browsers, done worktrees, stale workspaces (also runs at `new` and `run`) |
 | `orka webhook <id>` | preview or retry the finish POST |
 | `orka watch <id>` | needs-input watcher (started by `run`) |
 | `orka autonomy [set <L0-L3>]` | per-repo level, CLI-enforced ([autonomy.md](docs/autonomy.md)) |
@@ -97,6 +97,8 @@ Config:
 | --- | --- |
 | `.orka/config.json` | local mark; `verify`, `verifierModel`, `staleAfter` |
 | `~/.config/orka/config.json` | autonomy level per repo path (default L1) |
+| `.orka/config.json` | local mark; `verify`, `verifierModel`, `staleAfter`, `memoryGuard` |
+| `node_modules` in a job worktree | symlink to the main checkout's; real install when the lockfile differs |
 | `orka.verify.json` | browser checks at the worktree root; commit it |
 | ports | 4 per job: `ORKA_PORT`, `ORKA_PORTS` |
 

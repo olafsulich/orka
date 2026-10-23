@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { LESSONS_MAX_LINES, collectLessons, mergeLessons } from "../lib/spec.mjs";
@@ -23,7 +23,8 @@ function spedJob() {
   mkdirSync(results, { recursive: true });
   writeFileSync(join(results, "verifier.round-1.json"), JSON.stringify({ round: 1, verdict: "fail", failures: [{ check: "toggle", evidence: "html has no data-theme after click" }] }));
   writeFileSync(join(results, "verifier.json"), JSON.stringify({ round: 2, verdict: "pass", failures: [], warnings: [{ check: "lint", evidence: "old warning", base: "abc", proof: "fails on base" }] }));
-  const branchSpec = () => t.g("-C", job.worktree, "show", `${job.branch}:specs/dark-mode/spec.md`);
+  // Read from the repo: done removes a clean job worktree (the branch is kept).
+  const branchSpec = () => t.g("show", `${job.branch}:specs/dark-mode/spec.md`);
   return { ...t, id, job, branchSpec };
 }
 
@@ -42,10 +43,11 @@ test("orka done appends lessons to the spec and commits it on the job branch, no
   assert.match(spec, /flaky: lint fails on the base commit too/);
   assert.equal(t.g("rev-parse", "main"), mainBefore, "main must not move");
   assert.doesNotMatch(t.g("show", "main:specs/dark-mode/spec.md"), /## Lessons/);
-  assert.match(t.g("-C", t.job.worktree, "log", "-1", "--format=%s"), /^Spec lessons: dark-mode \(job /);
-  assert.deepEqual(t.g("-C", t.job.worktree, "show", "--name-only", "--format=", "HEAD").split("\n"), ["specs/dark-mode/spec.md"]);
+  assert.match(t.g("log", "-1", "--format=%s", t.job.branch), /^Spec lessons: dark-mode \(job /);
+  assert.deepEqual(t.g("show", "--name-only", "--format=", t.job.branch).split("\n"), ["specs/dark-mode/spec.md"]);
   const job = t.read(t.id);
   assert.equal(job.status, "done");
+  assert.ok(job.worktreeRemoved && !existsSync(t.job.worktree), "the lessons commit lands before done removes the worktree");
   assert.equal(job.lessons.added, 5);
   assert.match(t.orka(["status", t.id]).stdout, /lessons: 5 added, 0 seen again \(commit [0-9a-f]+\)/);
   assert.match(readFileSync(join(t.repo, ".orka", "jobs", t.id, "decisions.tsv"), "utf8"), /\tlessons\t5 added/);
@@ -83,7 +85,7 @@ test("done --dry-run previews lessons and writes nothing", () => {
 test("lessons are skipped when the worktree is not on the job branch", () => {
   const t = spedJob();
   t.g("-C", t.job.worktree, "checkout", "-q", "--detach");
-  const r = t.orka(["done", t.id]);
+  const r = t.orka(["done", t.id, "--keep"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /lessons: skipped \(worktree is on HEAD, not orka\//);
   assert.doesNotMatch(readFileSync(join(t.job.worktree, "specs", "dark-mode", "spec.md"), "utf8"), /## Lessons/);
@@ -95,7 +97,7 @@ test("an L0 repo skips the lessons commit and leaves the spec untouched", () => 
   const headBefore = t.g("-C", t.job.worktree, "rev-parse", "HEAD");
   const dry = t.orka(["done", t.id, "--dry-run"]);
   assert.match(dry.stdout, /lessons: skipped \(5 found; the repo is at autonomy L0, read-only: no lessons commit\)/);
-  const r = t.orka(["done", t.id]);
+  const r = t.orka(["done", t.id, "--keep"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^done /m);
   assert.match(r.stdout, /lessons: skipped \(5 found; the repo is at autonomy L0/);

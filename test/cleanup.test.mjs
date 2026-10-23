@@ -27,7 +27,7 @@ function scratch() {
   stub("herdr", "echo '{}'");
   stub("agent-browser", `case "$*" in *"session list"*) echo '{"success":true,"data":{"sessions":["$LIVE"]}}';; esac`);
   execFileSync("git", ["init", "-q"], { cwd: repo });
-  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: home, XDG_RUNTIME_DIR: run, AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1" };
+  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: home, XDG_RUNTIME_DIR: run, AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off" };
   const orka = (args) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...process.env, ...env } });
   orka(["init"]);
   const calls = () => readFileSync(log, "utf8").trim().split("\n").filter(Boolean);
@@ -175,7 +175,7 @@ test("orka new sweeps stale workspaces quietly, on stderr only", () => {
   const r = t.orka(["new", "--kind", "pi", "--title", "n", "--goal", "g"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout.trim(), /^[0-9]{17}-n$/);
-  assert.match(r.stderr, /closed 1 stale workspace/);
+  assert.match(r.stderr, /cleanup: closed workspace w-old/);
   assert.ok(t.calls().includes("herdr workspace close w-old"));
   assert.ok(read(old).workspaceClosed);
   const again = t.orka(["new", "--kind", "pi", "--title", "n2", "--goal", "g"]);
@@ -237,7 +237,7 @@ test("cleanup kills orphan watchers (terminal, missing, unrecorded pid) and spar
   ];
   const file = fakeWatchers(t, list);
   const env = { ORKA_FAKE_WATCHERS: file };
-  const run = (extra) => spawnSync(process.execPath, [ORKA, "cleanup", ...extra, "--cwd", t.repo], { encoding: "utf8", env: { ...process.env, PATH: `${t.bin}:${process.env.PATH}`, XDG_RUNTIME_DIR: t.run, ORKA_NO_WATCH: "1", ...env } });
+  const run = (extra) => spawnSync(process.execPath, [ORKA, "cleanup", ...extra, "--cwd", t.repo], { encoding: "utf8", env: { ...process.env, PATH: `${t.bin}:${process.env.PATH}`, XDG_RUNTIME_DIR: t.run, ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off", ...env } });
   const dry = run(["--dry-run"]);
   assert.equal(dry.status, 0, dry.stderr);
   for (const pid of [4002, 4004, 4005, 4007]) assert.match(dry.stdout, new RegExp(`would kill orphan watcher pid ${pid} `));

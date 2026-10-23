@@ -13,6 +13,8 @@ import { parseEnv } from "node:util";
 import { DECISION_ROWS, DIGEST_MAX, FILE_READ_MAX, SUMMARY_MAX, VERIFIER_JSON_MAX, renderDigest, steerText } from "../lib/digest.mjs";
 import * as brand from "../lib/brand.mjs";
 import * as browsers from "../lib/browsers.mjs";
+import * as deps from "../lib/deps.mjs";
+import * as guard from "../lib/guard.mjs";
 import * as lifecycle from "../lib/lifecycle.mjs";
 import * as autonomy from "../lib/autonomy.mjs";
 import * as ports from "../lib/ports.mjs";
@@ -268,6 +270,7 @@ function hasBrowserSteps(path) {
 
 const BROWSER_CLOSE_TIMEOUT_MS = 20000;
 const CLEANUP_BUDGET_MS = 120000;
+const AUTO_CLEANUP_BUDGET_MS = 30000;
 const ORPHAN_BROWSER_HOURS = 2;
 const UI_GOAL_RE = /agent-browser|\b(ui|browser|visual)\s+(verification|check|checks|test|tests|testing)\b|\b(verify|check|test)\s+(the\s+)?(ui|user interface|user flows?)\b/i;
 
@@ -857,8 +860,81 @@ function releaseJob(repo, job, opts = {}) {
       closed.panes.push({ name: w.name, pane: w.pane });
     } else console.log(`cleanup: worker pane ${w.pane} (${w.name}) not closed`);
   }
+  if ((opts.status || job.status) === "done" && lifecycle.removableWorktree({ ...job, status: "done" })) {
+    if (removeWorktree(repo, job, { dry }).removed && !dry) closed.worktree = job.worktree;
+  }
   if (dry) return;
   job.cleanup = closed;
+  save(repo, job);
+}
+
+// Disk use of a directory in KB (du does not follow symlinks); 0 when unknown.
+function diskKb(path) {
+  const r = spawnSync("du", ["-sk", path], { encoding: "utf8", timeout: 120000 });
+  return Number.parseInt(r.stdout, 10) || 0;
+}
+
+function registeredWorktrees(repo) {
+  const list = git(repo, ["worktree", "list", "--porcelain"]);
+  return new Set(list.out.split("\n").filter((l) => l.startsWith("worktree ")).map((l) => resolve(l.slice(9))));
+}
+
+// Removes a done job's worktree with git worktree remove (never --force), so
+// uncommitted work is never deleted: a dirty worktree is kept and reported.
+// The branch always stays. Only a registered worktree under the state dir.
+function removeWorktree(repo, job, { dry = false, log = console.log } = {}) {
+  const path = resolve(job.worktree);
+  const branch = brand.jobBranch(job);
+  const root = resolve(brand.stateDir(repo), "worktrees");
+  if (!path.startsWith(root + sep)) {
+    log(`cleanup: kept worktree ${path} (not under ${root})`);
+    return { kept: "outside" };
+  }
+  if (!existsSync(path)) {
+    if (!dry) {
+      git(repo, ["worktree", "prune"]);
+      job.worktreeRemoved = new Date().toISOString();
+      save(repo, job);
+    }
+    return { removed: false, kb: 0 };
+  }
+  if (!registeredWorktrees(repo).has(path)) {
+    log(`cleanup: kept worktree ${path} (not a registered git worktree)`);
+    return { kept: "unregistered" };
+  }
+  const status = git(path, ["status", "--porcelain"]);
+  const changes = status.out.split("\n").filter(Boolean).filter((l) => !deps.isLinkStatusLine(path, l));
+  if (status.code !== 0 || changes.length) {
+    const why = status.code !== 0 ? "git status failed" : `${changes.length} uncommitted change${changes.length === 1 ? "" : "s"}; commit or discard, then orka cleanup`;
+    log(`cleanup: kept worktree ${path} (${why})`);
+    return { kept: "dirty" };
+  }
+  const kb = diskKb(path);
+  if (dry) {
+    log(`cleanup: would remove worktree ${path} (${lifecycle.formatKb(kb)}, branch ${branch} kept)`);
+    return { removed: true, kb };
+  }
+  deps.unlinkLinks(path);
+  const removed = git(repo, ["worktree", "remove", path]);
+  if (removed.code !== 0) {
+    log(`cleanup: kept worktree ${path} (git worktree remove: ${(removed.err || removed.out).split("\n")[0]})`);
+    return { kept: "git" };
+  }
+  job.worktreeRemoved = new Date().toISOString();
+  save(repo, job);
+  log(`cleanup: removed worktree ${path} (${lifecycle.formatKb(kb)}, branch ${branch} kept)`);
+  return { removed: true, kb };
+}
+
+// A follow-up round on a done job whose worktree was removed: check the kept branch out again.
+function restoreWorktree(repo, job) {
+  if (!job.worktreeRemoved || !job.worktree || existsSync(job.worktree)) return;
+  const added = git(repo, ["worktree", "add", job.worktree, brand.jobBranch(job)]);
+  if (added.code !== 0) fail(`could not restore worktree ${job.worktree}: ${added.err || added.out}`);
+  delete job.worktreeRemoved;
+  save(repo, job);
+  console.log(`restored worktree ${job.worktree} from branch ${brand.jobBranch(job)}`);
+  setupDeps(repo, job);
   save(repo, job);
 }
 
@@ -1089,6 +1165,8 @@ async function assignPorts(repo, job) {
 // Shared prompt rules: each literal lives here once and is interpolated into the prompts that use it.
 const REVERSIBLE_RULE = `Reversible work never waits on a human. Irreversible actions (push, delete outside the worktree, external sends, purchases) stop and ask.`;
 const NEVER_CLOSE_PANES = `Never close panes (yours or anyone's, no herdr pane close): finished panes stay open, and orka frees them when the job is done or stopped.`;
+const COMMIT_BEFORE_DONE = (job) =>
+  `Before orka done, commit everything in the worktree on the job branch${job.playbook === "investigation" ? "" : `, including the checks file and feature map the verifier wrote (${verifyFile(job.worktree)}, ${featureMapFile(job.worktree)}): they are meant to be committed`}. orka done removes a done job's worktree (the branch stays), and keeps it only when something is left uncommitted.`;
 const SUMMARY_FROM_DIFF = (job) => `Before orka done, run git diff ${job.baseCommit || `$(git merge-base ${brand.jobBranch(job)} main)`} (--stat plus a skim) and write summary.txt from the diff, not from the workers' claims.`;
 
 function portPromptLines(job) {
@@ -1119,22 +1197,69 @@ function jobEnvArgs(job, worker) {
 // <browserPrefix>-<worker>.
 function reapBrowsers(job, { worker = null, workers = null, dry = false } = {}) {
   const procs = browsers.selectReap(browsers.scanBrowsers(), { jobId: job.id, worker, workers, prefix: browserPrefix(job) });
+  if (!dry) recordBrowserPids(job.repo, job, procs);
   return killBrowserProcs(procs, dry);
 }
 
-function killBrowserProcs(procs, dry) {
+// <job dir>/browser-pids.json: every browser process orka has seen for the job
+// ({ pid, startMs, worker, session, at }). orka cleanup kills a recorded pid
+// once its job is finished or its pane is gone, even when the process lost its
+// tag and session. The start time stops a recycled pid from ever matching.
+function browserPidsPath(repo, id) {
+  return join(jobDir(repo, id), "browser-pids.json");
+}
+
+function readBrowserPids(repo, id) {
+  try {
+    const data = JSON.parse(readFileSync(browserPidsPath(repo, id), "utf8"));
+    return Array.isArray(data?.pids) ? data.pids : [];
+  } catch {
+    return [];
+  }
+}
+
+const BROWSER_PIDS_MAX = 200;
+
+// Records the job's browser processes (procs, else a fresh scan). Never fatal.
+function recordBrowserPids(repo, job, procs = null) {
+  try {
+    if (!repo || !job?.id) return;
+    const found = procs || browsers.selectReap(browsers.scanBrowsers(), { jobId: job.id, prefix: browserPrefix(job) });
+    if (!found.length) return;
+    const known = readBrowserPids(repo, job.id);
+    const seen = new Set(known.map((r) => `${r.pid}:${r.startMs}`));
+    const at = new Date().toISOString();
+    const add = found.filter((p) => p.startMs && !seen.has(`${p.pid}:${p.startMs}`)).map((p) => ({ pid: p.pid, startMs: p.startMs, worker: p.worker || brand.SESSION_RE.exec(p.session || "")?.[2] || "", session: p.session || "", at }));
+    if (!add.length) return;
+    mkdirSync(jobDir(repo, job.id), { recursive: true });
+    const path = browserPidsPath(repo, job.id);
+    writeFileSync(`${path}.tmp`, JSON.stringify({ v: 1, pids: [...known, ...add].slice(-BROWSER_PIDS_MAX) }, null, 2) + "\n");
+    renameSync(`${path}.tmp`, path);
+  } catch {
+    // a record is a help for cleanup, never a reason to fail a command
+  }
+}
+
+// Live herdr pane ids, or null when herdr cannot say.
+function livePaneIds() {
+  const got = herdr(["pane", "list"], 10000);
+  const panes = got.json?.result?.panes;
+  return got.code === 0 && Array.isArray(panes) ? new Set(panes.map((p) => p?.pane_id).filter(Boolean)) : null;
+}
+
+function killBrowserProcs(procs, dry, log = console.log) {
   const pids = new Set(procs.map((p) => p.pid));
   for (const p of procs) {
     if (pids.has(p.ppid)) continue; // listed under its parent
     const kids = procs.filter((c) => c.ppid === p.pid).length;
     const who = [p.job, p.worker].filter(Boolean).join(" ");
-    console.log(`cleanup: ${dry ? "would kill" : "killed"} browser pid ${p.pid} (${who || p.session || "untagged"}: ${p.cmdline.slice(0, 80)})${kids ? ` and ${procs.length - 1} child process(es)` : ""}`);
+    log(`cleanup: ${dry ? "would kill" : "killed"} browser pid ${p.pid} (${who || p.session || "untagged"}: ${p.cmdline.slice(0, 80)})${kids ? ` and ${procs.length - 1} child process(es)` : ""}`);
   }
   if (!dry && procs.length) {
     try {
       lifecycle.killProcesses(procs.map((p) => p.pid), { graceMs: 3000 });
     } catch (err) {
-      console.log(`cleanup: could not kill a browser: ${err.message}`);
+      log(`cleanup: could not kill a browser: ${err.message}`);
     }
   }
   return procs.map((p) => p.pid);
@@ -1205,6 +1330,7 @@ function workerPrompt(job, name, task, alias) {
     `Work only in this shared checkout: ${job.worktree}`,
     `Branch: ${job.branch}`,
     `Other workers share this worktree. Do not revert their files. Do not create a branch, worktree, or push.`,
+    ...depLinkLines(job),
     `Browser checks, if this task needs them, go in ${verifyFile(job.worktree)} at the worktree root, or the path in ${configPath(job.repo)} "verify".`,
     `Shape: {"steps":[["open","http://HOST:PORT/"],{"visible":"SELECTOR"},{"text":"SELECTOR","includes":"EXPECTED"}]}`,
     `Use this project's URL. Do not copy a host or port from another repo. Do not run orka verify unless the task says so.`,
@@ -1551,6 +1677,7 @@ function verifierPrompt(job, name, task, alias, round) {
     `Then send that line to the orchestrator:`,
     `herdr agent prompt ${job.agent} "<the one-line note>"`,
     `If that prompt is rejected because the orchestrator is busy, the files are enough.`,
+    `Your round ends with one last command: orka reap ${job.id} --worker ${name} (or ${ORKA} reap ${job.id} --worker ${name}). It records and kills every Chrome your round started; your pane stays open. To check, use a bracketed pattern so pgrep never matches itself: pgrep -af '[a]gent-browser-chrome'.`,
     ``,
     NEVER_CLOSE_PANES,
     `Finish wake is automatic from the orka CLI when it marks the job done, failed, or stopped. That is not your job. Do not run herdr-finish-watch. Do not run orka stop, orka done or orka webhook. Do not start another agent.`,
@@ -1648,6 +1775,7 @@ function orchestratorPrompt(job) {
     `Start each worker with orka, which opens a Herdr pane in this same worktree:`,
     `  orka worker --job ${job.id} --name <worker> --task "<task>"`,
     `If orka is not on PATH, run ${ORKA} instead. The binary is the same file.`,
+    `orka worker waits (queues) while memory or panes are tight, up to ${Math.round(guardLimitsOf(job.repo).waitMs / 60000)} minutes, then refuses. Give that call a long timeout (600000 ms) or run it in the background.`,
     `Write every worker --task as this brief, one labelled section per line: GOAL / SCOPE (files it owns) / CONTEXT (file pointers, not pasted text) / ACCEPTANCE / VERIFY / TIMEBOX / FORBIDDEN / REPORT. Workers cannot ask questions, so a vague task fails quietly.`,
     `When ${featureMapFile(job.worktree)} exists at the repo root, point workers at it in CONTEXT.`,
     ...(job.spec?.path ? [`This job has a spec: ${job.spec.path} in the worktree. orka pastes it into every worker and verifier brief, so do not copy it into a --task. Every "Done when" line of it goes into the verifier --task as an acceptance criterion.`] : []),
@@ -1673,6 +1801,7 @@ function orchestratorPrompt(job) {
     ...flow.verify,
     ``,
     SUMMARY_FROM_DIFF(job),
+    COMMIT_BEFORE_DONE(job),
     `Before orka done, run orka digest ${job.id}, use it only for ${flow.digestUse}; write ${dir}/summary.txt ${flow.summaryFrom} (per the rule above), and set the summary field. Do not load the job JSON into the turn to copy fields.`,
     ...flow.done,
     `Then stop working. Your pane stays open after orka done, so Olaf can still give feedback with orka steer; a follow-up message starts a new round, and you run orka done ${job.id} again when that round is finished (the finish wake is sent again, marked followUp).`,
@@ -1902,6 +2031,51 @@ function addWorktree(repo, job) {
   return path;
 }
 
+const DEPS_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
+
+// Links node_modules (lib/deps.mjs DEP_DIRS) to the main checkout, or runs a real
+// install when the worktree's lockfile differs from main's; repairs a missing or
+// broken link. Runs at orka run, at every orka worker and on a restored worktree.
+// Lines go to stderr. Never fatal: a job without shared deps still runs.
+function setupDeps(repo, job) {
+  if (!job.worktree || !existsSync(job.worktree)) return;
+  try {
+    const plan = deps.planDeps(repo, job.worktree);
+    const done = deps.applyDeps(repo, job.worktree, plan, { run: runInstall, log: (msg) => console.error(msg) });
+    for (const d of done) if (d.action !== "install") ensureIgnored(job.worktree, d.dir);
+    if (done.length) job.deps = [...(job.deps || []), ...done.map((d) => ({ ...d, at: new Date().toISOString() }))].slice(-10);
+  } catch (err) {
+    console.error(`deps: skipped (${err?.message || err})`);
+  }
+}
+
+function runInstall(cmd, cwd) {
+  const r = spawnSync(cmd[0], cmd.slice(1), { cwd, encoding: "utf8", timeout: DEPS_INSTALL_TIMEOUT_MS, killSignal: "SIGKILL", env: { ...process.env, PATH: pathPrefix() } });
+  if (r.error) return { ok: false, detail: r.error.code === "ENOENT" ? `${cmd[0]} is not on PATH` : r.error.message };
+  if (r.status === 0) return { ok: true, detail: "" };
+  return { ok: false, detail: `exit ${r.status}: ${String(r.stderr || r.stdout || "").trim().split("\n").at(-1) || "no output"}` };
+}
+
+// "node_modules/" in .gitignore matches only a real directory, so a link would be
+// untracked and could be committed by git add -A. Such a link goes into the repo's
+// local info/exclude (never committed), once.
+function ensureIgnored(wt, name) {
+  if (git(wt, ["check-ignore", "-q", name]).code === 0) return;
+  const path = git(wt, ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"]).out;
+  if (!path) return;
+  mkdirSync(dirname(path), { recursive: true });
+  const cur = existsSync(path) ? readFileSync(path, "utf8") : "";
+  if (cur.split("\n").includes(`/${name}`)) return;
+  appendFileSync(path, `${cur && !cur.endsWith("\n") ? "\n" : ""}# orka: dependency links in job worktrees\n/${name}\n`);
+}
+
+// Worker prompt lines when the worktree shares a dep dir with the main checkout.
+function depLinkLines(job) {
+  const linked = deps.linkNames().filter((name) => deps.linkState(join(job.worktree || "", name), join(job.repo, name)) === "link");
+  if (!linked.length) return [];
+  return [`${linked.join(", ")} in this worktree is a symlink to the main checkout's. Never install into it. Before you add, remove or upgrade a dependency, replace the link with an install of its own: rm ${linked[0]}, then the repo's install command (npm install, pnpm install...).`];
+}
+
 function createWorkspace(job) {
   const label = brand.workspaceLabel(job.id);
   const got = herdr([
@@ -1968,6 +2142,7 @@ async function cmdRun(args) {
   if (job.kind === "claude") save(repo, job);
   try {
     job.worktree = addWorktree(repo, job);
+    setupDeps(repo, job);
     save(repo, job);
     ensureJobDir(repo, id);
     const place = createWorkspace(job);
@@ -2106,7 +2281,10 @@ function cmdWorker(args) {
   }
   if (!job.pane || !job.agent || !job.worktree) fail("orchestrator is not running");
   if (job.status !== "running") fail(`job ${id} is ${job.status}, not running`);
+  waitForRoom(repo, job, first, role);
   ensureJobDir(repo, job.id);
+  setupDeps(repo, job);
+  recordBrowserPids(repo, job);
   if (role === "verifier") {
     archiveVerifierResult(repo, job, round - 1);
     reapPreviousVerifier(job);
@@ -2160,6 +2338,91 @@ function cmdWorker(args) {
   console.log(`${id} worker ${name} pane=${pane} kind=${kind}${alias ? ` model=${alias}` : ""}${role === "verifier" ? ` role=verifier round=${round}` : ""} worktree=${job.worktree}`);
 }
 
+function guardLimitsOf(repo) {
+  let cfg = {};
+  try {
+    cfg = JSON.parse(readFileSync(configPath(repo), "utf8")).memoryGuard || {};
+  } catch {
+    // defaults
+  }
+  return guard.guardLimits(cfg, (key) => brand.env(key));
+}
+
+// Live agent panes: herdr panes with an agent (agent_status other than unknown).
+// When herdr cannot list panes, the panes this repo's running jobs hold.
+function livePaneCount(repo) {
+  const got = herdr(["pane", "list"], 10000);
+  const panes = got.json?.result?.panes;
+  if (got.code === 0 && Array.isArray(panes)) return panes.filter((p) => p?.agent_status && p.agent_status !== "unknown").length;
+  return loadAllJobs(repo)
+    .filter((j) => j.status === "running")
+    .reduce((n, j) => n + (j.pane ? 1 : 0) + (j.workers || []).filter((w) => w.pane && !w.closed && w.pane !== j.pane).length, 0);
+}
+
+function hostSample(repo) {
+  return { availableMb: guard.memAvailableMb(browsers.procRootOf()), panes: livePaneCount(repo) };
+}
+
+const sampleText = (s, limits) => `MemAvailable ${s.availableMb ?? "?"}MB (min ${limits.minAvailableMb}MB), live panes ${s.panes ?? "?"}/${limits.maxPanes}`;
+
+// The memory guard. Before a worker or verifier pane starts: when MemAvailable or
+// the live pane count is past its limit, or earlier starts are already queued,
+// queue and wait (poll) until there is room and this start is first in line.
+// Logged to decisions.tsv. Past the wait limit the start is refused (exit 1).
+function waitForRoom(repo, job, name, role) {
+  const limits = guardLimitsOf(repo);
+  if (limits.off) return;
+  const dir = guard.queueDir(brand.stateDir(repo));
+  let sample = hostSample(repo);
+  let verdict = guard.guardVerdict(sample, limits);
+  const ahead = guard.liveQueue(dir, pidAlive);
+  if (verdict.ok && !ahead.length) return;
+  const since = new Date().toISOString();
+  const file = guard.enqueue(dir, { job: job.id, name, role, pid: process.pid, since });
+  const leave = () => guard.dequeue(file);
+  for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+    process.once(sig, () => {
+      leave();
+      process.exit(128 + ({ SIGHUP: 1, SIGINT: 2, SIGTERM: 15 }[sig]));
+    });
+  }
+  const why = verdict.ok ? `${ahead.length} earlier start(s) queued` : verdict.reasons.join("; ");
+  appendDecision(repo, job.id, ["memory-guard", `queued ${role} ${name}`, why, sampleText(sample, limits), "waiting"]);
+  console.error(`memory guard: ${why}; ${role} ${name} queued, waiting up to ${Math.round(limits.waitMs / 1000)}s`);
+  const started = Date.now();
+  for (;;) {
+    sleep(limits.pollMs);
+    sample = hostSample(repo);
+    verdict = guard.guardVerdict(sample, limits);
+    const head = guard.liveQueue(dir, pidAlive)[0];
+    const waited = Math.round((Date.now() - started) / 1000);
+    if (verdict.ok && head?.file === file) {
+      leave();
+      appendDecision(repo, job.id, ["memory-guard", `started ${role} ${name} after ${waited}s`, "room again", sampleText(sample, limits), "started"]);
+      console.error(`memory guard: room again after ${waited}s; starting ${name}`);
+      return;
+    }
+    if (Date.now() - started >= limits.waitMs) {
+      leave();
+      const still = verdict.ok ? "earlier starts still queued" : verdict.reasons.join("; ");
+      appendDecision(repo, job.id, ["memory-guard", `did not start ${role} ${name} after ${waited}s`, still, sampleText(sample, limits), "not started"]);
+      fail(`memory guard: ${still}; ${name} not started after ${waited}s. Wait for a worker to finish (or run orka cleanup), then run orka worker again.`);
+    }
+  }
+}
+
+// Host lines for orka status: free memory, live panes against the guard, and the queue.
+function printHost(repo, jobId = null) {
+  const limits = guardLimitsOf(repo);
+  const sample = hostSample(repo);
+  const queue = guard.liveQueue(guard.queueDir(brand.stateDir(repo)), pidAlive);
+  const mem = sample.availableMb == null ? "unknown" : `${sample.availableMb}MB available`;
+  const guardNote = limits.off ? "guard off" : `guard: min ${limits.minAvailableMb}MB, max ${limits.maxPanes} panes`;
+  const indent = jobId ? "  " : "";
+  console.log(`${indent}host: memory ${mem}, live panes ${sample.panes}, queue ${queue.length} (${guardNote})`);
+  for (const q of queue.filter((e) => !jobId || e.job === jobId)) console.log(`${indent}queued: ${q.job} ${q.name} (${q.role}) since ${q.since}`);
+}
+
 // A new verifier round starts clean: the previous verifier's sessions are closed
 // and any Chrome left from them (tagged or by session name) is killed.
 function reapPreviousVerifier(job) {
@@ -2191,7 +2454,7 @@ function cmdStatus(args) {
     line(job);
     console.log(`  repo: ${repo}`);
     console.log(`  branch: ${brand.jobBranch(job)}`);
-    console.log(`  worktree: ${job.worktree || "(not created)"}`);
+    console.log(`  worktree: ${job.worktree || "(not created)"}${job.worktreeRemoved ? ` (removed ${job.worktreeRemoved}; branch kept)` : ""}`);
     console.log(`  layout: ${job.workerLayout || "shared-worktree"}`);
     console.log(`  playbook: ${job.playbook || "feature"}`);
     if (job.spec?.path) console.log(`  spec: ${job.spec.path}${job.spec.commit ? ` @${job.spec.commit.slice(0, 8)}` : ""}`);
@@ -2215,17 +2478,17 @@ function cmdStatus(args) {
     printVerifyStatus(repo, job);
     console.log(`  decisions: ${decisionRows(repo, job.id).length}`);
     if (job.verifier?.rounds && job.status === "running") recordVerifier(repo, job);
+    if (job.status === "running") recordBrowserPids(repo, job);
     if (verifierLine(job)) console.log(`  ${verifierLine(job)}`);
     printVerifierDetail(job);
+    printHost(repo, job.id);
     return;
   }
   mkdirSync(jobsDir(repo), { recursive: true });
   const files = readdirSync(jobsDir(repo)).filter((f) => f.endsWith(".json")).sort();
-  if (!files.length) {
-    console.log("no jobs");
-    return;
-  }
+  if (!files.length) console.log("no jobs");
   for (const file of files) line(JSON.parse(readFileSync(join(jobsDir(repo), file), "utf8")));
+  printHost(repo);
 }
 
 function staleLabel(repo) {
@@ -2402,6 +2665,7 @@ function cmdDigest(args) {
   if (!id) fail("need: orka digest <id>");
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, id);
+  if (job.status === "running") recordBrowserPids(repo, job);
   const text = renderDigest(digestView(job), collectDigestFiles(repo, job));
   process.stdout.write(text.length < DIGEST_MAX ? `${text}\n` : text);
 }
@@ -2421,6 +2685,7 @@ function cmdSteer(args) {
   if (finished && (job.workspaceClosed || !agentExists(job.agent))) {
     fail(`${id} is ${job.status} and its orchestrator pane is gone; not steered`);
   }
+  if (finished) restoreWorktree(repo, job);
   const digest = renderDigest(digestView(job), collectDigestFiles(repo, job));
   // At the gate a steer revises the plan: the orchestrator rewrites approach.md and proposes again.
   const text = awaiting ? `Direction gate: Olaf asks you to revise the approach, not to build yet.\n${message}\nUpdate ${join(jobDir(repo, id), "approach.md")}, run orka propose ${id} again, and wait.` : message;
@@ -2608,6 +2873,7 @@ async function cmdDone(args) {
     for (const line of preview.lines) console.log(`finish webhook: ${line}`);
     appendSpecLessons(repo, view, { dry: true });
     releaseJob(repo, job, { dryRun: true, keep: args.keep });
+    releaseJob(repo, job, { dryRun: true, keep: args.keep, status: failing ? "failed" : "done" });
     return;
   }
   if (terminal) {
@@ -3266,10 +3532,10 @@ function staleThreshold(repo, flag) {
 }
 
 // Kills orphan `orka.mjs watch` (and old `orca.mjs watch`) processes of this repo. Prints each one.
-function reapWatchers(repo, jobs, dry) {
+function reapWatchers(repo, jobs, dry, log = console.log) {
   const orphans = watch.selectOrphanWatchers(watch.listWatchers(), { repo, jobs, exists: (p) => Boolean(p) && existsSync(p) });
   for (const o of orphans) {
-    console.log(`cleanup: ${dry ? "would kill" : "killed"} orphan watcher pid ${o.pid} (${o.jobId}, ${o.why})`);
+    log(`cleanup: ${dry ? "would kill" : "killed"} orphan watcher pid ${o.pid} (${o.jobId}, ${o.why})`);
     if (dry || brand.env("FAKE_WATCHERS")) continue;
     try {
       process.kill(o.pid, "SIGTERM");
@@ -3280,57 +3546,90 @@ function reapWatchers(repo, jobs, dry) {
   return orphans.length;
 }
 
-// Closes the workspace of finished jobs idle longer than the threshold. Browsers
-// first, then workspaces. Returns what it did. quiet: no "nothing to close" line.
-function sweep(repo, { dry = false, thresholdMs, orphans = true, quiet = false, orphanMinAgeMs = ORPHAN_BROWSER_HOURS * 3600000 } = {}) {
+// One pass over this repo's finished jobs: their browser sessions and browser
+// processes, orphan watchers, the worktrees of done jobs (the branch stays),
+// then the workspaces idle longer than the threshold. Returns how many things it
+// closed. quiet: no "nothing to close" line. untagged: also kill orphan
+// agent-browser Chrome no job owns (explicit orka cleanup only).
+function sweep(repo, { dry = false, thresholdMs, quiet = false, untagged = true, log = console.log, budgetMs = CLEANUP_BUDGET_MS, orphanMinAgeMs = ORPHAN_BROWSER_HOURS * 3600000 } = {}) {
   const verb = dry ? "would close" : "closed";
   const jobs = loadAllJobs(repo);
   const live = jobs.filter((j) => j.status === "running");
   const now = Date.now();
   let count = 0;
   const workspaces = jobs.filter((j) => lifecycle.isStale(j, now, thresholdMs));
-  if (orphans) {
-    const names = new Set();
-    for (const s of [...browserList(), ...jobs.flatMap((j) => j.browserSessions || [])]) {
-      const owner = jobs.find((j) => s.startsWith(`${browserPrefix(j)}-`) || s === legacyVerifySession(j));
-      if (owner && !live.includes(owner) && !owner.keep) names.add(s);
+  const names = new Set();
+  for (const s of [...browserList(), ...jobs.flatMap((j) => j.browserSessions || [])]) {
+    const owner = jobs.find((j) => s.startsWith(`${browserPrefix(j)}-`) || s === legacyVerifySession(j));
+    if (owner && !live.includes(owner) && !owner.keep) names.add(s);
+  }
+  // Dead-daemon sessions of any name only on explicit cleanup; the automatic sweep keeps to orka's own.
+  for (const s of orphanSessions()) if (untagged || brand.SESSION_RE.test(s)) names.add(s);
+  const deadline = Date.now() + budgetMs;
+  const stateful = new Set(browserList());
+  const scanned = quiet ? browsers.scanBrowsers() : [];
+  for (const s of names) {
+    // Quiet: a recorded session with no state and nothing running is long gone; do not report it again.
+    if (quiet && !stateful.has(s) && !sessionLive(s, scanned)) continue;
+    if (Date.now() > deadline) {
+      log(`cleanup: time budget spent, skipping browser ${s}`);
+      continue;
     }
-    for (const s of orphanSessions()) names.add(s);
-    const deadline = Date.now() + CLEANUP_BUDGET_MS;
-    for (const s of names) {
-      if (Date.now() > deadline) {
-        console.log(`cleanup: time budget spent, skipping browser ${s}`);
-        continue;
-      }
-      if (dry || closeBrowser(s)) {
-        console.log(`cleanup: ${verb} browser ${s}`);
-        count++;
-      }
+    if (dry || closeBrowser(s)) {
+      log(`cleanup: ${verb} browser ${s}`);
+      count++;
     }
-    // Leftover browser processes of this repo's finished jobs (tagged ORKA_JOB/ORCA_JOB,
-    // or named by session), then orphan agent-browser Chrome nobody owns.
-    const finished = jobs.filter((j) => j.status !== "running" && j.status !== "queued" && !j.keep);
-    const scan = browsers.scanBrowsers();
-    const doomed = new Set();
-    const procs = [
-      ...browsers.selectReap(scan, { finishedJobIds: finished.map((j) => j.id) }),
-      ...finished.flatMap((j) => browsers.selectReap(scan, { prefix: browserPrefix(j) })),
-    ].filter((p) => !doomed.has(p.pid) && doomed.add(p.pid));
-    count += killBrowserProcs(procs, dry).length;
+  }
+  // Leftover browser processes of this repo's finished jobs (tagged ORKA_JOB/ORCA_JOB,
+  // or named by session), then orphan agent-browser Chrome nobody owns.
+  const finished = jobs.filter((j) => j.status !== "running" && j.status !== "queued" && !j.keep);
+  const scan = browsers.scanBrowsers();
+  const doomed = new Set();
+  const procs = [
+    ...browsers.selectReap(scan, { finishedJobIds: finished.map((j) => j.id) }),
+    ...finished.flatMap((j) => browsers.selectReap(scan, { prefix: browserPrefix(j) })),
+  ].filter((p) => !doomed.has(p.pid) && doomed.add(p.pid));
+  count += killBrowserProcs(procs, dry, log).length;
+  // Browsers whose job or pane no longer exists (by tag, session or process cwd),
+  // then recorded pids of finished jobs and of gone panes.
+  const panes = live.length ? livePaneIds() : null;
+  const gone = browsers.selectGone(scan.filter((p) => !doomed.has(p.pid)), { jobs, prefixOf: browserPrefix, worktreesRoot: join(brand.stateDir(repo), "worktrees"), livePanes: panes });
+  const goneWorker = (j, name) => {
+    const w = (j.workers || []).filter((x) => x.name === name).at(-1);
+    return Boolean(w && (w.closed || (panes && w.pane && !panes.has(w.pane))));
+  };
+  for (const j of jobs) {
+    if (j.keep) continue;
+    const records = readBrowserPids(repo, j.id).filter((r) => j.status !== "running" || goneWorker(j, r.worker));
+    if (j.status !== "queued" && records.length) gone.push(...browsers.selectRecorded(scan.filter((p) => !doomed.has(p.pid)), records));
+  }
+  const goneProcs = gone.filter((p) => !doomed.has(p.pid) && doomed.add(p.pid));
+  for (const p of goneProcs) log(`cleanup: browser pid ${p.pid} has no owner left (${p.why})`);
+  count += killBrowserProcs(goneProcs, dry, log).length;
+  if (untagged) {
     const orphanProcs = browsers.selectOrphans(scan.filter((p) => !doomed.has(p.pid)), {
       minAgeMs: orphanMinAgeMs,
       liveJobIds: live.map((j) => j.id),
       livePrefixes: live.map(browserPrefix),
     });
-    if (orphanProcs.length) console.log(`cleanup: ${orphanProcs.filter((p) => p.chromeRoot).length} orphan agent-browser Chrome root(s) older than ${orphanMinAgeMs / 3600000}h, no running job`);
-    count += killBrowserProcs(orphanProcs, dry).length;
-    count += reapWatchers(repo, jobs, dry);
+    if (orphanProcs.length) log(`cleanup: ${orphanProcs.filter((p) => p.chromeRoot).length} orphan agent-browser Chrome root(s) older than ${orphanMinAgeMs / 3600000}h, no running job`);
+    count += killBrowserProcs(orphanProcs, dry, log).length;
   }
+  count += reapWatchers(repo, jobs, dry, log);
+  let freedKb = 0;
+  for (const j of jobs.filter(lifecycle.removableWorktree)) {
+    const got = removeWorktree(repo, j, { dry, log });
+    if (got.kb) {
+      count++;
+      freedKb += got.kb;
+    }
+  }
+  if (freedKb) log(`cleanup: ${dry ? "would free" : "freed"} ${lifecycle.formatKb(freedKb)} of done-job worktrees`);
   for (const j of workspaces) {
-    console.log(`cleanup: ${verb} workspace ${j.workspace} (${j.id}, idle since ${new Date(lifecycle.lastActivity(j) || 0).toISOString()})`);
+    log(`cleanup: ${verb} workspace ${j.workspace} (${j.id}, idle since ${new Date(lifecycle.lastActivity(j) || 0).toISOString()})`);
     count++;
   }
-  if (!count && !quiet) console.log("cleanup: nothing to close");
+  if (!count && !quiet) log("cleanup: nothing to close");
   if (dry) return count;
   for (const j of workspaces) {
     // The record first: closing the workspace kills any pane in it.
@@ -3341,21 +3640,14 @@ function sweep(repo, { dry = false, thresholdMs, orphans = true, quiet = false, 
   return count;
 }
 
-// Opportunistic sweep at orka new / run. Only stale workspaces; never fatal, never on stdout.
+// The same sweep at the start of orka new and orka run: on stderr (stdout of new
+// is the id), only lines for what it closed, a short time budget, and never
+// untagged browsers. Never fatal.
 function sweepQuietly(repo) {
   try {
-    const jobs = loadAllJobs(repo);
-    const now = Date.now();
-    const threshold = staleThreshold(repo);
-    const stale = jobs.filter((j) => lifecycle.isStale(j, now, threshold));
-    for (const j of stale) {
-      j.workspaceClosed = new Date().toISOString();
-      save(repo, j);
-      herdr(["workspace", "close", j.workspace]);
-    }
-    if (stale.length) console.error(`cleanup: closed ${stale.length} stale workspace${stale.length === 1 ? "" : "s"} (${stale.map((j) => j.id).join(", ")})`);
-  } catch {
-    // a sweep must never block new or run
+    sweep(repo, { quiet: true, untagged: false, log: (msg) => console.error(msg), budgetMs: AUTO_CLEANUP_BUDGET_MS, thresholdMs: staleThreshold(repo) });
+  } catch (err) {
+    console.error(`cleanup: skipped (${err?.message || err})`);
   }
 }
 
@@ -3367,11 +3659,40 @@ function cmdReap(args) {
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, id);
   const worker = args.worker ? String(args.worker) : null;
-  const dry = Boolean(args["dry-run"]);
+  const pids = reapWorker(job, worker, Boolean(args["dry-run"]));
+  if (!pids.length) console.log("reap: no browser processes left");
+}
+
+// Closes the sessions and kills (after recording) the browser processes of one worker, or of the whole job.
+function reapWorker(job, worker, dry = false) {
   const sessions = jobSessions(job).filter((s) => !worker || s === `${browserPrefix(job)}-${worker}`);
   for (const s of sessions) if (dry || closeBrowser(s, { jobId: job.id })) console.log(`cleanup: ${dry ? "would close" : "closed"} browser ${s}`);
-  const pids = reapBrowsers(job, { worker, dry });
-  if (!pids.length) console.log("reap: no browser processes left");
+  return reapBrowsers(job, { worker, dry });
+}
+
+// The watcher's per-poll housekeeping for a running job: record its browser pids,
+// and when the verifier wrote a new results/verifier.json (its round is over),
+// kill that verifier's Chrome. The result present at watcher start is not a new round.
+function watchTick(repo, id) {
+  const mtime = () => {
+    try {
+      return statSync(verifierResultPath(repo, id)).mtimeMs;
+    } catch {
+      return 0;
+    }
+  };
+  let seen = mtime();
+  return (job) => {
+    if (!job || job.status !== "running") return;
+    recordBrowserPids(repo, job);
+    const now = mtime();
+    if (!now || now === seen) return;
+    seen = now;
+    const verifier = (job.workers || []).filter((w) => w.role === "verifier").at(-1);
+    if (!verifier) return;
+    console.log(`${new Date().toISOString()} watch ${id}: verifier ${verifier.name} wrote its result; reaping its browsers`);
+    reapWorker(job, verifier.name);
+  };
 }
 
 function cmdCleanup(args) {
@@ -3424,6 +3745,7 @@ async function cmdWatch(args) {
       log(`needs-input ${payload.status}: ${sent.outcome} (${sent.detail})`);
     },
     log,
+    tick: watchTick(repo, id),
   };
   log(`watching agent ${job.agent} pane ${job.pane}`);
   const result = await watch.watchJob({ jobId: id, agent: job.agent, pane: job.pane, deps });
@@ -4003,7 +4325,7 @@ Verifier (both kinds)
   It does not change job.verify.
 
 A prompt that is still idle after ~8s is sent once more.
-status reads the job file. It does not poll Herdr. One job also prints the finish-wake record and verify.
+status reads the job file plus herdr pane list for the host line. One job also prints the finish-wake record and verify.
 stop interrupts the lead and workers, then marks stopped. It does not close the workspace.
 done marks a running job done (default reason "completed") and sends the finish wake. It refuses a queued job and leaves a finished one alone.
 done does not close the orchestrator pane or the workspace: Olaf may still want to give feedback (see Follow-up rounds).
@@ -4034,16 +4356,31 @@ cleanup (delayed, not close-everything)
   orka-<8 hex of sha1(id)>; workers use <prefix>-<worker>, verify <prefix>-verify), dev/preview servers whose
   process cwd is inside the job worktree (never orka itself or its ancestors), and the panes of finished
   workers and the verifier (herdr pane close). What was closed is stored in job.cleanup.
-  The orchestrator pane and the Herdr workspace stay open so Olaf can still steer. The record, worktree and branch always stay.
+  On done only, it also removes the worktree (git worktree remove, never --force; a worktree with uncommitted
+  changes is kept). The branch always stays. A steer on a done job checks the branch out again.
+  The orchestrator pane and the Herdr workspace stay open so Olaf can still steer. The record and branch always stay.
   orka cleanup [--dry-run] [--older-than 12h] closes the workspace of jobs that are finished (done, failed,
   stopped) and idle longer than the threshold (default 12h; or "staleAfter": "<duration>" in .orka/config.json).
   Idle is measured from the latest of finished, steer, verifier and follow-up round times. A job is only closed once.
   It also closes orka- (and orca-) browser sessions of jobs that are not running and agent-browser sessions whose pid file names a dead process.
   Closing a session never launches a browser: a session with no live daemon or Chrome only has its state deleted.
   Browsers are found by ORKA_JOB (or ORCA_JOB) tag and by session name (AGENT_BROWSER_SESSION / --session in the process tree).
+  It kills Chrome whose pane or job is gone, and recorded pids (<job dir>/browser-pids.json, same start time) of
+  finished jobs and gone panes. It removes the worktrees of past done jobs (the branch stays).
   It also kills orphan agent-browser-chrome-* roots (parent init, older than --orphan-hours, default 2, owned by no running job).
-  The same stale sweep runs quietly at the start of orka new and orka run (stderr, one line, only if it closed something).
-  No cron, no polling. --keep on new, run, done or stop opts out of everything. --dry-run lists "would close" lines.
+  The same cleanup runs at the start of orka new and orka run (stderr, a line per thing closed; never untagged Chrome).
+  No cron, no polling. --keep on new, run, done or stop opts out of everything. --dry-run lists "would close",
+  "would kill" and "would remove worktree" lines with sizes. Wrap orka cleanup in timeout in scripts.
+
+Shared dependencies
+  A job worktree links node_modules to the main checkout's when the lockfile matches, and runs a real install when it
+  differs. orka run and every orka worker repair a missing or broken link.
+
+Memory guard
+  orka worker checks MemAvailable and live agent panes before it starts a pane. When tight it queues (.orka/queue/)
+  and waits, then refuses past the limit. "memoryGuard": {"minAvailableMb":1024,"maxPanes":20,"wait":"8m","poll":"15s"}
+  in .orka/config.json, or ORKA_MIN_MEM_MB, ORKA_MAX_PANES, ORKA_GUARD_WAIT, ORKA_GUARD_POLL, ORKA_MEMORY_GUARD=off.
+  Logged to decisions.tsv; orka status shows memory, live panes and the queue. No disk guard.
 
 Follow-up rounds
   orka steer <id> "message" works on a done, failed or stopped job whose orchestrator pane still exists. It sets the job
