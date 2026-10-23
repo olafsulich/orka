@@ -36,7 +36,7 @@ Commands (full flags in [commands.md](docs/commands.md)):
 | `orka new` | file a job (title, goal) |
 | `orka spec init <feature>` | scaffold `specs/<feature>/spec.md` ([specs.md](docs/specs.md)) |
 | `orka run <id>` | worktree, pane, orchestrator, watcher |
-| `orka worker` | start a builder or verifier worker |
+| `orka worker` | start a builder or verifier worker; a verifier round runs the static gates first ([gates.md](docs/gates.md)) |
 | `orka status` / `digest` | show a job, free memory, live panes, worker queue / capped snapshot |
 | `orka steer <id> "msg"` | message the lead; follow-up round on a finished job |
 | `orka propose <id>` | orchestrator: pause at the direction gate, notify ([gate.md](docs/gate.md)) |
