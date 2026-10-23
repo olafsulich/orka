@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseEnv } from "node:util";
 import { DECISION_ROWS, DIGEST_MAX, FILE_READ_MAX, SUMMARY_MAX, VERIFIER_JSON_MAX, renderDigest, steerText } from "../lib/digest.mjs";
 import * as brand from "../lib/brand.mjs";
@@ -1020,22 +1020,33 @@ function startArgs(name, pane, kind, alias, sessionId, job = null) {
   return args;
 }
 
-// orka's skills (plugin/: the handoff skill) for every pane, and for claude a statusLine that
-// records the window Claude Code reports for the session (lib/statusline.mjs -> <jobdir>/context).
+// orka's skills (plugin/: the handoff skill) for every pane, and the handoff hook
+// (lib/handoff-hook.mjs: after each tool call, past handoff.threshold, the agent is told to hand off
+// once). claude: a settings file with the hook as PostToolUse and a statusLine that records the
+// window Claude Code reports for the session (lib/statusline.mjs -> <jobdir>/context). pi: a
+// per-job extension file loaded with -e.
 const PLUGIN_DIR = join(dirname(ORKA), "..", "plugin");
 const HANDOFF_SKILL = join(PLUGIN_DIR, "skills", "handoff", "SKILL.md");
+const HANDOFF_HOOK = join(dirname(ORKA), "..", "lib", "handoff-hook.mjs");
 
 function captureDir(repo, id) {
   return join(jobDir(repo, id), "context");
 }
 
 function paneExtras(job, kind) {
-  if (kind === "pi") return ["--skill", dirname(HANDOFF_SKILL)];
   const dir = captureDir(job.repo, job.id);
   mkdirSync(dir, { recursive: true });
+  const paths = { jobFile: jobPath(job.repo, job.id), jobDir: jobDir(job.repo, job.id), configFile: configPath(job.repo) };
+  if (kind === "pi") {
+    const ext = join(dir, "pi-handoff.mjs");
+    writeFileSync(ext, `import { piExtension } from ${JSON.stringify(pathToFileURL(HANDOFF_HOOK).href)};\nexport default piExtension(${JSON.stringify(paths)});\n`);
+    return ["--skill", dirname(HANDOFF_SKILL), "-e", ext];
+  }
   const file = join(dir, "claude-settings.json");
   const command = sh([process.execPath, join(dirname(ORKA), "..", "lib", "statusline.mjs"), dir]);
-  writeFileSync(file, `${JSON.stringify({ statusLine: { type: "command", command, padding: 0 } }, null, 2)}\n`);
+  const hook = sh([process.execPath, HANDOFF_HOOK, "claude", paths.jobFile, paths.jobDir, paths.configFile]);
+  const settings = { statusLine: { type: "command", command, padding: 0 }, hooks: { PostToolUse: [{ matcher: "*", hooks: [{ type: "command", command: hook, timeout: 10 }] }] } };
+  writeFileSync(file, `${JSON.stringify(settings, null, 2)}\n`);
   return ["--settings", file, "--plugin-dir", PLUGIN_DIR];
 }
 
