@@ -9,7 +9,7 @@ import { piSlug } from "../lib/context.mjs";
 const ORKA = join(import.meta.dirname, "..", "bin", "orka.mjs");
 const FIX = join(import.meta.dirname, "fixtures", "context");
 const TASK = "GOAL: build part one. SCOPE: src. ACCEPTANCE: tests pass.";
-// fixtures/context/pi.jsonl: 89426 tokens of the default 200k window = 45%.
+// fixtures/context/pi.jsonl: 89426 tokens on xai/grok-4.7; the fake pi registry gives it a 200k window = 45%.
 
 // Fake herdr. State per agent name in the box: pane-<name>, status-<name> (default idle),
 // prompts-<name> (one prompt per block, separated by a ----- line). A prompt sets the agent
@@ -49,16 +49,23 @@ esac
   chmodSync(join(bin, "herdr"), 0o755);
   chmodSync(join(bin, "agent-browser"), 0o755);
   execFileSync("git", ["init", "-q"], { cwd: repo });
+  const registry = (window) => {
+    mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+    writeFileSync(join(home, ".pi", "agent", "models-store.json"), JSON.stringify({ xai: { models: [{ id: "grok-4.7", contextWindow: window }] } }));
+  };
+  registry(200000);
   const env = {
     PATH: `${bin}:${process.env.PATH}`, HOME: home, XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1",
-    ORKA_PROMPT_POLL_MS: "10", ORKA_PROMPT_WAIT_MS: "250", ORKA_PROMPT_BACKOFF_MS: "20", ORKA_READY_WAIT_MS: "1500",
+    ORKA_PROMPT_POLL_MS: "10", ORKA_PROMPT_WAIT_MS: "250", ORKA_PROMPT_BACKOFF_MS: "20", ORKA_READY_WAIT_MS: "1500", ORKA_HANDOFF_NUDGE_GRACE_MS: "1",
   };
   const orka = (args) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...process.env, ...env } });
   orka(["init"]);
   const file = (f) => (existsSync(join(st, f)) ? readFileSync(join(st, f), "utf8") : "");
   return {
-    base, repo, home, orka,
+    base, repo, home, orka, registry,
     setStatus: (name, s) => writeFileSync(join(st, `status-${name}`), s),
+    setPane: (name, pane) => writeFileSync(join(st, `pane-${name}`), pane),
+    noRegistry: () => rmSync(join(home, ".pi", "agent", "models-store.json"), { force: true }),
     prompts: (name) => file(`prompts-${name}`).split("-----\n").filter((p) => p.trim()),
     calls: () => readFileSync(log, "utf8").split("\n").filter(Boolean),
     config: (handoff) => {
@@ -76,16 +83,25 @@ function makeJob(t) {
   mkdirSync(worktree, { recursive: true });
   Object.assign(job, { status: "running", pane: "p-orch", agent: "orch", worktree });
   writeFileSync(path, JSON.stringify(job));
+  t.setPane("orch", "p-orch");
+  t.setStatus("orch", "working");
   const dir = join(t.repo, ".orka", "jobs", id);
   const read = () => JSON.parse(readFileSync(path, "utf8"));
   // The worker's pi transcript, at the path pi uses for --session-id.
-  const transcript = (name) => {
-    const w = read().workers.find((x) => x.name === name);
+  const transcriptFor = (sessionId) => {
     const folder = join(t.home, ".pi", "agent", "sessions", piSlug(worktree));
     mkdirSync(folder, { recursive: true });
-    copyFileSync(join(FIX, "pi.jsonl"), join(folder, `2026-10-22T10-00-00-000Z_${w.sessionId}.jsonl`));
+    copyFileSync(join(FIX, "pi.jsonl"), join(folder, `2026-10-22T10-00-00-000Z_${sessionId}.jsonl`));
   };
-  return { id, dir, read, transcript, decisions: () => (existsSync(join(dir, "decisions.tsv")) ? readFileSync(join(dir, "decisions.tsv"), "utf8").split("\n").slice(1).filter(Boolean) : []) };
+  const transcript = (name) => transcriptFor(read().workers.find((x) => x.name === name).sessionId);
+  // The orchestrator, as orka run starts it: a session id and its transcript.
+  const lead = () => {
+    const job = read();
+    job.sessionId = "lead-session-1";
+    writeFileSync(path, JSON.stringify(job));
+    transcriptFor(job.sessionId);
+  };
+  return { id, dir, path, read, transcript, transcriptFor, lead, decisions: () => (existsSync(join(dir, "decisions.tsv")) ? readFileSync(join(dir, "decisions.tsv"), "utf8").split("\n").slice(1).filter(Boolean) : []) };
 }
 
 function startWorker(t, j, name = "builder", extra = []) {
@@ -111,19 +127,19 @@ test("below the threshold: measured and recorded, nobody prompted", () => {
   startWorker(t, j);
   const r = t.orka(["handoff", j.id]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /builder: 89426\/200000 tokens 45% -> keep \(45% < 50%\)/);
+  assert.match(r.stdout, /builder: 89426\/200000 tokens 45% \(pi registry xai\/grok-4.7\) -> keep \(45% < 50%\)/);
   assert.equal(t.prompts("builder").length, 1); // only the task
   assert.equal(j.read().workers[0].context.pct, 0.447);
-  assert.match(t.orka(["status", j.id]).stdout, /worker: builder .* ctx=45%/);
+  assert.match(t.orka(["status", j.id]).stdout, /worker: builder .* ctx=45% of 200k \(pi registry xai\/grok-4.7\)/);
 });
 
-test("past the threshold but working: waits", () => {
+test("past the threshold but blocked: waits", () => {
   const t = scratch();
   const j = makeJob(t);
   t.config({ threshold: 0.4 });
   startWorker(t, j);
-  t.setStatus("builder", "working");
-  assert.match(t.orka(["handoff", j.id]).stdout, /45% working -> keep \(45% but working\)/);
+  t.setStatus("builder", "blocked");
+  assert.match(t.orka(["handoff", j.id]).stdout, /45% \(pi registry xai\/grok-4.7\) blocked -> keep \(45% but blocked\)/);
   assert.equal(t.prompts("builder").length, 1);
 });
 
@@ -138,8 +154,8 @@ test("full handoff: note asked, old agent renamed and kept open, fresh agent pic
   assert.equal(t.orka(["handoff", j.id]).status, 0);
   const asked = t.prompts("builder");
   assert.equal(asked.length, 2);
-  assert.match(asked[1], new RegExp(`Write the note to: ${note.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}`));
-  assert.match(asked[1], /Remaining slice/);
+  assert.equal(asked[1].split("\n")[0], `/skill:handoff ${note} role=worker`);
+  assert.match(asked[1], /45% \(89k of 200k tokens, cap 40%\)/);
   let w = j.read().workers[0];
   assert.equal(w.handoff.state, "writing");
   assert.equal(w.handoff.n, 1);
@@ -176,7 +192,7 @@ test("full handoff: note asked, old agent renamed and kept open, fresh agent pic
   assert.deepEqual(fresh.handoffs.map((h) => [h.n, h.from, h.pane, h.sessionId, h.note]), [[1, "builder-h1", "p-1", first.sessionId, note]]);
   assert.equal(job.handoffs.length, 1);
   assert.equal(job.handoffs[0].worker, "builder");
-  assert.ok(calls.some((c) => c.startsWith("herdr agent start builder --kind pi --pane p-2") && c.includes(`--session-id ${fresh.sessionId} --skill `)));
+  assert.ok(calls.some((c) => c.startsWith("herdr agent start builder --kind pi --pane p-2") && c.includes(`--session-id ${fresh.sessionId} --skill `)), calls.join("\n"));
 
   const successor = t.prompts("builder");
   assert.equal(successor.length, 1);
@@ -189,7 +205,7 @@ test("full handoff: note asked, old agent renamed and kept open, fresh agent pic
   const rows = j.decisions();
   assert.equal(rows.length, 2);
   assert.match(rows[0], /\thandoff\task builder for handoff note h1\t/);
-  assert.match(rows[1], /\thandoff\tbuilder-h1 -> fresh builder \(h1\)\t.*old pane p-1 stays open/);
+  assert.match(rows[1], /\thandoff\tbuilder-h1 -> fresh builder \(h1\)\t.*45% when the note was done; old pane p-1 stays open/);
   const digest = t.orka(["digest", j.id]).stdout;
   assert.match(digest, /- builder-h1 handed off at 45% to builder, pane open/);
   assert.match(digest, /builder-h1 -> fresh builder/);
@@ -208,7 +224,7 @@ test("herdr status done (finished turn, not looked at) is a safe point like idle
   t.config({ threshold: 0.4 });
   startWorker(t, j);
   t.setStatus("builder", "done");
-  assert.match(t.orka(["handoff", j.id]).stdout, /45% done -> hand off/);
+  assert.match(t.orka(["handoff", j.id]).stdout, /45% \(pi registry xai\/grok-4.7\) done -> hand off/);
   assert.equal(t.prompts("builder").length, 2);
   writeFileSync(join(j.dir, "handoff", "builder-1.md"), "note");
   t.setStatus("builder", "done");
@@ -240,13 +256,13 @@ test("exempt: verifier, a worker with a result file, handoff false", () => {
   startWorker(t, j, "verifier", ["--role", "verifier"]);
   startWorker(t, j, "done-one");
   writeFileSync(join(j.dir, "results", "done-one.json"), '{"ok":true}');
-  assert.match(t.orka(["handoff", j.id]).stdout, /no worker to measure/);
+  assert.match(t.orka(["handoff", j.id]).stdout, /no pane to measure/);
   assert.equal(t.prompts("verifier").length, 1);
   assert.equal(t.prompts("done-one").length, 1);
 
   startWorker(t, j, "builder");
   t.config(false);
-  assert.match(t.orka(["handoff", j.id]).stdout, /no worker to measure/);
+  assert.match(t.orka(["handoff", j.id]).stdout, /no pane to measure/);
   assert.equal(t.prompts("builder").length, 1);
 });
 
@@ -266,19 +282,179 @@ test("a rename herdr refuses abandons the handoff: no new pane, name kept, reaso
   assert.equal(job.workers[0].handoff.state, "failed");
   assert.match(job.workers[0].handoff.reason, /rename refused/);
   assert.ok(!t.calls().some((c) => c.startsWith("herdr pane split --pane p-1")));
-  assert.match(j.decisions().at(-1), /handoff abandoned/);
+  assert.match(j.decisions().at(-1), /handoff of builder abandoned/);
   // Failed once: not asked again on the next pass.
   t.orka(["handoff", j.id]);
   assert.equal(t.prompts("builder").length, 2);
 });
 
-test("handoff.orchestrator is only a flag: logged, orchestrator untouched", () => {
+test("mid-turn: a working agent past the cap gets a queued message, then hands off at its next stop", () => {
   const t = scratch();
   const j = makeJob(t);
-  t.config({ orchestrator: true });
+  t.config({ threshold: 0.4 });
+  startWorker(t, j);
+  t.setStatus("builder", "working");
   const r = t.orka(["handoff", j.id]);
-  assert.match(r.stdout, /orchestrator handoff is not built yet/);
-  assert.ok(!t.calls().some((c) => / orch( |$)/.test(c)));
+  assert.match(r.stdout, /45% \(pi registry xai\/grok-4.7\) working -> hand off \(queued mid-turn\)/);
+  const note = join(j.dir, "handoff", "builder-1.md");
+  const asked = t.prompts("builder");
+  assert.equal(asked.length, 2);
+  assert.match(asked[1], /next clean stopping point/);
+  assert.ok(asked[1].includes(`/skill:handoff ${note} role=worker`));
+  // Sent while working: no ready wait, no interrupt key.
+  assert.ok(!t.calls().some((c) => /send-keys builder (ctrl\+c|Escape)/.test(c)));
+  const w = j.read().workers[0];
+  assert.equal(w.handoff.state, "nudged");
+  assert.equal(w.handoff.mode, "queue");
+  assert.equal(w.handoff.pct, 0.447);
+  assert.match(j.decisions()[0], /queued mid-turn/);
+  assert.match(t.orka(["status", j.id]).stdout, /handoff=nudged/);
+  // Still working, no note: nothing more is sent.
+  t.orka(["handoff", j.id]);
+  assert.equal(t.prompts("builder").length, 2);
+  // The agent ran the skill at its stopping point and ended the turn.
+  writeFileSync(note, "Remaining slice: part two\n");
+  t.setStatus("builder", "idle");
+  t.orka(["handoff", j.id]);
+  const job = j.read();
+  assert.equal(job.workers[0].name, "builder-h1");
+  assert.equal(job.workers[1].handoffs[0].mode, "queue");
+  assert.equal(job.workers[1].handoffs[0].pctEnd, 0.447);
+});
+
+test("mid-turn: nudged but idle without a note runs the skill command directly after the grace", () => {
+  const t = scratch();
+  const j = makeJob(t);
+  t.config({ threshold: 0.4 });
+  startWorker(t, j);
+  t.setStatus("builder", "working");
+  t.orka(["handoff", j.id]);
+  t.setStatus("builder", "idle");
+  t.orka(["handoff", j.id]); // first idle sighting starts the grace
+  assert.equal(t.prompts("builder").length, 2);
+  t.orka(["handoff", j.id]);
+  const asked = t.prompts("builder");
+  assert.equal(asked.length, 3);
+  assert.match(asked[2], /^\/skill:handoff .*builder-1\.md role=worker/);
+  assert.equal(j.read().workers[0].handoff.state, "writing");
+});
+
+test("window unknown: no automatic handoff, logged once, status says so; orka handoff <id> <name> still works", () => {
+  const t = scratch();
+  const j = makeJob(t);
+  t.config({ threshold: 0.01 });
+  t.noRegistry();
+  startWorker(t, j);
+  const r = t.orka(["handoff", j.id]);
+  assert.match(r.stdout, /builder: 89426 tokens, window unknown -> keep \(window unknown\)/);
+  t.orka(["handoff", j.id]);
+  assert.equal(t.prompts("builder").length, 1);
+  const rows = j.decisions();
+  assert.equal(rows.length, 1);
+  assert.match(rows[0], /no automatic handoff for builder\twindow unknown \(pi, model grok-4.7\)/);
+  assert.match(t.orka(["status", j.id]).stdout, /worker: builder .*ctx=window-unknown \(89k tokens, no auto handoff\)/);
+  // By hand: asked at once, no threshold.
+  const m = t.orka(["handoff", j.id, "builder"]);
+  assert.match(m.stdout, /builder: 89426 tokens, window unknown idle -> hand off \(asked by hand\)/);
+  assert.match(t.prompts("builder")[1], /^\/skill:handoff .*builder-1\.md role=worker\norka: a handoff was asked for by hand/);
+});
+
+test("handoff.contextWindow is used only when the runtime reports nothing", () => {
+  const t = scratch();
+  const j = makeJob(t);
+  t.noRegistry();
+  t.config({ contextWindow: { grok: 100000 } });
+  startWorker(t, j);
+  assert.match(t.orka(["handoff", j.id, "--dry-run"]).stdout, /89426\/100000 tokens 89% \(handoff.contextWindow\)/);
+  t.registry(500000);
+  assert.match(t.orka(["handoff", j.id, "--dry-run"]).stdout, /89426\/500000 tokens 18% \(pi registry xai\/grok-4.7\)/);
+});
+
+test("cap: after handoff.maxHandoffs a successor past the threshold is left alone, logged once", () => {
+  const t = scratch();
+  const j = makeJob(t);
+  t.config({ threshold: 0.4, maxHandoffs: 1 });
+  startWorker(t, j);
+  t.orka(["handoff", j.id]);
+  writeFileSync(join(j.dir, "handoff", "builder-1.md"), "note");
+  t.setStatus("builder", "idle");
+  t.orka(["handoff", j.id]);
+  t.setStatus("builder", "idle");
+  j.transcript("builder");
+  assert.match(t.orka(["handoff", j.id]).stdout, /builder: .* -> keep \(cap of 1 handoffs reached\)/);
+  t.orka(["handoff", j.id]);
+  assert.equal(t.prompts("builder").length, 1); // only the successor's task
+  assert.equal(j.decisions().filter((r) => /no more handoffs for builder/.test(r)).length, 1);
+});
+
+test("orchestrator handoff (default on): note with job state, renamed and kept open, fresh lead resumes; workers untouched", () => {
+  const t = scratch();
+  const j = makeJob(t);
+  t.config({ threshold: 0.4 });
+  startWorker(t, j, "builder");
+  writeFileSync(join(j.dir, "results", "builder.json"), '{"ok":true}'); // a finished worker: not measured
+  startWorker(t, j, "verifier", ["--role", "verifier"]);
+  j.lead();
+  t.setStatus("orch", "idle");
+  const before = t.calls().length;
+  const r = t.orka(["handoff", j.id]);
+  assert.match(r.stdout, /orch \(orchestrator\): 89426\/200000 tokens 45% \(pi registry xai\/grok-4.7\) idle -> hand off/);
+  const note = join(j.dir, "handoff", "orchestrator-1.md");
+  assert.match(t.prompts("orch")[0], new RegExp(`^/skill:handoff ${note.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")} role=orchestrator`));
+  assert.equal(j.read().lead.handoff.state, "writing");
+
+  writeFileSync(note, "Plan: two parts\nWorkers: builder owns src (done)\n");
+  t.setStatus("orch", "idle");
+  t.orka(["handoff", j.id]);
+  const calls = t.calls().slice(before);
+  assert.ok(calls.includes("herdr agent rename orch orch-h1"), calls.join("\n"));
+  assert.ok(calls.some((c) => c.startsWith("herdr pane split --pane p-orch --direction down")));
+  assert.ok(!calls.some((c) => c.startsWith("herdr pane close")), "no pane is closed mid-job");
+  // Worker and verifier panes: not prompted, not renamed, not closed.
+  assert.ok(!calls.some((c) => / (builder|verifier)( |$)/.test(c)), calls.join("\n"));
+  assert.equal(t.prompts("builder").length, 1);
+  assert.equal(t.prompts("verifier").length, 1);
+
+  const job = j.read();
+  assert.equal(job.agent, "orch");
+  assert.equal(job.pane, "p-3");
+  assert.notEqual(job.sessionId, "lead-session-1");
+  assert.deepEqual(job.retiredLeads.map((x) => [x.name, x.pane, x.sessionId, x.n]), [["orch-h1", "p-orch", "lead-session-1", 1]]);
+  assert.equal(job.lead.handoffs[0].note, note);
+  assert.equal(job.lead.handoffs[0].pct, 0.447);
+  assert.equal(job.handoffs.at(-1).worker, "orchestrator");
+  assert.equal(job.leadDelivery, "ok");
+  assert.ok(calls.some((c) => c.startsWith("herdr agent start orch --kind pi --pane p-3") && c.includes(`--session-id ${job.sessionId}`)));
+  const fresh = t.prompts("orch");
+  assert.equal(fresh.length, 1);
+  assert.match(fresh[0], /You are the orchestrator for orka job/);
+  assert.match(fresh[0], /HANDOFF \(h1\): you take over as orchestrator/);
+  assert.ok(fresh[0].includes(note) && fresh[0].includes(j.path) && fresh[0].includes("decisions.tsv"));
+  assert.equal(t.prompts("orch-h1").length, 1); // the old lead got nothing new
+  assert.match(j.decisions().at(-1), /orch-h1 -> fresh orch \(h1\)\t.*old pane p-orch stays open/);
+  const status = t.orka(["status", j.id]).stdout;
+  assert.match(status, /orchestrator: orch-h1 pane=p-orch handed-off->orch \(h1, pane open\)/);
+
+  // orka done closes the old orchestrator pane with the worker panes, never the current one.
+  const done = t.orka(["done", j.id]);
+  assert.equal(done.status, 0, done.stderr);
+  assert.match(done.stdout, /closed old orchestrator pane p-orch \(orch-h1\)/);
+  assert.ok(!t.calls().includes("herdr pane close p-3"));
+});
+
+test("orchestrator handoff off with handoff.orchestrator false; working lead gets a queued ask", () => {
+  const t = scratch();
+  const j = makeJob(t);
+  t.config({ threshold: 0.4, orchestrator: false });
+  j.lead();
+  t.setStatus("orch", "idle");
+  assert.match(t.orka(["handoff", j.id]).stdout, /no pane to measure/);
+  assert.equal(t.prompts("orch").length, 0);
+  t.config({ threshold: 0.4 });
+  t.setStatus("orch", "working");
+  assert.match(t.orka(["handoff", j.id]).stdout, /orch \(orchestrator\): .* working -> hand off \(queued mid-turn\)/);
+  assert.match(t.prompts("orch")[0], /next clean stopping point.*role=orchestrator/s);
+  assert.equal(j.read().lead.handoff.state, "nudged");
 });
 
 test("the watcher follows the orchestrator to its new pane and asks no question while it hands off", async () => {

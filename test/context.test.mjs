@@ -20,7 +20,7 @@ test("claude transcript: last assistant usage is input + cache read + cache crea
 
 test("pi transcript: last assistant usage is input + cacheRead + cacheWrite, tool results ignored", () => {
   const got = ctx.lastUsage(readFileSync(join(FIX, "pi.jsonl"), "utf8"));
-  assert.deepEqual(got, { tokens: 82 + 89344, model: "grok-4.7" });
+  assert.deepEqual(got, { tokens: 82 + 89344, model: "grok-4.7", provider: "xai" });
 });
 
 test("no usage, broken lines and user lines give null", () => {
@@ -59,36 +59,73 @@ test("findTranscript: claude <slug>/<id>.jsonl, pi --<slug>--/<ts>_<id>.jsonl, a
   assert.equal(ctx.findTranscript({ kind: "claude", cwd, sessionId: "", home: h }), null);
 });
 
-test("window: table per model family, config number or map overrides it", () => {
-  assert.equal(ctx.contextWindow("claude-sonnet-5-5"), 200000);
-  assert.equal(ctx.contextWindow("claude-opus-5-5[1m]"), 1000000);
-  assert.equal(ctx.contextWindow("grok-4.7"), ctx.DEFAULT_WINDOW);
-  assert.equal(ctx.contextWindow("claude-opus-5-5", 1000000), 1000000);
-  assert.equal(ctx.contextWindow("claude-opus-5-5", { opus: 1000000 }), 1000000);
-  assert.equal(ctx.contextWindow("grok-4.7", { "/^grok-/": 256000, opus: 1 }), 256000);
-  assert.equal(ctx.contextWindow("claude-haiku-5-5", { opus: 1000000 }), 200000);
-  const c = ctx.contextOf({ tokens: 100000, model: "claude-sonnet-5-5" });
-  assert.deepEqual(c, { tokens: 100000, window: 200000, pct: 0.5, model: "claude-sonnet-5-5" });
+test("window from the runtime: claude statusline capture first, then a [1m] model id", () => {
+  const capture = { window: 1000000, model: "claude-opus-5-5" };
+  assert.deepEqual(ctx.detectWindow({ kind: "claude", model: "claude-opus-5-5", capture }), { window: 1000000, source: "claude statusline" });
+  // The capture wins over the override: the runtime's own number comes first.
+  assert.equal(ctx.detectWindow({ kind: "claude", model: "claude-haiku-5-5", capture: { window: 200000 }, override: 50000 }).window, 200000);
+  assert.deepEqual(ctx.detectWindow({ kind: "claude", model: "claude-opus-5-5", alias: "opus[1m]" }), { window: 1000000, source: "model id opus[1m]" });
 });
 
-test("settings: default threshold 0.5, orchestrator off, false or enabled:false turns it off, bad values fall back", () => {
-  assert.deepEqual(ctx.handoffSettings(undefined), { enabled: true, threshold: 0.5, orchestrator: false, contextWindow: null });
+test("window from pi's model registry: models-store.json and models.json, provider/model of the session", () => {
+  const h = home();
+  mkdirSync(join(h, ".pi", "agent"), { recursive: true });
+  writeFileSync(join(h, ".pi", "agent", "models-store.json"), JSON.stringify({ xai: { models: [{ id: "grok-4.7", contextWindow: 500000 }] }, openrouter: { models: [{ id: "x-ai/grok-4.7", contextWindow: 400000 }] } }));
+  writeFileSync(join(h, ".pi", "agent", "models.json"), JSON.stringify({ providers: { local: { models: [{ id: "qwen", contextWindow: 32768 }] } } }));
+  const reg = ctx.readPiRegistry(h);
+  assert.deepEqual(ctx.detectWindow({ kind: "pi", model: "grok-4.7", provider: "xai", piRegistry: reg }), { window: 500000, source: "pi registry xai/grok-4.7" });
+  assert.equal(ctx.detectWindow({ kind: "pi", model: "qwen", provider: "local", piRegistry: reg }).window, 32768);
+  assert.deepEqual(ctx.readPiRegistry(join(h, "nope")), {});
+});
+
+test("window override only by explicit config, and unknown when nothing reports it (no 200k guess)", () => {
+  assert.deepEqual(ctx.detectWindow({ kind: "claude", model: "claude-sonnet-5-5" }), { window: null, source: "unknown" });
+  assert.deepEqual(ctx.detectWindow({ kind: "pi", model: "grok-9", provider: "xai", piRegistry: {} }), { window: null, source: "unknown" });
+  assert.deepEqual(ctx.detectWindow({ kind: "claude", model: "claude-sonnet-5-5", override: 200000 }), { window: 200000, source: "handoff.contextWindow" });
+  assert.equal(ctx.detectWindow({ kind: "pi", model: "grok-4.7", override: { "/^grok-/": 256000, opus: 1 } }).window, 256000);
+  assert.equal(ctx.detectWindow({ kind: "claude", model: "claude-haiku-5-5", override: { opus: 1000000 } }).window, null);
+  const known = ctx.contextOf({ tokens: 100000, model: "m" }, { window: 200000, source: "claude statusline" });
+  assert.deepEqual(known, { tokens: 100000, window: 200000, pct: 0.5, model: "m", source: "claude statusline" });
+  const unknown = ctx.contextOf({ tokens: 100000, model: "m" }, { window: null, source: "unknown" });
+  assert.equal(unknown.pct, null);
+  assert.equal(ctx.windowLabel(known), "200k (claude statusline)");
+  assert.equal(ctx.windowLabel(unknown), "window unknown");
+  assert.deepEqual(ctx.handoffDue({ context: unknown, status: "idle", threshold: 0.5 }), { due: false, why: "window unknown" });
+});
+
+test("statusline capture: readCapture gives the window lib/statusline.mjs wrote; missing or broken gives null", () => {
+  const dir = home();
+  writeFileSync(ctx.captureFile(dir, "s1"), JSON.stringify({ sessionId: "s1", window: 200000, tokens: 24000 }));
+  assert.equal(ctx.readCapture(dir, "s1").window, 200000);
+  assert.equal(ctx.readCapture(dir, "s2"), null);
+  writeFileSync(ctx.captureFile(dir, "s3"), "{broken");
+  assert.equal(ctx.readCapture(dir, "s3"), null);
+});
+
+test("settings: default threshold 0.5, orchestrator on, cap 3, false or enabled:false turns it off, bad values fall back", () => {
+  assert.deepEqual(ctx.handoffSettings(undefined), { enabled: true, threshold: 0.5, orchestrator: true, contextWindow: null, maxHandoffs: 3 });
   assert.equal(ctx.handoffSettings(false).enabled, false);
   assert.equal(ctx.handoffSettings({ enabled: false }).enabled, false);
   assert.equal(ctx.handoffSettings({ threshold: 0.01 }).threshold, 0.01);
   assert.equal(ctx.handoffSettings({ threshold: 7 }).threshold, 0.5);
   assert.equal(ctx.handoffSettings({ threshold: "x" }).threshold, 0.5);
-  assert.equal(ctx.handoffSettings({ orchestrator: true }).orchestrator, true);
+  assert.equal(ctx.handoffSettings({ orchestrator: false }).orchestrator, false);
+  assert.equal(ctx.handoffSettings({ maxHandoffs: 1 }).maxHandoffs, 1);
+  assert.equal(ctx.handoffSettings({ maxHandoffs: -2 }).maxHandoffs, 3);
+  assert.equal(ctx.capReached([{ n: 1 }], 1), true);
+  assert.equal(ctx.capReached(undefined, 1), false);
 });
 
-test("threshold: due only when idle or done and at or past the cap", () => {
+test("threshold: at the cap, now when idle or done, queued mid-turn when working, wait otherwise", () => {
   const at = (pct) => ({ tokens: pct * 200000, window: 200000, pct });
-  assert.equal(ctx.handoffDue({ context: at(0.5), status: "idle", threshold: 0.5 }).due, true);
+  assert.deepEqual(ctx.handoffDue({ context: at(0.5), status: "idle", threshold: 0.5 }), { due: true, mode: "now", why: "50% >= 50%" });
   // herdr reports a finished turn nobody has looked at as done, not idle.
-  assert.equal(ctx.handoffDue({ context: at(0.5), status: "done", threshold: 0.5 }).due, true);
+  assert.equal(ctx.handoffDue({ context: at(0.5), status: "done", threshold: 0.5 }).mode, "now");
   assert.equal(ctx.handoffDue({ context: at(0.62), status: "idle", threshold: 0.5 }).why, "62% >= 50%");
   assert.equal(ctx.handoffDue({ context: at(0.49), status: "idle", threshold: 0.5 }).due, false);
-  for (const status of ["working", "blocked", "unknown", undefined]) {
+  assert.deepEqual(ctx.handoffDue({ context: at(0.55), status: "working", threshold: 0.5 }), { due: true, mode: "queue", why: "55% >= 50% while working" });
+  assert.equal(ctx.handoffDue({ context: at(0.49), status: "working", threshold: 0.5 }).due, false);
+  for (const status of ["blocked", "unknown", undefined]) {
     assert.equal(ctx.handoffDue({ context: at(0.9), status, threshold: 0.5 }).due, false, String(status));
   }
   assert.equal(ctx.handoffDue({ context: null, status: "idle", threshold: 0.5 }).due, false);
@@ -117,16 +154,34 @@ test("note path and names: handoff/<name>-<n>.md, old agent <name>-h<n>, cut to 
   assert.match(long, /^a+-h3$/);
 });
 
-test("prompts: note prompt names the path, the cap and Limen's checklist; successor reads the note first", () => {
-  const p = ctx.notePrompt({ path: "/j/handoff/builder-1.md", context: { tokens: 124829, window: 200000, pct: 0.624 }, threshold: 0.5 });
-  assert.match(p, /\/j\/handoff\/builder-1\.md/);
+test("prompts: the handoff skill by slash command now, by queued message mid-turn; successors read the note first", () => {
+  const c = { tokens: 124829, window: 200000, pct: 0.624 };
+  const p = ctx.notePrompt({ kind: "claude", path: "/j/handoff/builder-1.md", role: "worker", context: c, threshold: 0.5 });
+  assert.match(p, /^\/orka:handoff \/j\/handoff\/builder-1\.md role=worker\n/);
   assert.match(p, /62% \(125k of 200k tokens, cap 50%\)/);
-  assert.match(p, /~200 words/);
-  for (const s of ["Changes", "Checks run", "Commits", "Still running", "Notes", "Remaining slice", "Next commands"]) assert.match(p, new RegExp(`- ${s}:`));
-  assert.match(p, /never paste/);
-  assert.match(p, /Do not write your results file/);
+  assert.match(ctx.notePrompt({ kind: "pi", path: "/n.md", role: "orchestrator", context: c, threshold: 0.5 }), /^\/skill:handoff \/n\.md role=orchestrator/);
+  const q = ctx.nudgePrompt({ kind: "claude", path: "/n.md", role: "worker", context: c, threshold: 0.5, skillFile: "/orka/plugin/skills/handoff/SKILL.md" });
+  assert.match(q, /next clean stopping point/);
+  assert.match(q, /\/orka:handoff \/n\.md role=worker/);
+  assert.match(q, /read \/orka\/plugin\/skills\/handoff\/SKILL\.md/);
+  assert.match(ctx.notePrompt({ kind: "claude", path: "/n.md", role: "worker", context: { tokens: 5, window: null, pct: null }, threshold: 0.5 }), /asked for by hand/);
   const s = ctx.successorLines({ path: "/j/handoff/builder-1.md", n: 1, from: "builder-h1" });
   assert.match(s, /HANDOFF \(h1\)/);
   assert.match(s, /Read \/j\/handoff\/builder-1\.md first/);
   assert.match(s, /builder-h1\) stays open/);
+  const l = ctx.leadSuccessorLines({ path: "/j/handoff/orchestrator-1.md", n: 1, from: "jx-h1", jobFile: "/j.json", decisions: "/j/decisions.tsv", id: "7" });
+  assert.match(l, /take over as orchestrator/);
+  assert.match(l, /\/j\/handoff\/orchestrator-1\.md \(the note\), \/j\.json .*\/j\/decisions\.tsv/);
+  assert.match(l, /orka digest 7/);
+  assert.match(l, /Do not restart, re-task or close any worker or verifier pane/);
+});
+
+test("the shipped handoff skill: Pocock's skill, credited, with both role checklists", () => {
+  const skill = readFileSync(join(import.meta.dirname, "..", "plugin", "skills", "handoff", "SKILL.md"), "utf8");
+  assert.match(skill, /^---\nname: handoff\n/);
+  assert.match(skill, /mattpocock\/skills/);
+  for (const s of ["Changes", "Checks run", "Commits", "Still running", "Remaining slice", "Plan", "Workers", "Verifier", "Steers", "Waiting on"]) assert.match(skill, new RegExp(`- ${s}:`));
+  assert.match(skill, /do not close any pane/);
+  const plugin = JSON.parse(readFileSync(join(import.meta.dirname, "..", "plugin", ".claude-plugin", "plugin.json"), "utf8"));
+  assert.equal(plugin.name, "orka");
 });

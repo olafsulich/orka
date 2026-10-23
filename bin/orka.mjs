@@ -839,18 +839,20 @@ function releaseJob(repo, job, opts = {}) {
       closed.servers = servers.map((p) => ({ pid: p.pid, cmdline: String(p.cmdline).slice(0, 200) }));
     }
   }
-  for (const w of job.workers || []) {
+  // Worker panes, and the panes of orchestrators replaced by a context handoff.
+  const panes = [...(job.workers || []).map((w) => [w, "worker"]), ...(job.retiredLeads || []).map((r) => [r, "old orchestrator"])];
+  for (const [w, what] of panes) {
     if (!w.pane || w.closed || w.pane === job.pane) continue;
     if (dry) {
-      console.log(`cleanup: would close worker pane ${w.pane} (${w.name})`);
+      console.log(`cleanup: would close ${what} pane ${w.pane} (${w.name})`);
       continue;
     }
     const got = herdr(["pane", "close", w.pane]);
     if (got.code === 0 && !got.json?.error) {
-      console.log(`cleanup: closed worker pane ${w.pane} (${w.name})`);
+      console.log(`cleanup: closed ${what} pane ${w.pane} (${w.name})`);
       w.closed = closed.at;
       closed.panes.push({ name: w.name, pane: w.pane });
-    } else console.log(`cleanup: worker pane ${w.pane} (${w.name}) not closed`);
+    } else console.log(`cleanup: ${what} pane ${w.pane} (${w.name}) not closed`);
   }
   if (dry) return;
   job.cleanup = closed;
@@ -2050,12 +2052,17 @@ function cmdWorker(args) {
   console.log(`${id} worker ${name} pane=${pane} kind=${kind}${alias ? ` model=${alias}` : ""}${role === "verifier" ? ` role=verifier round=${round}` : ""} worktree=${job.worktree}`);
 }
 
-// Context handoff for builder workers (docs/handoff.md). The watcher runs handoffTick every poll:
-// a live builder past handoff.threshold of its window and idle is asked for a note; once the note
-// exists and it is idle again, it is renamed <name>-h<n> and a fresh agent starts under <name> in a
-// new pane of the same worktree. The old pane stays open until done, stop or cleanup.
+// Context handoff (docs/handoff.md). The watcher runs handoffTick every poll over two kinds of
+// pane: live builder workers and, unless handoff.orchestrator is false, the orchestrator. A pane at
+// or past handoff.threshold of its detected window runs the handoff skill (plugin/skills/handoff):
+// at once when idle or done, or at its next clean stopping point through a message queued mid-turn.
+// Once the note exists and the agent is idle again, it is renamed <name>-h<n> and a fresh agent
+// starts under <name> in a new pane of the same worktree. Old panes stay open until done, stop or
+// cleanup. A pane whose window cannot be detected is never handed off automatically.
 const HANDOFF_NOTE_WAIT_MS = Number(brand.env("HANDOFF_NOTE_WAIT_MS")) || 15 * 60 * 1000;
-let orchestratorHandoffLogged = false;
+// A nudged agent seen idle this long without a note is sent the skill command directly.
+const HANDOFF_NUDGE_GRACE_MS = Number(brand.env("HANDOFF_NUDGE_GRACE_MS")) || 20 * 1000;
+const PENDING = new Set(["nudged", "writing"]);
 
 function handoffSettingsOf(repo) {
   let config = {};
@@ -2078,137 +2085,272 @@ function updateJob(repo, id, fn) {
 // The session id is the stable key of a worker record; its name changes on handoff.
 const workerBySession = (job, sessionId) => (job.workers || []).find((w) => w.sessionId === sessionId);
 
-function measureWorker(job, worker, settings) {
-  const path = context.findTranscript({ kind: worker.kind, cwd: job.worktree, sessionId: worker.sessionId, home: homedir() });
-  return path ? context.contextOf(context.readUsage(path), settings.contextWindow) : null;
+// One pane the tick looks at. The orchestrator's handoff state lives on job.lead.
+function workerSlot(worker) {
+  return { role: "worker", name: worker.name, kind: worker.kind === "pi" ? "pi" : "claude", alias: worker.model || "", sessionId: worker.sessionId, pane: worker.pane };
+}
+
+function leadSlot(job) {
+  const kind = job.kind === "pi" ? "pi" : "claude";
+  return { role: "orchestrator", name: job.agent, kind, alias: kind === "claude" ? job.orchestratorModel || job.model || "" : "", sessionId: job.sessionId, pane: job.pane };
+}
+
+function slotRecord(job, slot) {
+  if (slot.role === "orchestrator") return (job.lead ||= {});
+  return workerBySession(job, slot.sessionId);
+}
+
+const noteBase = (slot) => (slot.role === "orchestrator" ? "orchestrator" : slot.name);
+
+function measurePane(repo, job, slot, settings) {
+  const home = homedir();
+  const path = context.findTranscript({ kind: slot.kind, cwd: job.worktree, sessionId: slot.sessionId, home });
+  const usage = path ? context.readUsage(path) : null;
+  if (!usage) return null;
+  const pi = slot.kind === "pi";
+  const win = context.detectWindow({
+    kind: slot.kind,
+    model: usage.model,
+    provider: usage.provider,
+    alias: slot.alias,
+    capture: pi ? null : context.readCapture(captureDir(repo, job.id), slot.sessionId),
+    piRegistry: pi ? context.readPiRegistry(home) : null,
+    override: settings.contextWindow,
+  });
+  return context.contextOf(usage, win);
 }
 
 const herdrOk = (got) => got.code === 0 && !got.json?.error;
 const herdrDetail = (got) => String(got.json?.error?.message || got.json?.error || got.text || "").replace(/\s+/g, " ").slice(0, 200);
-const pctOf = (pct) => Math.round(pct * 1000) / 1000;
+const pctOf = (pct) => (pct == null ? null : Math.round(pct * 1000) / 1000);
+const contextRecord = (ctx) => ({ tokens: ctx.tokens, window: ctx.window, source: ctx.source, pct: pctOf(ctx.pct), at: new Date().toISOString() });
 
-function handoffFailed(repo, id, sessionId, reason, log) {
+// A message typed while the agent works: Claude and Pi queue it and hand it to the model after the
+// current tool call. Never waits for idle and never interrupts the turn.
+function queuePrompt(name, text) {
+  const sent = herdr(["agent", "prompt", name, text], 60000);
+  if (!herdrOk(sent)) return { ok: false, reason: herdrDetail(sent) };
+  sleep(PROMPT_POLL_MS * 2);
+  const pane = agentPane(name);
+  if (pane && unsubmittedInput(herdr(["pane", "read", pane, "--source", "recent"]).text)) herdr(["agent", "send-keys", name, "Enter"]);
+  return { ok: true };
+}
+
+function handoffFailed(repo, id, slot, reason, log) {
   updateJob(repo, id, (job) => {
-    const w = workerBySession(job, sessionId);
-    if (w?.handoff) Object.assign(w.handoff, { state: "failed", reason });
+    const rec = slotRecord(job, slot);
+    if (rec?.handoff) Object.assign(rec.handoff, { state: "failed", reason });
   });
-  appendDecision(repo, id, ["handoff", "handoff abandoned", reason, "", "failed"]);
+  appendDecision(repo, id, ["handoff", `handoff of ${slot.name} abandoned`, reason, "", "failed"]);
   log(`handoff failed: ${reason}`);
 }
 
-function askForNote(repo, job, worker, ctx, settings, log) {
-  const n = context.handoffNumber(worker);
-  const note = context.notePath(jobDir(repo, job.id), worker.name, n);
+// mode "now": the skill command at a safe point. mode "queue": a mid-turn message asking the agent
+// to run the skill at its next clean stopping point.
+function askForNote(repo, job, slot, rec, ctx, settings, mode, log) {
+  const n = (Array.isArray(rec.handoffs) ? rec.handoffs.length : 0) + 1;
+  const note = context.notePath(jobDir(repo, job.id), noteBase(slot), n);
   mkdirSync(dirname(note), { recursive: true });
-  const sent = promptWithRetry(worker.name, context.notePrompt({ path: note, context: ctx, threshold: settings.threshold }), { readyStatuses: context.SAFE_STATUSES });
+  const args = { kind: slot.kind, path: note, role: slot.role, context: ctx, threshold: settings.threshold };
+  const sent = mode === "queue"
+    ? queuePrompt(slot.name, context.nudgePrompt({ ...args, skillFile: HANDOFF_SKILL }))
+    : promptWithRetry(slot.name, context.notePrompt(args), { readyStatuses: context.SAFE_STATUSES });
   const at = new Date().toISOString();
+  const state = !sent.ok ? "failed" : mode === "queue" ? "nudged" : "writing";
   updateJob(repo, job.id, (j) => {
-    const w = workerBySession(j, worker.sessionId);
-    if (w) w.handoff = { state: sent.ok ? "writing" : "failed", n, note, tokens: ctx.tokens, window: ctx.window, pct: pctOf(ctx.pct), at, ...(sent.ok ? {} : { reason: sent.reason }) };
+    const r = slotRecord(j, slot);
+    if (r) r.handoff = { state, mode, n, note, tokens: ctx.tokens, window: ctx.window, source: ctx.source, pct: pctOf(ctx.pct), at, ...(sent.ok ? {} : { reason: sent.reason }) };
   });
-  appendDecision(repo, job.id, ["handoff", `ask ${worker.name} for handoff note h${n}`, `context ${context.pctLabel(ctx.pct)} >= ${context.pctLabel(settings.threshold)} of ${ctx.window}`, note, sent.ok ? "asked" : `failed: ${sent.reason}`]);
-  log(`handoff ${worker.name}: context ${context.pctLabel(ctx.pct)} (${ctx.tokens}/${ctx.window}); ${sent.ok ? `asked for ${note}` : `note prompt failed: ${sent.reason}`}`);
+  const how = mode === "queue" ? "queued mid-turn: run the handoff skill at the next clean stopping point" : "handoff skill run at a safe point";
+  appendDecision(repo, job.id, ["handoff", `ask ${slot.name} for handoff note h${n}`, `context ${context.pctLabel(ctx.pct)} >= ${context.pctLabel(settings.threshold)} of ${ctx.window} (${ctx.source}); ${how}`, note, sent.ok ? state : `failed: ${sent.reason}`]);
+  log(`handoff ${slot.name}: context ${context.pctLabel(ctx.pct)} (${ctx.tokens}/${ctx.window}, ${ctx.source}); ${sent.ok ? `${how} -> ${note}` : `note prompt failed: ${sent.reason}`}`);
 }
 
 // Note written and the agent idle: rename it, start the successor under its name, prompt it.
-function startSuccessor(repo, id, sessionId, log) {
+function startSuccessor(repo, id, slot, log) {
   const job = load(repo, id);
-  const worker = workerBySession(job, sessionId);
-  const h = worker.handoff;
-  const name = worker.name;
+  const settings = handoffSettingsOf(repo);
+  const rec = slotRecord(job, slot);
+  const h = rec.handoff;
+  const name = slot.name;
   const from = context.retiredName(name, h.n);
+  // The old agent's context once the note is written: how far it went past the cap.
+  const end = measurePane(repo, job, slot, settings);
   const renamed = herdr(["agent", "rename", name, from]);
-  if (!herdrOk(renamed)) return handoffFailed(repo, id, sessionId, `herdr agent rename ${name} ${from}: ${herdrDetail(renamed)}`, log);
+  if (!herdrOk(renamed)) return handoffFailed(repo, id, slot, `herdr agent rename ${name} ${from}: ${herdrDetail(renamed)}`, log);
   const at = new Date().toISOString();
+  const lead = slot.role === "orchestrator";
   updateJob(repo, id, (j) => {
-    const w = workerBySession(j, sessionId);
-    w.name = from;
-    w.retired = { at, by: name, n: h.n };
-    w.handoff.state = "done";
+    const r = slotRecord(j, slot);
+    r.handoff.state = "done";
+    if (end) r.handoff.pctEnd = pctOf(end.pct);
+    if (!lead) {
+      r.name = from;
+      r.retired = { at, by: name, n: h.n };
+    }
   });
   const rollback = (why) => {
     herdr(["agent", "rename", from, name]);
     updateJob(repo, id, (j) => {
-      const w = workerBySession(j, sessionId);
-      w.name = name;
-      delete w.retired;
+      const r = slotRecord(j, slot);
+      if (!lead) {
+        r.name = name;
+        delete r.retired;
+      }
     });
-    handoffFailed(repo, id, sessionId, why, log);
+    handoffFailed(repo, id, slot, why, log);
   };
-  const split = herdr(["pane", "split", "--pane", worker.pane, "--direction", "down", "--cwd", job.worktree, "--no-focus", "--env", `PATH=${pathPrefix()}`, ...portEnvArgs(job), ...jobEnvArgs(job, name)]);
+  const env = lead ? jobEnvArgs(job, "orchestrator") : jobEnvArgs(job, name);
+  const split = herdr(["pane", "split", "--pane", slot.pane, "--direction", "down", "--cwd", job.worktree, "--no-focus", "--env", `PATH=${pathPrefix()}`, ...portEnvArgs(job), ...env]);
   const pane = split.json?.result?.pane?.pane_id;
   if (!pane) return rollback(`pane split: ${herdrDetail(split)}`);
   const nextSession = randomUUID();
-  const started = herdr(startArgs(name, pane, worker.kind, worker.model, nextSession, job), 90000);
+  const started = herdr(startArgs(name, pane, slot.kind, slot.alias, nextSession, job), 90000);
   if (!herdrOk(started)) {
     // The pane was split just now and never held an agent: close only that one.
     herdr(["pane", "close", pane]);
     return rollback(`agent start ${name}: ${herdrDetail(started)}`);
   }
-  const prompt = `${workerPrompt(job, name, worker.task, worker.model)}\n${context.successorLines({ path: h.note, n: h.n, from })}`;
-  const delivered = promptWithRetry(name, prompt);
-  const record = { n: h.n, from, pane: worker.pane, sessionId, tokens: h.tokens, window: h.window, pct: h.pct, at, note: h.note };
-  updateJob(repo, id, (j) => {
-    j.workers.push({
-      delivery: delivered.ok ? "ok" : "failed",
-      ...(delivered.ok ? {} : { deliveryReason: delivered.reason }),
-      name,
-      pane,
-      kind: worker.kind,
-      model: worker.model,
-      role: worker.role,
-      task: worker.task,
-      sessionId: nextSession,
-      startedAt: at,
-      result: worker.result,
-      note: worker.note,
-      handoffs: [...(Array.isArray(worker.handoffs) ? worker.handoffs : []), record],
+  const record = { n: h.n, from, pane: slot.pane, sessionId: slot.sessionId, tokens: h.tokens, window: h.window, source: h.source, pct: h.pct, pctEnd: end ? pctOf(end.pct) : null, mode: h.mode, at, note: h.note };
+  let prompt;
+  if (lead) {
+    // The record first, so the watcher follows the new pane while the prompt is delivered.
+    updateJob(repo, id, (j) => {
+      j.pane = pane;
+      j.sessionId = nextSession;
+      j.lead = { handoffs: [...(Array.isArray(j.lead?.handoffs) ? j.lead.handoffs : []), record] };
+      j.retiredLeads = [...(Array.isArray(j.retiredLeads) ? j.retiredLeads : []), { name: from, pane: slot.pane, sessionId: slot.sessionId, n: h.n, at }];
+      j.handoffs = [...(Array.isArray(j.handoffs) ? j.handoffs : []), { worker: "orchestrator", ...record }];
     });
-    j.handoffs = [...(Array.isArray(j.handoffs) ? j.handoffs : []), { worker: name, ...record }];
-  });
-  appendDecision(repo, id, ["handoff", `${from} -> fresh ${name} (h${h.n})`, `context ${context.pctLabel(h.pct)}; old pane ${worker.pane} stays open`, h.note, delivered.ok ? `ok pane=${pane}` : `delivery failed: ${delivered.reason}`]);
-  log(`handoff ${name}: old agent renamed ${from} (pane ${worker.pane} stays open), fresh ${name} pane=${pane}${delivered.ok ? "" : ` delivery failed: ${delivered.reason}`}`);
+    prompt = `${leadPrompt(job)}\n${context.leadSuccessorLines({ path: h.note, n: h.n, from, jobFile: jobPath(repo, id), decisions: decisionsPath(repo, id), id })}`;
+  } else {
+    const worker = rec;
+    prompt = `${workerPrompt(job, name, worker.task, worker.model)}\n${context.successorLines({ path: h.note, n: h.n, from })}`;
+  }
+  const delivered = promptWithRetry(name, prompt);
+  if (lead) {
+    updateJob(repo, id, (j) => {
+      j.leadDelivery = delivered.ok ? "ok" : "failed";
+    });
+  } else {
+    const worker = rec;
+    updateJob(repo, id, (j) => {
+      j.workers.push({
+        delivery: delivered.ok ? "ok" : "failed",
+        ...(delivered.ok ? {} : { deliveryReason: delivered.reason }),
+        name,
+        pane,
+        kind: worker.kind,
+        model: worker.model,
+        role: worker.role,
+        task: worker.task,
+        sessionId: nextSession,
+        startedAt: at,
+        result: worker.result,
+        note: worker.note,
+        handoffs: [...(Array.isArray(worker.handoffs) ? worker.handoffs : []), record],
+      });
+      j.handoffs = [...(Array.isArray(j.handoffs) ? j.handoffs : []), { worker: name, ...record }];
+    });
+  }
+  const past = end ? `; ${context.pctLabel(end.pct)} when the note was done` : "";
+  appendDecision(repo, id, ["handoff", `${from} -> fresh ${name} (h${h.n})`, `context ${context.pctLabel(h.pct)}${past}; old pane ${slot.pane} stays open`, h.note, delivered.ok ? `ok pane=${pane}` : `delivery failed: ${delivered.reason}`]);
+  log(`handoff ${name}: old agent renamed ${from} (pane ${slot.pane} stays open), fresh ${name} pane=${pane}${past}${delivered.ok ? "" : ` delivery failed: ${delivered.reason}`}`);
 }
 
-// One pass over a job's workers. Returns what it saw, for orka handoff --dry-run and the tests.
-function handoffTick(repo, id, { log = console.log, dry = false } = {}) {
+// A note asked for and not yet used: start the successor once it exists and the agent is idle.
+function pendingStep(repo, id, slot, rec, { dry, log, seen }) {
+  const h = rec.handoff;
+  const ready = existsSync(h.note) && statSync(h.note).size > 0;
+  const status = agentStatus(slot.name);
+  seen.push({ name: slot.name, role: slot.role, state: h.state, ready, status });
+  if (dry) return;
+  const safe = context.SAFE_STATUSES.includes(status);
+  if (ready && safe) return startSuccessor(repo, id, slot, log);
+  if (Date.now() - Date.parse(h.at) > HANDOFF_NOTE_WAIT_MS) {
+    return handoffFailed(repo, id, slot, `${slot.name} wrote no handoff note in ${Math.round(HANDOFF_NOTE_WAIT_MS / 60000)} min`, log);
+  }
+  // Nudged, but the turn ended without the skill: run it directly, after a grace period so a
+  // queued message that is about to start a turn is not doubled.
+  if (h.state === "nudged" && safe && !ready) {
+    if (!h.safeSince) return updateJob(repo, id, (j) => void (slotRecord(j, slot).handoff.safeSince = new Date().toISOString()));
+    if (Date.now() - Date.parse(h.safeSince) < HANDOFF_NUDGE_GRACE_MS) return;
+    const sent = promptWithRetry(slot.name, context.notePrompt({ kind: slot.kind, path: h.note, role: slot.role, context: h, threshold: handoffSettingsOf(repo).threshold }), { readyStatuses: context.SAFE_STATUSES });
+    updateJob(repo, id, (j) => {
+      const r = slotRecord(j, slot).handoff;
+      r.state = sent.ok ? "writing" : "failed";
+      if (!sent.ok) r.reason = sent.reason;
+    });
+    log(`handoff ${slot.name}: idle after the queued ask without a note; ${sent.ok ? "ran the handoff skill" : `skill prompt failed: ${sent.reason}`}`);
+  } else if (h.safeSince && !safe) {
+    updateJob(repo, id, (j) => void delete slotRecord(j, slot).handoff.safeSince);
+  }
+}
+
+// Measure one pane and act on it. force: orka handoff <id> <name> (no threshold, no cap; still
+// needs the agent idle, done or working).
+function measureStep(repo, job, slot, rec, settings, { dry, log, seen, force = false }) {
+  const ctx = measurePane(repo, job, slot, settings);
+  if (!ctx && !force) {
+    seen.push({ name: slot.name, role: slot.role, state: "no usage" });
+    return;
+  }
+  const status = force || (ctx?.window && ctx.pct >= settings.threshold) ? agentStatus(slot.name) : "";
+  let due = context.handoffDue({ context: ctx, status, threshold: settings.threshold });
+  const capped = !force && due.due && context.capReached(rec.handoffs, settings.maxHandoffs);
+  if (capped) due = { due: false, why: `cap of ${settings.maxHandoffs} handoffs reached` };
+  if (force) {
+    const mode = context.SAFE_STATUSES.includes(status) ? "now" : status === "working" ? "queue" : "";
+    due = mode ? { due: true, mode, why: "asked by hand" } : { due: false, why: `asked by hand but ${status || "unknown"}` };
+  }
+  seen.push({ name: slot.name, role: slot.role, tokens: ctx?.tokens, window: ctx?.window, source: ctx?.source, pct: pctOf(ctx?.pct), status, due: due.due, mode: due.mode, why: due.why });
+  if (dry) return;
+  const flags = {};
+  if (ctx && !ctx.window && !rec.windowUnknown) flags.windowUnknown = true;
+  if (capped && !rec.capLogged) flags.capLogged = true;
+  updateJob(repo, job.id, (j) => {
+    const r = slotRecord(j, slot);
+    if (!r) return;
+    if (ctx) r.context = contextRecord(ctx);
+    Object.assign(r, flags);
+  });
+  if (flags.windowUnknown) {
+    appendDecision(repo, job.id, ["handoff", `no automatic handoff for ${slot.name}`, `window unknown (${slot.kind}, model ${ctx.model || "-"}): no statusline capture, [1m] id or registry entry, and no handoff.contextWindow`, "", "skipped; orka handoff <id> <name> still works"]);
+    log(`handoff ${slot.name}: window unknown for model ${ctx.model || "-"}; no automatic handoff`);
+  }
+  if (flags.capLogged) {
+    appendDecision(repo, job.id, ["handoff", `no more handoffs for ${slot.name}`, `context ${context.pctLabel(ctx.pct)}; cap of ${settings.maxHandoffs} handoffs (handoff.maxHandoffs) reached`, "", "skipped"]);
+    log(`handoff ${slot.name}: cap of ${settings.maxHandoffs} reached; not handed off again`);
+  }
+  if (due.due) askForNote(repo, job, slot, rec, ctx || { tokens: 0, window: 0, pct: 0, source: "unknown" }, settings, due.mode, log);
+}
+
+// One pass over a job's panes. Returns what it saw, for orka handoff --dry-run and the tests.
+// only: a worker name, or "orchestrator", for a handoff asked by hand.
+function handoffTick(repo, id, { log = console.log, dry = false, only = "" } = {}) {
   const settings = handoffSettingsOf(repo);
   const job = load(repo, id);
   const seen = [];
-  if (!settings.enabled || job.status !== "running" || !job.worktree) return seen;
-  if (settings.orchestrator && !orchestratorHandoffLogged) {
-    orchestratorHandoffLogged = true;
-    log("handoff.orchestrator is on, but orchestrator handoff is not built yet; only workers are handed off");
+  if ((!settings.enabled && !only) || job.status !== "running" || !job.worktree) return seen;
+  const ctx = { dry, log, seen };
+  const leadWanted = only ? only === "orchestrator" || only === job.agent : settings.orchestrator;
+  if (leadWanted && job.agent && job.sessionId) {
+    const slot = leadSlot(job);
+    const rec = job.lead || {};
+    if (PENDING.has(rec.handoff?.state)) pendingStep(repo, id, slot, rec, ctx);
+    else if (only || rec.handoff?.state !== "failed") measureStep(repo, job, slot, rec, settings, { ...ctx, force: Boolean(only) });
   }
   for (const worker of job.workers || []) {
     if (!worker?.sessionId) continue;
-    if (worker.handoff?.state === "writing") {
-      const ready = existsSync(worker.handoff.note) && statSync(worker.handoff.note).size > 0;
-      const status = agentStatus(worker.name);
-      seen.push({ name: worker.name, state: "writing", ready, status });
-      if (dry) continue;
-      if (ready && context.SAFE_STATUSES.includes(status)) startSuccessor(repo, id, worker.sessionId, log);
-      else if (Date.now() - Date.parse(worker.handoff.at) > HANDOFF_NOTE_WAIT_MS) {
-        handoffFailed(repo, id, worker.sessionId, `${worker.name} wrote no handoff note in ${Math.round(HANDOFF_NOTE_WAIT_MS / 60000)} min`, log);
-      }
+    if (only && worker.name !== only) continue;
+    const slot = workerSlot(worker);
+    if (PENDING.has(worker.handoff?.state)) {
+      pendingStep(repo, id, slot, worker, ctx);
       continue;
     }
     const resultExists = existsSync(join(jobDir(repo, id), "results", `${worker.name}.json`));
-    if (!context.handoffCandidate(worker, { resultExists })) continue;
-    const ctx = measureWorker(job, worker, settings);
-    if (!ctx) {
-      seen.push({ name: worker.name, state: "no usage" });
-      continue;
-    }
-    const status = ctx.pct >= settings.threshold ? agentStatus(worker.name) : "";
-    const due = context.handoffDue({ context: ctx, status, threshold: settings.threshold });
-    seen.push({ name: worker.name, tokens: ctx.tokens, window: ctx.window, pct: pctOf(ctx.pct), status, due: due.due, why: due.why });
-    if (dry) continue;
-    updateJob(repo, id, (j) => {
-      const w = workerBySession(j, worker.sessionId);
-      if (w) w.context = { tokens: ctx.tokens, window: ctx.window, pct: pctOf(ctx.pct), at: new Date().toISOString() };
-    });
-    if (due.due) askForNote(repo, job, worker, ctx, settings, log);
+    if (only ? worker.retired || worker.closed : !context.handoffCandidate(worker, { resultExists })) continue;
+    measureStep(repo, job, slot, worker, settings, { ...ctx, force: Boolean(only) });
   }
   return seen;
 }
@@ -2216,16 +2358,21 @@ function handoffTick(repo, id, { log = console.log, dry = false } = {}) {
 function cmdHandoff(args) {
   allowFlags(args, ["cwd", "dry-run"]);
   const id = args._[1];
-  if (!id) fail("need: orka handoff <id> [--dry-run]");
+  const only = args._[2] ? String(args._[2]) : "";
+  if (!id) fail("need: orka handoff <id> [<worker>|orchestrator] [--dry-run]");
   const repo = requireRepo(args.cwd || process.cwd());
   const settings = handoffSettingsOf(repo);
-  if (args["dry-run"]) console.log(`handoff: ${settings.enabled ? `threshold ${context.pctLabel(settings.threshold)}` : "off"}${settings.orchestrator ? " orchestrator flag on (not built)" : ""}`);
-  const seen = handoffTick(repo, String(id), { dry: Boolean(args["dry-run"]) });
+  if (args["dry-run"]) console.log(`handoff: ${settings.enabled ? `threshold ${context.pctLabel(settings.threshold)}, orchestrator ${settings.orchestrator ? "on" : "off"}, cap ${settings.maxHandoffs}` : "off"}`);
+  const seen = handoffTick(repo, String(id), { dry: Boolean(args["dry-run"]), only });
   for (const s of seen) {
-    if (s.state) console.log(`${s.name}: ${s.state}${s.state === "writing" ? ` note=${s.ready ? "written" : "not yet"} status=${s.status}` : ""}`);
-    else console.log(`${s.name}: ${s.tokens}/${s.window} tokens ${context.pctLabel(s.pct)}${s.status ? ` ${s.status}` : ""} -> ${s.due ? "hand off" : "keep"} (${s.why})`);
+    const who = `${s.name}${s.role === "orchestrator" ? " (orchestrator)" : ""}`;
+    if (s.state) console.log(`${who}: ${s.state}${PENDING.has(s.state) ? ` note=${s.ready ? "written" : "not yet"} status=${s.status}` : ""}`);
+    else {
+      const size = s.window ? `${s.tokens}/${s.window} tokens ${context.pctLabel(s.pct)} (${s.source})` : `${s.tokens ?? 0} tokens, window unknown`;
+      console.log(`${who}: ${size}${s.status ? ` ${s.status}` : ""} -> ${s.due ? (s.mode === "queue" ? "hand off (queued mid-turn)" : "hand off") : "keep"} (${s.why})`);
+    }
   }
-  if (!seen.length) console.log("no worker to measure");
+  if (!seen.length) console.log(only ? `no pane named ${only} to hand off` : "no pane to measure");
 }
 
 // A new verifier round starts clean: the previous verifier's sessions are closed
@@ -2269,7 +2416,8 @@ function cmdStatus(args) {
     else if (FINISH_STATUSES.has(job.status) && job.workspace) console.log(`  workspace: ${job.workspace} open until idle ${staleLabel(repo)}`);
     if (job.cleanup) console.log(`  cleaned up: ${job.cleanup.browsers.length} browser(s), ${job.cleanup.servers.length} server(s), ${job.cleanup.panes.length} worker pane(s)`);
     if (job.kind === "claude") console.log(`  models: orchestrator=${job.orchestratorModel || job.model || "-"} worker=${job.workerModel || "-"} ${verifierLabel(job)}`);
-    if (job.agent || job.pane) console.log(`  agent: ${job.agent || "-"} pane=${job.pane || "-"} workspace=${job.workspace || "-"} model=${job.orchestratorModel || job.model || "-"}${job.leadDelivery === "failed" ? ` delivery=failed${job.stopReason ? ` [${job.stopReason}]` : ""}` : ""}`);
+    if (job.agent || job.pane) console.log(`  agent: ${job.agent || "-"} pane=${job.pane || "-"} workspace=${job.workspace || "-"} model=${job.orchestratorModel || job.model || "-"}${job.leadDelivery === "failed" ? ` delivery=failed${job.stopReason ? ` [${job.stopReason}]` : ""}` : ""}${handoffLabel(job.lead)}`);
+    for (const r of job.retiredLeads || []) console.log(`  orchestrator: ${r.name} pane=${r.pane} handed-off->${job.agent} (h${r.n}, pane open)`);
     for (const worker of job.workers || []) console.log(`  worker: ${worker.name} pane=${worker.pane} ${worker.model ? `model=${worker.model}` : "kind=pi"}${worker.role === "verifier" ? " role=verifier" : ""}${worker.delivery ? ` delivery=${worker.delivery}` : ""}${worker.closedUnused ? ` closed-unused (${worker.closedUnused.reason})` : ""}${worker.delivery === "failed" && worker.deliveryReason ? ` [${worker.deliveryReason}]` : ""}${handoffLabel(worker)}`);
     for (const steer of (job.steers || []).filter((x) => x?.delivery === "failed")) console.log(`  steer: ${String(steer.message ?? "").slice(0, 200).replace(/[\r\n]+/g, " ")} delivery=failed${steer.deliveryReason ? ` [${steer.deliveryReason}]` : ""}`);
     const summary = summaryOf(repo, job);
@@ -2292,12 +2440,14 @@ function cmdStatus(args) {
   for (const file of files) line(JSON.parse(readFileSync(join(jobsDir(repo), file), "utf8")));
 }
 
-function handoffLabel(worker) {
+// rec: a worker record or job.lead. ctx=NN% of <window>k (<source>), or ctx=window-unknown.
+function handoffLabel(rec) {
   const parts = [];
-  if (worker.context?.pct != null && !worker.retired) parts.push(`ctx=${context.pctLabel(worker.context.pct)}`);
-  if (worker.retired) parts.push(`handed-off->${worker.retired.by} (h${worker.retired.n}, pane open)`);
-  else if (worker.handoff?.state === "writing") parts.push(`handoff=writing ${worker.handoff.note}`);
-  else if (worker.handoff?.state === "failed") parts.push(`handoff=failed [${worker.handoff.reason}]`);
+  const c = rec?.context;
+  if (c && !rec.retired) parts.push(c.window ? `ctx=${context.pctLabel(c.pct)} of ${context.windowLabel(c)}` : `ctx=window-unknown (${Math.round(c.tokens / 1000)}k tokens, no auto handoff)`);
+  if (rec?.retired) parts.push(`handed-off->${rec.retired.by} (h${rec.retired.n}, pane open)`);
+  else if (PENDING.has(rec?.handoff?.state)) parts.push(`handoff=${rec.handoff.state} ${rec.handoff.note}`);
+  else if (rec?.handoff?.state === "failed") parts.push(`handoff=failed [${rec.handoff.reason}]`);
   return parts.length ? ` ${parts.join(" ")}` : "";
 }
 
@@ -3459,7 +3609,7 @@ function help() {
   orka cleanup [--dry-run] [--older-than <12h>] [--orphan-hours <2>] [--cwd <repo>]
   orka reap <id> [--worker <name>] [--dry-run] [--cwd <repo>]   (closes browsers only; panes stay)
   orka watch <id> [--dry-run] [--cwd <repo>]   (started by orka run; not for hand use)
-  orka handoff <id> [--dry-run] [--cwd <repo>]   (one context-handoff pass; the watcher runs it every poll)
+  orka handoff <id> [<worker>|orchestrator] [--dry-run] [--cwd <repo>]   (one context-handoff pass; the watcher runs it every poll; a name hands that pane off now)
   orka webhook <id> [--dry-run] [--force] [--cwd <repo>]
   orka verify <id> [--base] [--dry-run] [--cwd <repo>]
   orka help
@@ -3491,13 +3641,17 @@ Multi-worker (both kinds)
   start in parallel (several orka worker calls). All workers share one worktree, so no
   two workers get the same files.
 
-Context handoff (builder workers, both kinds)
+Context handoff (builder workers and the orchestrator, both kinds)
   Every pane starts with --session-id; the watcher reads that transcript's last turn each poll.
-  An idle builder at or past handoff.threshold (default 0.5) of its window writes a note to
-  .orka/jobs/<id>/handoff/<name>-<n>.md, is renamed <name>-h<n>, and a fresh <name> continues
-  from the note in a new pane. The old pane stays open until done/stop/cleanup. Verifier exempt.
-  Config: "handoff": {"threshold": 0.5, "contextWindow": 200000 | {"<model substring>": N}, "orchestrator": false}
-  or "handoff": false. See docs/handoff.md.
+  Window per pane, never guessed: Claude's statusline context_window_size (captured per session),
+  a [1m] model id, Pi's model registry, then handoff.contextWindow; else "window unknown" and no
+  automatic handoff. At handoff.threshold (default 0.5) the pane runs the handoff skill
+  (plugin/skills/handoff): at once when idle, or at its next clean stopping point via a message
+  queued mid-turn. The note goes to .orka/jobs/<id>/handoff/<name>-<n>.md, the agent is renamed
+  <name>-h<n>, and a fresh <name> continues in a new pane. Old panes stay open until done/stop/cleanup.
+  Verifier exempt. At most handoff.maxHandoffs (default 3) per pane.
+  Config: "handoff": {"threshold": 0.5, "orchestrator": true, "maxHandoffs": 3,
+  "contextWindow": N | {"<model substring>": N}} or "handoff": false. See docs/handoff.md.
 
 Verifier (both kinds)
   After every builder reports, the orchestrator starts ONE verifier:
