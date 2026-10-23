@@ -15,6 +15,7 @@ import * as brand from "../lib/brand.mjs";
 import * as browsers from "../lib/browsers.mjs";
 import * as lifecycle from "../lib/lifecycle.mjs";
 import * as ports from "../lib/ports.mjs";
+import * as specs from "../lib/spec.mjs";
 import * as watch from "../lib/watch.mjs";
 
 const ORKA = fileURLToPath(import.meta.url);
@@ -65,6 +66,7 @@ const VALUE_FLAGS = new Set([
   "older-than",
   "orphan-hours",
   "worker",
+  "spec",
 ]);
 const BOOL_FLAGS = new Set(["dry-run", "help", "force", "keep", "base", "ui"]);
 const FINISH_STATUSES = new Set(["done", "failed", "stopped"]);
@@ -1172,6 +1174,7 @@ function workerPrompt(job, name, task, alias) {
     ``,
     String(task).trim(),
     ``,
+    ...specPromptLines(job),
     `When finished, write ${result} as JSON:`,
     `{"worker":"${name}","ok":true,"result":"<what you did, a few sentences>"}`,
     `Also write one line at ${note}.`,
@@ -1474,6 +1477,7 @@ function verifierPrompt(job, name, task, alias, round) {
     `What was built and the acceptance criteria:`,
     String(task).trim(),
     ``,
+    ...specPromptLines(job),
     ...(job.playbook === "bug-fix" ? [...REPRO_VERIFIER_LINES(dir), ``] : []),
     `Evidence standard (a pass needs proof, not a claim):`,
     `- Test the real user path: run the feature the way a user would (the real command, page or API), not only unit tests or a private helper.`,
@@ -1593,6 +1597,7 @@ function orchestratorPrompt(job) {
     `If orka is not on PATH, run ${ORKA} instead. The binary is the same file.`,
     `Write every worker --task as this brief, one labelled section per line: GOAL / SCOPE (files it owns) / CONTEXT (file pointers, not pasted text) / ACCEPTANCE / VERIFY / TIMEBOX / FORBIDDEN / REPORT. Workers cannot ask questions, so a vague task fails quietly.`,
     `When ${featureMapFile(job.worktree)} exists at the repo root, point workers at it in CONTEXT.`,
+    ...(job.spec?.path ? [`This job has a spec: ${job.spec.path} in the worktree. orka pastes it into every worker and verifier brief, so do not copy it into a --task. Every "Done when" line of it goes into the verifier --task as an acceptance criterion.`] : []),
     ...(PLAYBOOK_ORCHESTRATOR_LINES[job.playbook] || PLAYBOOK_ORCHESTRATOR_LINES.feature)(dir),
     `For a one-command task the brief collapses to GOAL + ACCEPTANCE. orka warns when a builder task has no SCOPE: or ACCEPTANCE:.`,
     `When a worker's task is research or investigation, append this block verbatim to its --task (after REPORT):\n${RESEARCH_REPORT}`,
@@ -1686,18 +1691,61 @@ function assignClaudeModels(job, args) {
   job.model = models.orchestratorModel;
 }
 
+// --spec <path>: specs/<feature>/spec.md (or its folder), relative to the repo root. It must be
+// committed at HEAD, because the job worktree is checked out from HEAD.
+function resolveSpec(repo, raw) {
+  let rel = String(raw).trim().replace(/\/+$/, "");
+  const abs = resolve(repo, rel);
+  rel = relative(repo, abs);
+  if (!rel || rel.startsWith("..") || rel.startsWith(sep)) fail(`--spec must be inside the repo: ${raw}`);
+  if (!rel.endsWith(".md")) rel = join(rel, specs.SPEC_FILE);
+  const shown = git(repo, ["show", `HEAD:${rel}`]);
+  if (shown.code !== 0) {
+    const where = existsSync(join(repo, rel)) ? "exists but is not committed" : "not found";
+    fail(`spec ${rel} ${where} at HEAD; commit it first (the job worktree is checked out from HEAD)\nscaffold one with: orka spec init <feature>`);
+  }
+  const text = `${shown.out}\n`;
+  const parsed = specs.parseSpec(text);
+  const missing = specs.missingSections(parsed);
+  if (missing.length) fail(`spec ${rel} has no ${missing.map((m) => `"## ${m[0].toUpperCase()}${m.slice(1)}"`).join(" or ")} text; fill it in and commit`);
+  const disk = existsSync(join(repo, rel)) ? readFileSync(join(repo, rel), "utf8") : null;
+  if (disk !== null && disk.trim() !== shown.out.trim()) console.error(`warning: ${rel} has uncommitted changes; the job uses the committed version`);
+  const commit = git(repo, ["rev-parse", "HEAD"]).out.trim();
+  const feature = rel.split(sep).at(-2) || parsed.title || "spec";
+  return { rel, text, parsed, commit, feature };
+}
+
+// The spec text as the job sees it: the job branch copy in the worktree (lessons included), else the committed one.
+function jobSpecText(job) {
+  if (!job.spec?.path) return "";
+  const inTree = job.worktree ? join(job.worktree, job.spec.path) : "";
+  if (inTree && existsSync(inTree)) {
+    try {
+      return readFileSync(inTree, "utf8");
+    } catch {}
+  }
+  const shown = git(job.repo, ["show", `${job.spec.commit || "HEAD"}:${job.spec.path}`]);
+  return shown.code === 0 ? shown.out : "";
+}
+
+function specPromptLines(job) {
+  const text = jobSpecText(job);
+  return text ? [specs.specBlock(text, job.spec.path), ``] : [];
+}
+
 async function cmdNew(args) {
   if ("model" in args) fail("use --worker-model on orka new, not --model");
-  allowFlags(args, ["cwd", "title", "goal", "kind", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds", "ui", "playbook"]);
-  const title = args.title;
-  const goal = args.goal;
+  allowFlags(args, ["cwd", "title", "goal", "kind", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds", "ui", "playbook", "spec"]);
   const kind = args.kind || "claude";
-  if (!title || !goal) fail("need --title and --goal");
+  const repo = requireRepo(args.cwd || process.cwd());
+  const spec = "spec" in args ? resolveSpec(repo, flagValue(args, "spec")) : null;
+  const title = args.title || spec?.parsed.title || spec?.feature;
+  const goal = spec ? [typeof args.goal === "string" ? args.goal.trim() : "", specs.specIntake(spec.parsed, spec.rel, spec.commit)].filter(Boolean).join("\n\n") : args.goal;
+  if (!title || !goal) fail("need --title and --goal (or --spec <path>)");
   if (kind !== "pi" && kind !== "claude") fail("kind must be pi or claude");
   if (kind === "pi" && (args["orchestrator-model"] || args["worker-model"] || args["verifier-model"])) {
     fail("--orchestrator-model, --worker-model and --verifier-model are only for kind claude");
   }
-  const repo = requireRepo(args.cwd || process.cwd());
   const orchestratorModel = kind === "claude" ? assertClaudeModel(flagValue(args, "orchestrator-model") || DEFAULT_ORCHESTRATOR_MODEL, "orchestrator") : "";
   const workerModel = kind === "claude" ? assertClaudeModel(flagValue(args, "worker-model") || DEFAULT_WORKER_MODEL, "worker") : "";
   if (kind === "pi" && args.ui) fail("--ui is only for kind claude");
@@ -1744,6 +1792,7 @@ async function cmdNew(args) {
     created: new Date().toISOString(),
   };
   if (maxRounds) job.maxRounds = maxRounds;
+  if (spec) job.spec = { path: spec.rel, feature: spec.feature, commit: spec.commit };
   sweepQuietly(repo);
   await assignPorts(repo, job);
   const head = git(repo, ["rev-parse", "--verify", "--quiet", "HEAD"]);
@@ -2055,6 +2104,7 @@ function cmdStatus(args) {
     console.log(`  worktree: ${job.worktree || "(not created)"}`);
     console.log(`  layout: ${job.workerLayout || "shared-worktree"}`);
     console.log(`  playbook: ${job.playbook || "feature"}`);
+    if (job.spec?.path) console.log(`  spec: ${job.spec.path}${job.spec.commit ? ` @${job.spec.commit.slice(0, 8)}` : ""}`);
     if (job.port != null) console.log(`  port: ${job.port}${Array.isArray(job.ports) && job.ports.length > 1 ? ` ports=${job.ports.join(",")}` : ""}`);
     if (roundOf(job) > 1) console.log(`  round: ${roundOf(job)} (follow-up)`);
     if (job.watcherPid && job.status === "running") console.log(`  watcher: pid ${job.watcherPid}`);
@@ -3216,11 +3266,28 @@ async function cmdWatch(args) {
   log(`exit: ${result.exit}`);
 }
 
+function cmdSpec(args) {
+  allowFlags(args, ["cwd"]);
+  const sub = args._[1];
+  if (sub !== "init") fail("need: orka spec init <feature>");
+  const feature = specs.assertFeature(args._[2]);
+  const { top } = gitMeta(args.cwd || process.cwd());
+  const rel = specs.specRelPath(feature);
+  const path = join(top, rel);
+  if (existsSync(path)) fail(`${rel} already exists`);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, specs.specTemplate(feature));
+  console.log(`created ${path}`);
+  console.log(`fill What, Why, Limits and Done when, commit it, then: orka new --spec ${rel}`);
+}
+
 function help() {
   console.log(`orka — one job in a linked worktree
 
   orka init [--cwd <repo>]
   orka new --title "..." --goal "..." [--cwd <repo>] [--kind claude|pi] [--keep]
+  orka new --spec specs/<feature>/spec.md [--title "..."] [--goal "extra"] [...]   (intake built from a committed spec)
+  orka spec init <feature> [--cwd <repo>]   (scaffolds specs/<feature>/spec.md; you fill and commit it)
            [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds <N>]
   orka run <id> [--dry-run] [--cwd <repo>] [--keep]
            [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds <N>]
@@ -3393,6 +3460,7 @@ async function main() {
   else if (cmd === "cleanup") cmdCleanup(args);
   else if (cmd === "reap") cmdReap(args);
   else if (cmd === "watch") await cmdWatch(args);
+  else if (cmd === "spec") cmdSpec(args);
   else fail(`unknown command ${cmd}\nrun: orka help`);
 }
 
