@@ -16,6 +16,7 @@ orka digest <id> [--cwd <repo>]
 orka steer <id> [--to <worker>] "message"
 orka wake <id> [--dry-run]
 orka propose <id> [--dry-run]
+orka review <id> [--dry-run]   # orchestrator: verifier passed, summary.txt written; status review until orka approve
 orka approve <id> ["note"]
 orka stop <id> [reason] [--dry-run] [--keep]
 orka done <id> [reason] [--give-up "<reason>"] [--dry-run] [--keep] [--cwd <repo>]

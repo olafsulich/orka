@@ -48,7 +48,6 @@ Commands (full flags in [commands.md](docs/commands.md)):
 | `orka reap` / `cleanup` | free browsers / sweep finished jobs: browsers, done worktrees, stale workspaces (only when you run it) |
 | `orka webhook <id>` | preview or retry the finish POST |
 | `orka doctor [--job <id>] [--fix]` | environment check with a fix per problem; runs by itself on a `blocked` verdict ([doctor.md](docs/doctor.md)) |
-| `orka watch <id>` | needs-input watcher (started by `run`) |
 | `orka autonomy [set <L0-L3>]` | per-repo level, CLI-enforced ([autonomy.md](docs/autonomy.md)) |
 | `orka push <id> [--pr]` | push the job branch, open a PR (L2) |
 | `orka land <id> [--push]` | merge into main, test, push (L3) |
