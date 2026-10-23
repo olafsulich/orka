@@ -15,6 +15,7 @@ import { DECISION_ROWS, DIGEST_MAX, FILE_READ_MAX, SUMMARY_MAX, VERIFIER_JSON_MA
 import * as brand from "../lib/brand.mjs";
 import * as browsers from "../lib/browsers.mjs";
 import * as deps from "../lib/deps.mjs";
+import * as gatesLib from "../lib/gates.mjs";
 import * as guard from "../lib/guard.mjs";
 import * as context from "../lib/context.mjs";
 import * as lifecycle from "../lib/lifecycle.mjs";
@@ -73,6 +74,7 @@ const VALUE_FLAGS = new Set([
   "worker",
   "spec",
   "hook",
+  "accept",
 ]);
 const BOOL_FLAGS = new Set(["dry-run", "help", "force", "keep", "base", "ui", "stdin", "pr", "push", "no-gate"]);
 const FINISH_STATUSES = new Set(["done", "failed", "stopped"]);
@@ -1398,7 +1400,9 @@ function verifierLine(job) {
   if (!v || !v.verdict) return "";
   const round = Number(v.rounds) || 0;
   if (v.verdict === "pass" && v.stale) return `verifier: pass (STALE, code changed since round ${round})`;
-  return v.verdict === "pass" ? `verified by verifier: pass, round ${round}` : `verifier: ${v.verdict}, round ${round}`;
+  const byGate = (v.history || []).some((h) => h.round === round && h.by === "gate");
+  if (v.verdict === "pass") return `verified by ${byGate ? "gate" : "verifier"}: pass, round ${round}`;
+  return `verifier: ${v.verdict}, round ${round}`;
 }
 
 function parseRole(args) {
@@ -1554,6 +1558,7 @@ function computeVerifier(repo, job) {
     failing: norm.failures.map((f) => f.check),
     warnings: norm.warnings.map((w) => w.check),
     at: new Date().toISOString(),
+    ...(result.by === "gate" ? { by: "gate" } : {}),
   });
   history.sort((a, b) => a.round - b.round);
   const next = { ...job.verifier, rounds: round, verdict: norm.verdict, history, stall: stallOf(history, round) };
@@ -1684,7 +1689,7 @@ function verifierPrompt(job, name, task, alias, round) {
     ``,
     `Run these checks:`,
     `1. orka verify ${job.id} (if orka is not on PATH, run ${ORKA} verify ${job.id}).`,
-    `2. The project's own checks: npm test and npm run check, each only when package.json has that script.`,
+    gatePromptLine(job),
     `3. Targeted agent-browser checks against the acceptance criteria above, when the goal has a UI.`,
     `For every check that fails, test mechanically whether it is pre-existing: run orka verify ${job.id} --base (runs the same checks file on the base commit and writes results/verify-base.json), or re-run the same project command at the base commit (${job.baseCommit || "git merge-base <branch> main"}).`,
     `A failure that also fails on the base commit is a warning (non-blocking), with the proof. Anything else, including anything you could not test on the base, is a blocking failure. Never edit product code. Never weaken or remove a check.`,
@@ -1721,6 +1726,8 @@ const FEATURE_FLOW = (job, dir) => ({
     `When every builder has reported, start ONE verifier. It has fresh context and checks the work against the goal. Every round uses the same command; orka names the panes verifier, verifier-2, verifier-3... and each round overwrites ${dir}/results/${VERIFIER_NAME}.json (the previous one is kept as verifier.round-N.json):`,
     `  orka worker --job ${job.id} --name ${VERIFIER_NAME} --role verifier --task "<what was built and the acceptance criteria>"`,
     `Build the verifier --task from the builders' ACCEPTANCE lines (copy them in, one per builder), plus the job goal.`,
+    `orka worker --role verifier first runs the repo's static gates itself (lint, typecheck, check, test; see orka digest). If it exits with "gates round N: FAIL", no verifier started: route each failing gate with the output it printed to the builder that owns those files, wait for the report, then run the same verifier command again (the gates run first again). A gate that also fails on the base commit is only a warning.`,
+    `When the whole acceptance is one command, write it as ACCEPTANCE: \`<command>\` (or pass --accept "<command>"): orka runs it after green gates and, on a pass, records the round as pass by gate with no verifier pane. A UI job always gets the verifier.`,
     `The verifier runs orka verify, the project's own checks and targeted agent-browser checks, and may extend ${verifyFile(job.worktree)} only to cover the acceptance criteria.`,
     `It writes ${dir}/results/${VERIFIER_NAME}.json: "verdict" pass or fail, "failures" (blocking: what this job changed, each with its evidence) and "warnings" (pre-existing failures the verifier showed also fail on the base commit; they never block a pass).`,
     `If the verdict is fail, read ${dir}/results/${VERIFIER_NAME}.json and route each blocking failure WITH its evidence to the builder that owns those files (a new or resumed builder worker). Ignore warnings for routing. Wait for their reports, then start the verifier again.`,
@@ -2268,11 +2275,167 @@ function closeUnusedDuplicates(repo, job, name, requested, task, role) {
   }
 }
 
+// Static gates before a verifier round (docs/gates.md, lib/gates.mjs).
+function readRepoConfig(repo) {
+  try {
+    return JSON.parse(readFileSync(configPath(repo), "utf8")) || {};
+  } catch {
+    return {};
+  }
+}
+
+const gateEnv = (job) => ({ ...process.env, PATH: pathPrefix(), ...ports.portEnv(job) });
+
+// The single acceptance command this round would run instead of a verifier, or null (UI jobs never).
+function acceptanceOf(job, task, flag) {
+  if (job.jobType === "ui") return null;
+  if (typeof flag === "string" && flag.trim()) return flag.trim();
+  return gatesLib.singleCommand(task);
+}
+
+function gatePlanLines(repo, job, task, flag) {
+  const found = gatesLib.detectGates(job.worktree || repo, readRepoConfig(repo));
+  const out = [`gates: ${found.gates.length ? found.gates.map((g) => g.command).join("; ") : "none"} (${found.reason})`];
+  const accept = acceptanceOf(job, task, flag);
+  out.push(accept ? `acceptance by gate: \`${accept}\` (a pass skips the verifier pane)` : `acceptance by gate: no${job.jobType === "ui" ? " (UI job: always verified)" : ""}`);
+  return out;
+}
+
+// A failing gate run once at baseCommit, in a temporary detached worktree; cached per (base, command).
+function baseGateResult(repo, job, gate, limits, dir) {
+  const cachePath = join(brand.stateDir(repo), "gates-base.json");
+  let cache = {};
+  try {
+    cache = JSON.parse(readFileSync(cachePath, "utf8")) || {};
+  } catch {
+    cache = {};
+  }
+  const base = baseOf(repo, job);
+  const key = `${base} ${gate.command}`;
+  if (cache[key]) return { ...cache[key], cached: true };
+  const tmp = join(brand.stateDir(repo), "worktrees", `${job.id}-gate-base-${process.pid}`);
+  const added = git(repo, ["worktree", "add", "--detach", tmp, base]);
+  if (added.code !== 0) return { base, exit: null, error: (added.err || added.out).split("\n")[0] };
+  let got;
+  try {
+    try {
+      deps.applyDeps(repo, tmp, deps.planDeps(repo, tmp), { run: runInstall });
+    } catch {
+      // no deps: the gate result says so
+    }
+    got = gatesLib.runGate(gate.command, tmp, { timeoutMs: limits.timeoutMs, logPath: join(dir, `base-${gate.name}.log`), env: gateEnv({ ...job, worktree: tmp }) });
+  } finally {
+    deps.unlinkLinks(tmp);
+    git(repo, ["worktree", "remove", "--force", tmp]);
+    rmSync(tmp, { recursive: true, force: true });
+    git(repo, ["worktree", "prune"]);
+  }
+  const rec = { base, command: gate.command, exit: got.exit, at: new Date().toISOString() };
+  writeFileSync(cachePath, `${JSON.stringify({ ...cache, [key]: rec }, null, 2)}\n`);
+  return rec;
+}
+
+const clip = (text, n = 600) => (text.length > n ? `...${text.slice(-n)}` : text);
+
+// One gate round: every gate in the job worktree, a base check for each failure, then the single
+// acceptance command when there is one and the gates are green. Records job.gates and
+// results/gates/round-N.json; prints the failures for the orchestrator. { ok, round, results, accept }.
+function runGateRound(repo, job, { task, accept: flag }) {
+  const config = readRepoConfig(repo);
+  const found = gatesLib.detectGates(job.worktree, config);
+  const limits = gatesLib.gateLimits(config);
+  const accept = acceptanceOf(job, task, flag);
+  if (!found.gates.length && !accept) {
+    console.error(`gates: none (${found.reason})`);
+    return { ok: true, results: [] };
+  }
+  const round = (Number(job.gates?.rounds) || 0) + 1;
+  const dir = join(ensureJobDir(repo, job.id), "results", "gates", `round-${round}`);
+  const deadline = Date.now() + limits.budgetMs;
+  const env = gateEnv(job);
+  const run = (g) => {
+    const left = deadline - Date.now();
+    if (left <= 0) return { ...g, status: "skipped", why: "round budget spent" };
+    const logPath = join(dir, `${g.name}.log`);
+    const got = gatesLib.runGate(g.command, job.worktree, { timeoutMs: Math.min(limits.timeoutMs, left), logPath, env });
+    return { ...g, status: got.exit === 0 ? "pass" : got.timedOut ? "timeout" : "fail", exit: got.exit, ms: got.ms, tail: got.tail, log: logPath };
+  };
+  const results = [];
+  for (const g of found.gates) {
+    const r = run(g);
+    if (r.status === "fail") {
+      const base = baseGateResult(repo, job, g, limits, dir);
+      r.base = { commit: base.base, exit: base.exit, ...(base.cached ? { cached: true } : {}), ...(base.error ? { error: base.error } : {}) };
+      if (Number.isInteger(base.exit) && base.exit !== 0) r.status = "preexisting";
+    }
+    results.push(r);
+    console.error(`gate ${r.name}: ${r.status}${r.exit != null ? ` (exit ${r.exit}, ${Math.round((r.ms || 0) / 100) / 10}s)` : ""}${r.status === "preexisting" ? `; fails on base ${String(r.base.commit).slice(0, 8)} too (warning)` : ""}`);
+  }
+  const blocking = results.filter((r) => r.status === "fail" || r.status === "timeout");
+  let acceptResult = null;
+  if (!blocking.length && accept) {
+    acceptResult = run({ name: "acceptance", command: accept });
+    console.error(`acceptance \`${accept}\`: ${acceptResult.status}${acceptResult.exit != null ? ` (exit ${acceptResult.exit})` : ""}`);
+    if (acceptResult.status !== "pass" && acceptResult.status !== "skipped") blocking.push(acceptResult);
+  }
+  const verdict = blocking.length ? "fail" : "pass";
+  const summary = { round, at: new Date().toISOString(), verdict, source: found.source, results, ...(acceptResult ? { accept: acceptResult } : {}) };
+  writeFileSync(join(dirname(dir), `round-${round}.json`), `${JSON.stringify(summary, null, 2)}\n`);
+  const entry = {
+    round,
+    at: summary.at,
+    verdict,
+    failing: blocking.map((r) => r.name),
+    warnings: results.filter((r) => r.status === "preexisting").map((r) => r.name),
+    ...(acceptResult ? { accept: { command: accept, status: acceptResult.status } } : {}),
+    evidence: blocking.map((r) => ({ gate: r.name, command: r.command, exit: r.exit, tail: clip(r.tail || "") })),
+  };
+  job.gates = { rounds: round, verdict, history: [...(Array.isArray(job.gates?.history) ? job.gates.history : []), entry].slice(-20) };
+  save(repo, job);
+  const names = (list) => list.map((r) => `${r.name}${r.exit != null ? ` exit ${r.exit}` : ""}`).join(", ");
+  appendDecision(repo, job.id, ["gate", `gate round ${round}: ${verdict}`, blocking.length ? `blocking: ${names(blocking)}` : `${results.length} gate(s) green${entry.warnings.length ? `; pre-existing: ${entry.warnings.join(", ")}` : ""}${acceptResult ? `; acceptance ${acceptResult.status}` : ""}`, join(dirname(dir), `round-${round}.json`), verdict === "fail" ? "no verifier started" : acceptResult?.status === "pass" ? "verifier skipped: pass by gate" : "verifier starts"]);
+  if (blocking.length) {
+    console.error(`gates round ${round}: FAIL; no verifier started.`);
+    for (const r of blocking) {
+      console.error(`--- ${r.name}: \`${r.command}\` ${r.status === "timeout" ? `timed out after ${Math.round(limits.timeoutMs / 1000)}s` : `exit ${r.exit}`}${r.base?.error ? ` (base check failed: ${r.base.error})` : ""}; log ${r.log}`);
+      if (r.tail) console.error(r.tail);
+    }
+    console.error(`Route each failing gate with this output to the builder that owns those files. When they report, start the verifier again with the same command; the gates run first.`);
+  }
+  return { ok: !blocking.length, round, results, accept: acceptResult };
+}
+
+// The verifier round, decided by orka: green gates and the single acceptance command passed.
+function passByGate(repo, job, round, gated) {
+  archiveVerifierResult(repo, job, round - 1);
+  const path = verifierResultPath(repo, job.id);
+  mkdirSync(dirname(path), { recursive: true });
+  const warnings = gated.results
+    .filter((r) => r.status === "preexisting")
+    .map((r) => ({ check: r.name, evidence: (r.tail || "").split("\n").slice(-3).join(" | "), base: r.base.commit, proof: `\`${r.command}\` exits ${r.base.exit} on the base commit too` }));
+  const checks = [...gated.results, gated.accept].map((r) => ({ name: r.name, outcome: r.status === "pass" ? "pass" : r.status === "preexisting" ? "fail" : "skipped", scope: r.status === "preexisting" ? "preexisting" : "job", notes: r.command }));
+  const result = { name: "gate", role: "verifier", by: "gate", round, verdict: "pass", checks, failures: [], warnings, summary: `acceptance \`${gated.accept.command}\` passed and the gates are green; orka started no verifier pane` };
+  writeFileSync(path, `${JSON.stringify(result, null, 2)}\n`);
+  const state = verifierState(job);
+  const { head, patchId, patchRound, stale, ...rest } = job.verifier || {};
+  job.verifier = { ...rest, rounds: round, verdict: null, history: state.history, stall: null };
+  save(repo, job);
+  recordVerifier(repo, job);
+  appendDecision(repo, job.id, ["gate", `verifier round ${round}: pass by gate`, `acceptance \`${gated.accept.command}\` exit 0, gates green`, path, "no verifier pane"]);
+  console.log(`verifier round ${round}: pass by gate (acceptance \`${gated.accept.command}\`); no verifier pane started`);
+}
+
+function gatePromptLine(job) {
+  const g = job.gates?.history?.at(-1);
+  if (!g) return `2. The project's own checks: npm test and npm run check, each only when package.json has that script (orka found no static gates to run first).`;
+  return `2. orka already ran the static gates for this round (gate round ${g.round}: ${g.verdict}${g.warnings?.length ? `, pre-existing on base: ${g.warnings.join(", ")}` : ""}); see orka digest ${job.id}. Do not re-run them; spend the round on the acceptance criteria.`;
+}
+
 function cmdWorker(args) {
   if ("orchestrator-model" in args || "worker-model" in args) {
     fail("use --model to override a worker; the job default is workerModel (verifierModel for --role verifier)");
   }
-  allowFlags(args, ["cwd", "dry-run", "job", "name", "task", "pane", "model", "role"]);
+  allowFlags(args, ["cwd", "dry-run", "job", "name", "task", "pane", "model", "role", "accept"]);
   const id = args.job;
   const requested = args.name;
   const task = args.task || args._.slice(1).join(" ");
@@ -2296,9 +2459,11 @@ function cmdWorker(args) {
     const missing = ["SCOPE", "ACCEPTANCE"].filter((k) => !new RegExp(`${k}:`).test(String(task)));
     if (missing.length) console.error(`warning: worker task has no ${missing.map((k) => `${k}:`).join(" or ")} (brief template: GOAL / SCOPE / CONTEXT / ACCEPTANCE / VERIFY / TIMEBOX / FORBIDDEN / REPORT); starting anyway`);
   }
+  if (args.accept !== undefined && (role !== "verifier" || typeof args.accept !== "string" || !args.accept.trim())) fail('--accept "<command>" is for --role verifier only, with a command');
   if (args["dry-run"]) {
     const wt = job.worktree || worktreePath(repo, job.id);
     console.log(`dry-run worker ${first} job=${job.id} kind=${kind}${alias ? ` model=${alias}` : ""} role=${role}${role === "verifier" ? ` round=${round}` : ""}`);
+    if (role === "verifier") for (const l of gatePlanLines(repo, job, String(task), args.accept)) console.log(l);
     console.log(`worktree: ${wt}`);
     console.log("layout: shared worktree");
     console.log(`split: herdr pane split --pane ${q(job.pane || "<orchestrator-pane>")} --direction right --cwd ${q(wt)} --no-focus`);
@@ -2308,6 +2473,15 @@ function cmdWorker(args) {
   }
   if (!job.pane || !job.agent || !job.worktree) fail("orchestrator is not running");
   if (job.status !== "running") fail(`job ${id} is ${job.status}, not running`);
+  if (role === "verifier") {
+    // The static gates run first: a red gate starts no verifier; a passing single-command acceptance replaces it.
+    const gated = runGateRound(repo, job, { task: String(task), accept: args.accept });
+    if (!gated.ok) {
+      process.exitCode = 1;
+      return;
+    }
+    if (gated.accept?.status === "pass") return passByGate(repo, job, round, gated);
+  }
   waitForRoom(repo, job, first, role);
   ensureJobDir(repo, job.id);
   setupDeps(repo, job);
@@ -2854,6 +3028,8 @@ function cmdStatus(args) {
     if (job.verifier?.rounds && job.status === "running") recordVerifier(repo, job);
     if (job.status === "running") recordBrowserPids(repo, job);
     if (verifierLine(job)) console.log(`  ${verifierLine(job)}`);
+    const lastGate = job.gates?.history?.at(-1);
+    if (lastGate) console.log(`  gates: round ${lastGate.round} ${lastGate.verdict}${lastGate.failing.length ? ` (blocking: ${lastGate.failing.join(", ")})` : ""}${lastGate.warnings.length ? ` (pre-existing: ${lastGate.warnings.join(", ")})` : ""}${lastGate.accept ? `, acceptance ${lastGate.accept.status}` : ""}`);
     printVerifierDetail(job);
     printHost(repo, job.id);
     return;
@@ -4636,7 +4812,9 @@ function help() {
            [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds <N>]
   orka run <id> [--dry-run] [--cwd <repo>] [--keep]
            [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds <N>]
-  orka worker --job <id> --name <agent> --task "..." [--model <alias>] [--role builder|verifier] [--dry-run]
+  orka worker --job <id> --name <agent> --task "..." [--model <alias>] [--role builder|verifier] [--accept "<cmd>"] [--dry-run]
+           (--role verifier first runs the static gates; a red gate starts no verifier; a single acceptance
+           command that passes records the round as pass by gate. See docs/gates.md)
            (--model is claude only; pi workers have no model flag; --role verifier defaults to the job's verifierModel)
            (--role verifier needs --name verifier; no round limit unless the job has --max-rounds)
            A name already used by a worker of this job, or by a herdr agent, gets -2, -3... appended and
