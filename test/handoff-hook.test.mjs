@@ -88,7 +88,7 @@ test("runHook: asks once per session at or past the threshold; a successor's new
   assert.deepEqual([first.record.n, first.record.pct, first.record.window, first.record.source], [1, 0.42, 1000000, "claude statusline"]);
   assert.deepEqual(readMarker(b.jobDir, "w-1").note, join(b.jobDir, "handoff", "builder-1.md"));
   const again = runHook({ ...args, sessionId: "w-1", transcriptPath: b.transcript("w-1", 600000) });
-  assert.deepEqual(again, { ask: false, why: "already asked this session" });
+  assert.deepEqual(again, { ask: false, why: "already asked this session", steer: "" });
   // After the handoff the record has a fresh builder with a new session id and one handoff behind it.
   const j = JSON.parse(readFileSync(b.jobFile, "utf8"));
   j.workers = [{ name: "builder", sessionId: "w-2", handoffs: [{ n: 1 }] }];
@@ -102,7 +102,7 @@ test("runHook: asks once per session at or past the threshold; a successor's new
 test("runHook: handoff.threshold from config, and quiet below it", () => {
   const b = box({ handoff: { threshold: 0.5 } });
   const args = { jobFile: b.jobFile, jobDir: b.jobDir, configFile: b.configFile, kind: "claude", home: b.home, sessionId: "w-1" };
-  assert.deepEqual(runHook({ ...args, transcriptPath: b.transcript("w-1", 450000) }), { ask: false, why: "45% < 50%" });
+  assert.deepEqual(runHook({ ...args, transcriptPath: b.transcript("w-1", 450000) }), { ask: false, why: "45% < 50%", steer: "" });
   assert.equal(existsSync(markerFile(b.jobDir, "w-1")), false);
 });
 
