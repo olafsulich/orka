@@ -51,7 +51,7 @@ Commands (full flags in [commands.md](docs/commands.md)):
 | `orka autonomy [set <L0-L3>]` | per-repo level, CLI-enforced ([autonomy.md](docs/autonomy.md)) |
 | `orka push <id> [--pr]` | push the job branch, open a PR (L2) |
 | `orka land <id> [--push]` | merge into main, test, push (L3) |
-| `orka chain` | run the task queue one job at a time, land per level |
+| `orka chain [--signoff auto\|each\|end]` | run the task queue one job at a time; auto (default) merges each pass into main ([autonomy.md](docs/autonomy.md#orka-chain)) |
 | `orka watch <id>` | needs-input watcher and context handoff (started by `run`) |
 | `orka handoff <id> [<worker>\|orchestrator]` | one context-handoff pass; `--dry-run` shows each pane's %, window and its source; a name hands that pane off now |
 

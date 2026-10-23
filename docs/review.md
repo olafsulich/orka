@@ -15,6 +15,10 @@ A job is not finished when the verifier passes. It waits for Olaf, and only his 
    - `orka stop <id>` ends it.
 3. **Done.** `orka done <id>` marks the job done, sends the finish wake and cleans up only this job: its browsers, servers, worker panes and its worktree (`git worktree remove`, never forced; a dirty worktree is kept and reported). The branch stays. Other jobs are never touched; old worktrees of past done jobs go only with `orka cleanup` ([cleanup.md](cleanup.md)).
 
+## In orka chain
+
+`orka chain` decides sign-off per repo with `chain.signoff` ([autonomy.md](autonomy.md#orka-chain)). In `auto` (the default) orka signs off a chained job itself once the verifier passed and its branch merged cleanly into main: `job.signoff.by = "auto"`. In `each`, every chained job waits for Olaf as above. In `end`, jobs wait in review without blocking the queue.
+
 ## What orka done refuses
 
 `orka done` needs a sign-off for the current round (`job.signoff.round == job.round`). Without one it exits 1:

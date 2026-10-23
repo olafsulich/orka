@@ -43,14 +43,26 @@ The old `~/bin/orca-chain` as a command. It runs `<state>/chain-queue` one job a
 17
 ```
 
-Per task: wait for RAM and load (`ORKA_CHAIN_MIN_MEM_MB`, default 1200; `ORKA_CHAIN_MAX_LOAD`, default 6) → `orka new` + `orka run` → poll the job until it is terminal (`ORKA_CHAIN_POLL_MS`, default 60s; a webhook after 4h) → on done + verifier pass + not stale, land as far as the level allows:
+Per task: wait for RAM and load (`ORKA_CHAIN_MIN_MEM_MB`, default 1200; `ORKA_CHAIN_MAX_LOAD`, default 6) → `orka new` + `orka run` → poll the job (`ORKA_CHAIN_POLL_MS`, default 60s; a webhook after 4h). What happens on a verifier pass is the repo's sign-off mode, `chain.signoff` in `.orka/config.json`:
 
-| level | on a pass |
+| mode | on a pass |
 | --- | --- |
-| L0, L1 | keep the branch for review (logged to the job's decisions.tsv) |
-| L2 | `orka push <id> --pr` |
-| L3 | `orka land <id> --push` (merge, npm test, push main) |
+| **auto** (default) | when the job reaches `review` (verifier pass, not stale): merge the job branch into main in the primary checkout (`--no-ff`, never force, never rewrite history; `npm test` when the repo has one), then sign off as orka (`job.signoff.by = "auto"`, a `review` row in decisions.tsv: `signed off by orka chain (auto)`), the orchestrator runs `orka done`, and any commit done added (spec lessons) is merged too. The next task starts from the new main. A merge conflict or a red test aborts the merge, leaves the job in `review` and stops the chain with a webhook (exit 2). |
+| each | every job stops in `review` for `orka approve`; after Olaf's sign-off and `orka done`, the branch lands as far as the autonomy level allows (below) |
+| end | a job in `review` does not block: it is listed in `<state>/chain-stack` and the next task's worktree starts from its branch (`orka new --stack-on <branch>`). When the queue is empty, one webhook lists every job waiting for review, oldest first; Olaf approves each |
 
-A failed job is retried once with its failure summary; a second failure skips the task. A failed land or push, or a failed `orka new`, stops the chain (exit 2, webhook). After each job: `timeout 120 orka cleanup --older-than 1m`. One chain per repo (`chain.lock` holds the pid). Files: `chain-current`, `chain.log` next to the queue. `--dry-run` prints the plan and changes nothing.
+Auto merges into main at any autonomy level: that is Olaf's decision for chains (2026-10-23), made by the CLI and never by an agent. `orka approve` from inside a job pane stays refused. Push follows the level:
+
+| level | auto | each (after `orka approve` and `orka done`) |
+| --- | --- | --- |
+| L0, L1 | local merge into main, no push | keep the branch for review (logged to the job's decisions.tsv) |
+| L2 | local merge into main, and `orka push <id>` pushes the job branch (no PR: it is merged) | `orka push <id> --pr` |
+| L3 | merge, `npm test`, push main (`orka land` logic) | `orka land <id> --push` |
+
+L0 jobs cannot commit, so there is nothing to merge.
+
+The mode is chosen once per repo. `orka chain --signoff auto|each|end` sets and saves it. In a repo with no `chain.signoff`, `orka chain` asks on a TTY (`sign-off: each / end / auto [auto]`) and saves the answer. Without a TTY, or in a repo that already has jobs but no setting, it uses auto, prints one line saying so and how to change it, and saves it.
+
+A failed job is retried once with its failure summary; a second failure skips the task. A failed land or push, or a failed `orka new`, stops the chain (exit 2, webhook). The chain no longer runs `orka cleanup` after each job: only an explicit `orka cleanup` sweeps other jobs, and `orka done` cleans its own. One chain per repo (`chain.lock` holds the pid). Files: `chain-current`, `chain-stack` (end mode), `chain.log` next to the queue. `--dry-run` prints the plan and changes nothing.
 
 Not ported from the shell script: the global `pkill` of agent-browser Chrome and of `/tmp/orka-*` test watchers (they could hit another seat's jobs; `orka cleanup` reaps this repo's own browsers and orphans), and the orka-specific goal lines for tasks 14 and 15.
