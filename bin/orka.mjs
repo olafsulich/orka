@@ -261,6 +261,7 @@ function hasBrowserSteps(path) {
 
 const BROWSER_CLOSE_TIMEOUT_MS = 20000;
 const CLEANUP_BUDGET_MS = 120000;
+const AUTO_CLEANUP_BUDGET_MS = 30000;
 const ORPHAN_BROWSER_HOURS = 2;
 const UI_GOAL_RE = /agent-browser|\b(ui|browser|visual)\s+(verification|check|checks|test|tests|testing)\b|\b(verify|check|test)\s+(the\s+)?(ui|user interface|user flows?)\b/i;
 
@@ -850,9 +851,79 @@ function releaseJob(repo, job, opts = {}) {
       closed.panes.push({ name: w.name, pane: w.pane });
     } else console.log(`cleanup: worker pane ${w.pane} (${w.name}) not closed`);
   }
+  if ((opts.status || job.status) === "done" && lifecycle.removableWorktree({ ...job, status: "done" })) {
+    if (removeWorktree(repo, job, { dry }).removed && !dry) closed.worktree = job.worktree;
+  }
   if (dry) return;
   job.cleanup = closed;
   save(repo, job);
+}
+
+// Disk use of a directory in KB (du does not follow symlinks); 0 when unknown.
+function diskKb(path) {
+  const r = spawnSync("du", ["-sk", path], { encoding: "utf8", timeout: 120000 });
+  return Number.parseInt(r.stdout, 10) || 0;
+}
+
+function registeredWorktrees(repo) {
+  const list = git(repo, ["worktree", "list", "--porcelain"]);
+  return new Set(list.out.split("\n").filter((l) => l.startsWith("worktree ")).map((l) => resolve(l.slice(9))));
+}
+
+// Removes a done job's worktree with git worktree remove (never --force), so
+// uncommitted work is never deleted: a dirty worktree is kept and reported.
+// The branch always stays. Only a registered worktree under the state dir.
+function removeWorktree(repo, job, { dry = false, log = console.log } = {}) {
+  const path = resolve(job.worktree);
+  const branch = brand.jobBranch(job);
+  const root = resolve(brand.stateDir(repo), "worktrees");
+  if (!path.startsWith(root + sep)) {
+    log(`cleanup: kept worktree ${path} (not under ${root})`);
+    return { kept: "outside" };
+  }
+  if (!existsSync(path)) {
+    if (!dry) {
+      git(repo, ["worktree", "prune"]);
+      job.worktreeRemoved = new Date().toISOString();
+      save(repo, job);
+    }
+    return { removed: false, kb: 0 };
+  }
+  if (!registeredWorktrees(repo).has(path)) {
+    log(`cleanup: kept worktree ${path} (not a registered git worktree)`);
+    return { kept: "unregistered" };
+  }
+  const status = git(path, ["status", "--porcelain"]);
+  const changes = status.out.split("\n").filter(Boolean);
+  if (status.code !== 0 || changes.length) {
+    const why = status.code !== 0 ? "git status failed" : `${changes.length} uncommitted change${changes.length === 1 ? "" : "s"}; commit or discard, then orka cleanup`;
+    log(`cleanup: kept worktree ${path} (${why})`);
+    return { kept: "dirty" };
+  }
+  const kb = diskKb(path);
+  if (dry) {
+    log(`cleanup: would remove worktree ${path} (${lifecycle.formatKb(kb)}, branch ${branch} kept)`);
+    return { removed: true, kb };
+  }
+  const removed = git(repo, ["worktree", "remove", path]);
+  if (removed.code !== 0) {
+    log(`cleanup: kept worktree ${path} (git worktree remove: ${(removed.err || removed.out).split("\n")[0]})`);
+    return { kept: "git" };
+  }
+  job.worktreeRemoved = new Date().toISOString();
+  save(repo, job);
+  log(`cleanup: removed worktree ${path} (${lifecycle.formatKb(kb)}, branch ${branch} kept)`);
+  return { removed: true, kb };
+}
+
+// A follow-up round on a done job whose worktree was removed: check the kept branch out again.
+function restoreWorktree(repo, job) {
+  if (!job.worktreeRemoved || !job.worktree || existsSync(job.worktree)) return;
+  const added = git(repo, ["worktree", "add", job.worktree, brand.jobBranch(job)]);
+  if (added.code !== 0) fail(`could not restore worktree ${job.worktree}: ${added.err || added.out}`);
+  delete job.worktreeRemoved;
+  save(repo, job);
+  console.log(`restored worktree ${job.worktree} from branch ${brand.jobBranch(job)}`);
 }
 
 function killWatcher(job) {
@@ -1081,6 +1152,7 @@ async function assignPorts(repo, job) {
 // Shared prompt rules: each literal lives here once and is interpolated into the prompts that use it.
 const REVERSIBLE_RULE = `Reversible work never waits on a human. Irreversible actions (push, delete outside the worktree, external sends, purchases) stop and ask.`;
 const NEVER_CLOSE_PANES = `Never close panes (yours or anyone's, no herdr pane close): finished panes stay open, and orka frees them when the job is done or stopped.`;
+const COMMIT_BEFORE_DONE = `Commit the work on the job branch before orka done: orka done removes a done job's worktree (the branch stays), and keeps it only when it has uncommitted changes.`;
 const SUMMARY_FROM_DIFF = (job) => `Before orka done, run git diff ${job.baseCommit || `$(git merge-base ${brand.jobBranch(job)} main)`} (--stat plus a skim) and write summary.txt from the diff, not from the workers' claims.`;
 
 function portPromptLines(job) {
@@ -1112,19 +1184,19 @@ function reapBrowsers(job, { worker = null, workers = null, dry = false } = {}) 
   return killBrowserProcs(procs, dry);
 }
 
-function killBrowserProcs(procs, dry) {
+function killBrowserProcs(procs, dry, log = console.log) {
   const pids = new Set(procs.map((p) => p.pid));
   for (const p of procs) {
     if (pids.has(p.ppid)) continue; // listed under its parent
     const kids = procs.filter((c) => c.ppid === p.pid).length;
     const who = [p.job, p.worker].filter(Boolean).join(" ");
-    console.log(`cleanup: ${dry ? "would kill" : "killed"} browser pid ${p.pid} (${who || p.session || "untagged"}: ${p.cmdline.slice(0, 80)})${kids ? ` and ${procs.length - 1} child process(es)` : ""}`);
+    log(`cleanup: ${dry ? "would kill" : "killed"} browser pid ${p.pid} (${who || p.session || "untagged"}: ${p.cmdline.slice(0, 80)})${kids ? ` and ${procs.length - 1} child process(es)` : ""}`);
   }
   if (!dry && procs.length) {
     try {
       lifecycle.killProcesses(procs.map((p) => p.pid), { graceMs: 3000 });
     } catch (err) {
-      console.log(`cleanup: could not kill a browser: ${err.message}`);
+      log(`cleanup: could not kill a browser: ${err.message}`);
     }
   }
   return procs.map((p) => p.pid);
@@ -1615,6 +1687,7 @@ function orchestratorPrompt(job) {
     ...flow.verify,
     ``,
     SUMMARY_FROM_DIFF(job),
+    COMMIT_BEFORE_DONE,
     `Before orka done, run orka digest ${job.id}, use it only for ${flow.digestUse}; write ${dir}/summary.txt ${flow.summaryFrom} (per the rule above), and set the summary field. Do not load the job JSON into the turn to copy fields.`,
     ...flow.done,
     `Then stop working. Your pane stays open after orka done, so Olaf can still give feedback with orka steer; a follow-up message starts a new round, and you run orka done ${job.id} again when that round is finished (the finish wake is sent again, marked followUp).`,
@@ -2052,7 +2125,7 @@ function cmdStatus(args) {
     line(job);
     console.log(`  repo: ${repo}`);
     console.log(`  branch: ${brand.jobBranch(job)}`);
-    console.log(`  worktree: ${job.worktree || "(not created)"}`);
+    console.log(`  worktree: ${job.worktree || "(not created)"}${job.worktreeRemoved ? ` (removed ${job.worktreeRemoved}; branch kept)` : ""}`);
     console.log(`  layout: ${job.workerLayout || "shared-worktree"}`);
     console.log(`  playbook: ${job.playbook || "feature"}`);
     if (job.port != null) console.log(`  port: ${job.port}${Array.isArray(job.ports) && job.ports.length > 1 ? ` ports=${job.ports.join(",")}` : ""}`);
@@ -2277,6 +2350,7 @@ function cmdSteer(args) {
   if (finished && (job.workspaceClosed || !agentExists(job.agent))) {
     fail(`${id} is ${job.status} and its orchestrator pane is gone; not steered`);
   }
+  if (finished) restoreWorktree(repo, job);
   const digest = renderDigest(digestView(job), collectDigestFiles(repo, job));
   const sent = promptWithRetry(job.agent, steerText(digest, message));
   const now = new Date().toISOString();
@@ -2398,7 +2472,7 @@ async function cmdDone(args) {
     if (verifierLine(view)) console.log(verifierLine(view));
     const preview = await deliverFinish(repo, { ...view, status: failing ? "failed" : "done" }, { dryRun: true });
     for (const line of preview.lines) console.log(`finish webhook: ${line}`);
-    releaseJob(repo, job, { dryRun: true, keep: args.keep });
+    releaseJob(repo, job, { dryRun: true, keep: args.keep, status: failing ? "failed" : "done" });
     return;
   }
   if (terminal) {
@@ -3052,10 +3126,10 @@ function staleThreshold(repo, flag) {
 }
 
 // Kills orphan `orka.mjs watch` (and old `orca.mjs watch`) processes of this repo. Prints each one.
-function reapWatchers(repo, jobs, dry) {
+function reapWatchers(repo, jobs, dry, log = console.log) {
   const orphans = watch.selectOrphanWatchers(watch.listWatchers(), { repo, jobs, exists: (p) => Boolean(p) && existsSync(p) });
   for (const o of orphans) {
-    console.log(`cleanup: ${dry ? "would kill" : "killed"} orphan watcher pid ${o.pid} (${o.jobId}, ${o.why})`);
+    log(`cleanup: ${dry ? "would kill" : "killed"} orphan watcher pid ${o.pid} (${o.jobId}, ${o.why})`);
     if (dry || brand.env("FAKE_WATCHERS")) continue;
     try {
       process.kill(o.pid, "SIGTERM");
@@ -3066,57 +3140,74 @@ function reapWatchers(repo, jobs, dry) {
   return orphans.length;
 }
 
-// Closes the workspace of finished jobs idle longer than the threshold. Browsers
-// first, then workspaces. Returns what it did. quiet: no "nothing to close" line.
-function sweep(repo, { dry = false, thresholdMs, orphans = true, quiet = false, orphanMinAgeMs = ORPHAN_BROWSER_HOURS * 3600000 } = {}) {
+// One pass over this repo's finished jobs: their browser sessions and browser
+// processes, orphan watchers, the worktrees of done jobs (the branch stays),
+// then the workspaces idle longer than the threshold. Returns how many things it
+// closed. quiet: no "nothing to close" line. untagged: also kill orphan
+// agent-browser Chrome no job owns (explicit orka cleanup only).
+function sweep(repo, { dry = false, thresholdMs, quiet = false, untagged = true, log = console.log, budgetMs = CLEANUP_BUDGET_MS, orphanMinAgeMs = ORPHAN_BROWSER_HOURS * 3600000 } = {}) {
   const verb = dry ? "would close" : "closed";
   const jobs = loadAllJobs(repo);
   const live = jobs.filter((j) => j.status === "running");
   const now = Date.now();
   let count = 0;
   const workspaces = jobs.filter((j) => lifecycle.isStale(j, now, thresholdMs));
-  if (orphans) {
-    const names = new Set();
-    for (const s of [...browserList(), ...jobs.flatMap((j) => j.browserSessions || [])]) {
-      const owner = jobs.find((j) => s.startsWith(`${browserPrefix(j)}-`) || s === legacyVerifySession(j));
-      if (owner && !live.includes(owner) && !owner.keep) names.add(s);
+  const names = new Set();
+  for (const s of [...browserList(), ...jobs.flatMap((j) => j.browserSessions || [])]) {
+    const owner = jobs.find((j) => s.startsWith(`${browserPrefix(j)}-`) || s === legacyVerifySession(j));
+    if (owner && !live.includes(owner) && !owner.keep) names.add(s);
+  }
+  // Dead-daemon sessions of any name only on explicit cleanup; the automatic sweep keeps to orka's own.
+  for (const s of orphanSessions()) if (untagged || brand.SESSION_RE.test(s)) names.add(s);
+  const deadline = Date.now() + budgetMs;
+  const stateful = new Set(browserList());
+  const scanned = quiet ? browsers.scanBrowsers() : [];
+  for (const s of names) {
+    // Quiet: a recorded session with no state and nothing running is long gone; do not report it again.
+    if (quiet && !stateful.has(s) && !sessionLive(s, scanned)) continue;
+    if (Date.now() > deadline) {
+      log(`cleanup: time budget spent, skipping browser ${s}`);
+      continue;
     }
-    for (const s of orphanSessions()) names.add(s);
-    const deadline = Date.now() + CLEANUP_BUDGET_MS;
-    for (const s of names) {
-      if (Date.now() > deadline) {
-        console.log(`cleanup: time budget spent, skipping browser ${s}`);
-        continue;
-      }
-      if (dry || closeBrowser(s)) {
-        console.log(`cleanup: ${verb} browser ${s}`);
-        count++;
-      }
+    if (dry || closeBrowser(s)) {
+      log(`cleanup: ${verb} browser ${s}`);
+      count++;
     }
-    // Leftover browser processes of this repo's finished jobs (tagged ORKA_JOB/ORCA_JOB,
-    // or named by session), then orphan agent-browser Chrome nobody owns.
-    const finished = jobs.filter((j) => j.status !== "running" && j.status !== "queued" && !j.keep);
-    const scan = browsers.scanBrowsers();
-    const doomed = new Set();
-    const procs = [
-      ...browsers.selectReap(scan, { finishedJobIds: finished.map((j) => j.id) }),
-      ...finished.flatMap((j) => browsers.selectReap(scan, { prefix: browserPrefix(j) })),
-    ].filter((p) => !doomed.has(p.pid) && doomed.add(p.pid));
-    count += killBrowserProcs(procs, dry).length;
+  }
+  // Leftover browser processes of this repo's finished jobs (tagged ORKA_JOB/ORCA_JOB,
+  // or named by session), then orphan agent-browser Chrome nobody owns.
+  const finished = jobs.filter((j) => j.status !== "running" && j.status !== "queued" && !j.keep);
+  const scan = browsers.scanBrowsers();
+  const doomed = new Set();
+  const procs = [
+    ...browsers.selectReap(scan, { finishedJobIds: finished.map((j) => j.id) }),
+    ...finished.flatMap((j) => browsers.selectReap(scan, { prefix: browserPrefix(j) })),
+  ].filter((p) => !doomed.has(p.pid) && doomed.add(p.pid));
+  count += killBrowserProcs(procs, dry, log).length;
+  if (untagged) {
     const orphanProcs = browsers.selectOrphans(scan.filter((p) => !doomed.has(p.pid)), {
       minAgeMs: orphanMinAgeMs,
       liveJobIds: live.map((j) => j.id),
       livePrefixes: live.map(browserPrefix),
     });
-    if (orphanProcs.length) console.log(`cleanup: ${orphanProcs.filter((p) => p.chromeRoot).length} orphan agent-browser Chrome root(s) older than ${orphanMinAgeMs / 3600000}h, no running job`);
-    count += killBrowserProcs(orphanProcs, dry).length;
-    count += reapWatchers(repo, jobs, dry);
+    if (orphanProcs.length) log(`cleanup: ${orphanProcs.filter((p) => p.chromeRoot).length} orphan agent-browser Chrome root(s) older than ${orphanMinAgeMs / 3600000}h, no running job`);
+    count += killBrowserProcs(orphanProcs, dry, log).length;
   }
+  count += reapWatchers(repo, jobs, dry, log);
+  let freedKb = 0;
+  for (const j of jobs.filter(lifecycle.removableWorktree)) {
+    const got = removeWorktree(repo, j, { dry, log });
+    if (got.kb) {
+      count++;
+      freedKb += got.kb;
+    }
+  }
+  if (freedKb) log(`cleanup: ${dry ? "would free" : "freed"} ${lifecycle.formatKb(freedKb)} of done-job worktrees`);
   for (const j of workspaces) {
-    console.log(`cleanup: ${verb} workspace ${j.workspace} (${j.id}, idle since ${new Date(lifecycle.lastActivity(j) || 0).toISOString()})`);
+    log(`cleanup: ${verb} workspace ${j.workspace} (${j.id}, idle since ${new Date(lifecycle.lastActivity(j) || 0).toISOString()})`);
     count++;
   }
-  if (!count && !quiet) console.log("cleanup: nothing to close");
+  if (!count && !quiet) log("cleanup: nothing to close");
   if (dry) return count;
   for (const j of workspaces) {
     // The record first: closing the workspace kills any pane in it.
@@ -3127,21 +3218,14 @@ function sweep(repo, { dry = false, thresholdMs, orphans = true, quiet = false, 
   return count;
 }
 
-// Opportunistic sweep at orka new / run. Only stale workspaces; never fatal, never on stdout.
+// The same sweep at the start of orka new and orka run: on stderr (stdout of new
+// is the id), only lines for what it closed, a short time budget, and never
+// untagged browsers. Never fatal.
 function sweepQuietly(repo) {
   try {
-    const jobs = loadAllJobs(repo);
-    const now = Date.now();
-    const threshold = staleThreshold(repo);
-    const stale = jobs.filter((j) => lifecycle.isStale(j, now, threshold));
-    for (const j of stale) {
-      j.workspaceClosed = new Date().toISOString();
-      save(repo, j);
-      herdr(["workspace", "close", j.workspace]);
-    }
-    if (stale.length) console.error(`cleanup: closed ${stale.length} stale workspace${stale.length === 1 ? "" : "s"} (${stale.map((j) => j.id).join(", ")})`);
-  } catch {
-    // a sweep must never block new or run
+    sweep(repo, { quiet: true, untagged: false, log: (msg) => console.error(msg), budgetMs: AUTO_CLEANUP_BUDGET_MS, thresholdMs: staleThreshold(repo) });
+  } catch (err) {
+    console.error(`cleanup: skipped (${err?.message || err})`);
   }
 }
 

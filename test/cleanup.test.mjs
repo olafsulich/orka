@@ -175,7 +175,7 @@ test("orka new sweeps stale workspaces quietly, on stderr only", () => {
   const r = t.orka(["new", "--kind", "pi", "--title", "n", "--goal", "g"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout.trim(), /^[0-9]{17}-n$/);
-  assert.match(r.stderr, /closed 1 stale workspace/);
+  assert.match(r.stderr, /cleanup: closed workspace w-old/);
   assert.ok(t.calls().includes("herdr workspace close w-old"));
   assert.ok(read(old).workspaceClosed);
   const again = t.orka(["new", "--kind", "pi", "--title", "n2", "--goal", "g"]);
