@@ -124,6 +124,7 @@ test("orka worker starts the pane with --session-id and records it", () => {
 test("below the threshold: measured and recorded, nobody prompted", () => {
   const t = scratch();
   const j = makeJob(t);
+  t.config({ threshold: 0.5 });
   startWorker(t, j);
   const r = t.orka(["handoff", j.id]);
   assert.equal(r.status, 0, r.stderr);

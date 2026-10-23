@@ -4695,12 +4695,12 @@ Context handoff (builder workers and the orchestrator, both kinds)
   Every pane starts with --session-id; the watcher reads that transcript's last turn each poll.
   Window per pane, never guessed: Claude's statusline context_window_size (captured per session),
   a [1m] model id, Pi's model registry, then handoff.contextWindow; else "window unknown" and no
-  automatic handoff. At handoff.threshold (default 0.5) the pane runs the handoff skill
+  automatic handoff. At handoff.threshold (default 0.4) the pane runs the handoff skill
   (plugin/skills/handoff): at once when idle, or at its next clean stopping point via a message
   queued mid-turn. The note goes to .orka/jobs/<id>/handoff/<name>-<n>.md, the agent is renamed
   <name>-h<n>, and a fresh <name> continues in a new pane. Old panes stay open until done/stop/cleanup.
   Verifier exempt. At most handoff.maxHandoffs (default 3) per pane.
-  Config: "handoff": {"threshold": 0.5, "orchestrator": true, "maxHandoffs": 3,
+  Config: "handoff": {"threshold": 0.4, "orchestrator": true, "maxHandoffs": 3,
   "contextWindow": N | {"<model substring>": N}} or "handoff": false. See docs/handoff.md.
 
 Verifier (both kinds)
