@@ -38,6 +38,8 @@ Commands (full flags in [commands.md](docs/commands.md)):
 | `orka worker` | start a builder or verifier worker |
 | `orka status` / `digest` | show a job / capped snapshot |
 | `orka steer <id> "msg"` | message the lead; follow-up round on a finished job |
+| `orka propose <id>` | orchestrator: pause at the direction gate, notify ([gate.md](docs/gate.md)) |
+| `orka approve <id>` | resume a job waiting at the direction gate |
 | `orka stop` / `done` | end a job; send the finish wake |
 | `orka strategy` / `log` | record a strategy change / a decision |
 | `orka verify <id>` | browser checks in the worktree |
@@ -53,6 +55,7 @@ Key flags:
 | `--*-model <alias>` | orchestrator, worker or verifier model |
 | `--max-rounds N` | opt-in ceiling on verifier rounds |
 | `--ui`, `--playbook` | UI job; feature, bug-fix, investigation, hillclimb |
+| `--no-gate` | skip the direction gate (on for new features) |
 | `--keep` | skip cleanup for this job |
 | `--dry-run` | print the plan, change nothing |
 | `--cwd <repo>` | run from outside the repo |

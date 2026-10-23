@@ -4,7 +4,7 @@
 orka init [--cwd <repo>]
 orka new --title "..." --goal "..." [--cwd <repo>] [--kind claude|pi] [--keep] \
   [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds N] \
-  [--ui] [--playbook feature|bug-fix|investigation|hillclimb]
+  [--ui] [--playbook feature|bug-fix|investigation|hillclimb] [--no-gate]
 orka run <id> [--dry-run] [--keep] [--cwd <repo>] \
   [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds N]
 orka worker --job <id> --name <agent> --task "..." [--model <alias>] [--dry-run]
@@ -12,6 +12,8 @@ orka worker --job <id> --name verifier --role verifier --task "<built + acceptan
 orka status [id] [--cwd <repo>]
 orka digest <id> [--cwd <repo>]
 orka steer <id> "message"
+orka propose <id> [--dry-run]
+orka approve <id> ["note"]
 orka stop <id> [reason] [--dry-run] [--keep]
 orka done <id> [reason] [--give-up "<reason>"] [--dry-run] [--keep] [--cwd <repo>]
 orka strategy <id> [--premise "<shared premise>"] "<what changed>"
@@ -31,6 +33,8 @@ orka help
 `digest` prints a capped snapshot of the job and does not change it.
 
 `steer` prompts the lead agent with a capped digest plus the message, and records only that message on the job. It also works on a `done`, `failed` or `stopped` job whose orchestrator pane still exists: that starts a follow-up round (see [follow-up.md](follow-up.md)).
+
+`propose` is run by the orchestrator of a gated job after planning: it reads `approach.md` from the job dir, sets `awaiting-direction` and POSTs the approach once. `approve` resumes that job; `steer` on it asks for a revised approach instead. Builders and the verifier are refused until approval; `--no-gate` on `new` (or `run`) skips the gate. See [gate.md](gate.md).
 
 `stop` interrupts the lead and its workers and sets `stopped`. It leaves the Herdr workspace open (see [cleanup.md](cleanup.md)). It does not delete the worktree or the branch. The finish wake, if configured, is sent after that status is saved, then terminal cleanup runs (see [cleanup.md](cleanup.md)). `--dry-run` prints the plan and does not stop or send.
 
