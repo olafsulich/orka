@@ -1,4 +1,5 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
+import { promisify } from "node:util";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,6 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { allows, pushActions } from "../lib/autonomy.mjs";
 
+const execFileAsync = promisify(execFile);
 const ORKA = join(import.meta.dirname, "..", "bin", "orka.mjs");
 
 // A real git repo with a bare origin, a fake herdr (logs its arguments, agents start working once
@@ -218,4 +220,75 @@ test("orka land aborts a conflicting merge and leaves main as it was", () => {
   assert.match(r.stderr, /merge conflict .*merge aborted/);
   assert.equal(t.g("rev-parse", "main"), before);
   assert.equal(t.g("status", "--porcelain"), "");
+});
+
+test("orka chain --dry-run names what a pass would do at the repo's level", () => {
+  const t = scratch();
+  mkdirSync(join(t.repo, "tasks"));
+  writeFileSync(join(t.repo, "tasks", "01-thing.md"), "# 01 thing\n");
+  writeFileSync(join(t.repo, ".orka", "chain-queue"), "# queue\n01 haiku\n");
+  let r = t.orka(["chain", "--dry-run"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /autonomy L1: on a verifier pass keep the branch for review/);
+  assert.match(r.stderr, /dry-run: orka new --title 'task 01 thing' --verifier-model haiku/);
+  assert.equal(readFileSync(join(t.repo, ".orka", "chain-queue"), "utf8"), "# queue\n01 haiku\n", "dry-run pops nothing");
+  t.setLevel("L3");
+  assert.match(t.orka(["chain", "--dry-run"]).stderr, /autonomy L3: on a verifier pass merge into main, test, push main/);
+});
+
+// Runs orka chain in the background; when the job it starts appears, a commit lands on its branch and it is marked done + pass.
+async function chainOnce(t) {
+  mkdirSync(join(t.repo, "tasks"), { recursive: true });
+  writeFileSync(join(t.repo, "tasks", "01-thing.md"), "# 01 thing\n");
+  writeFileSync(join(t.repo, ".orka", "chain-queue"), "01\n");
+  const env = { ...t.env, ORKA_CHAIN_POLL_MS: "100", ORKA_CHAIN_MIN_MEM_MB: "0", ORKA_CHAIN_MAX_LOAD: "100000" };
+  const child = spawn(process.execPath, [ORKA, "chain", "--cwd", t.repo], { env, stdio: ["ignore", "ignore", "pipe"] });
+  let err = "";
+  child.stderr.on("data", (d) => (err += d));
+  const exited = new Promise((resolve) => child.on("exit", (code) => resolve(code)));
+  try {
+    const current = join(t.repo, ".orka", "chain-current");
+    const deadline = Date.now() + 20000;
+    let id = "";
+    while (!id && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100));
+      const candidate = (existsSync(current) ? readFileSync(current, "utf8") : "").trim().split(/\s+/)[1];
+      // Wait for orka run to finish (status running), or it would save over the done status below.
+      if (candidate && existsSync(join(t.repo, ".orka", "jobs", `${candidate}.json`)) && t.read(candidate).status === "running") id = candidate;
+    }
+    assert.ok(id, `chain never started a job:\n${err}`);
+    const wt = t.read(id).worktree;
+    writeFileSync(join(wt, "feature.txt"), "new\n");
+    // Async git: the chain child keeps running meanwhile.
+    await execFileAsync("git", ["add", "feature.txt"], { cwd: wt, env: t.env });
+    await execFileAsync("git", ["commit", "-q", "-m", "feature"], { cwd: wt, env: t.env });
+    t.markDone(id);
+    const job = t.read(id);
+    const code = await Promise.race([exited, new Promise((r) => setTimeout(() => r("timeout"), 20000))]);
+    return { id, code, err, job };
+  } finally {
+    if (child.exitCode === null) child.kill();
+  }
+}
+
+test("orka chain at L1 runs the queue and keeps a passing branch for review: no merge, no push", async () => {
+  const t = scratch();
+  const before = t.g("rev-parse", "main");
+  const { id, code, err } = await chainOnce(t);
+  assert.equal(code, 0, err);
+  assert.match(err, /verifier pass; kept on orka\/.* for review \(autonomy L1: no push, no merge\)/);
+  assert.match(err, /queue empty, chain done/);
+  assert.equal(t.g("rev-parse", "main"), before);
+  assert.match(t.decisions(id), /\tautonomy\tchain kept orka\//);
+  assert.match(readFileSync(join(t.repo, ".orka", "chain.log"), "utf8"), /orka chain start .*autonomy L1/);
+  assert.ok(!existsSync(join(t.repo, ".orka", "chain.lock")), "lock released");
+});
+
+test("orka chain at L3 merges, and pushes main after a pass", async () => {
+  const t = scratch();
+  t.setLevel("L3");
+  const { code, err, job } = await chainOnce(t);
+  assert.equal(code, 0, err);
+  assert.match(t.g("log", "-1", "--format=%s", "main"), new RegExp(`^Merge ${job.branch}: task 01 thing$`));
+  assert.equal(spawnSync("git", ["--git-dir", t.remote, "rev-parse", "main"], { encoding: "utf8" }).stdout.trim(), t.g("rev-parse", "main"));
 });
