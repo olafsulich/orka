@@ -43,7 +43,7 @@ The old `~/bin/orca-chain` as a command. It runs `<state>/chain-queue` one job a
 17
 ```
 
-Per task: wait for RAM and load (`ORKA_CHAIN_MIN_MEM_MB`, default 1200; `ORKA_CHAIN_MAX_LOAD`, default 6) → `orka new` + `orka run` → poll the job (`ORKA_CHAIN_POLL_MS`, default 60s; a webhook after 4h). What happens on a verifier pass is the repo's sign-off mode, `chain.signoff` in `.orka/config.json`:
+Per task: wait for RAM and load (`ORKA_CHAIN_MIN_MEM_MB`, default 1200; `ORKA_CHAIN_MAX_LOAD`, default 6; `ORKA_CHAIN_ORCHESTRATOR_MODEL` / `ORKA_CHAIN_WORKER_MODEL` override the default models of chained jobs) → `orka new` + `orka run` → poll the job (`ORKA_CHAIN_POLL_MS`, default 60s; a webhook after 4h). What happens on a verifier pass is the repo's sign-off mode, `chain.signoff` in `.orka/config.json`:
 
 | mode | on a pass |
 | --- | --- |
