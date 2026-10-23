@@ -1334,7 +1334,8 @@ function codeSnapshot(job) {
     const run = (args, input) => spawnSync("git", args, { cwd: wt, env, encoding: "utf8", input, maxBuffer: 256 * 1024 * 1024 });
     if (run(["read-tree", job.baseCommit]).status !== 0) return null;
     // Both checks file names: excluding an absent path leaves the patch id of older jobs unchanged.
-    const exclude = brand.fileNames("verify.json").map((f) => `:(exclude)${f}`);
+    // The job's own spec is excluded too: orka done commits lessons into it, which is not code.
+    const exclude = [...brand.fileNames("verify.json"), ...(job.spec?.path ? [job.spec.path] : [])].map((f) => `:(exclude)${f}`);
     if (run(["add", "-A", "--", ".", ...exclude]).status !== 0) return null;
     const diff = run(["diff", "--cached", "--binary", job.baseCommit, "--", ".", ...exclude]);
     if (diff.status !== 0) return null;
@@ -2105,6 +2106,7 @@ function cmdStatus(args) {
     console.log(`  layout: ${job.workerLayout || "shared-worktree"}`);
     console.log(`  playbook: ${job.playbook || "feature"}`);
     if (job.spec?.path) console.log(`  spec: ${job.spec.path}${job.spec.commit ? ` @${job.spec.commit.slice(0, 8)}` : ""}`);
+    if (job.lessons) console.log(`  lessons: ${job.lessons.added} added, ${job.lessons.bumped} seen again${job.lessons.commit ? ` (commit ${job.lessons.commit})` : " (not committed)"}`);
     if (job.port != null) console.log(`  port: ${job.port}${Array.isArray(job.ports) && job.ports.length > 1 ? ` ports=${job.ports.join(",")}` : ""}`);
     if (roundOf(job) > 1) console.log(`  round: ${roundOf(job)} (follow-up)`);
     if (job.watcherPid && job.status === "running") console.log(`  watcher: pid ${job.watcherPid}`);
@@ -2412,6 +2414,55 @@ async function cmdStop(args) {
   releaseJob(repo, job, { keep: args.keep });
 }
 
+// First evidence line per failing check, from this job's verifier result files (current and archived rounds).
+function checkEvidence(repo, job) {
+  const dir = join(jobDir(repo, job.id), "results");
+  const out = {};
+  let files = [];
+  try {
+    files = readdirSync(dir).filter((f) => /^verifier(\.round-\d+)?\.json$/.test(f)).sort();
+  } catch {
+    return out;
+  }
+  for (const f of files) {
+    try {
+      const data = JSON.parse(readCapped(join(dir, f), VERIFIER_JSON_MAX).text);
+      for (const { check, evidence } of entryList(data.failures, false)) if (!out[check] && evidence) out[check] = String(evidence).slice(0, 80);
+    } catch {}
+  }
+  return out;
+}
+
+// orka done on a spec'd job: append the lessons (rejected approaches, steers, failed and pre-existing
+// checks, a give-up reason) to "## Lessons" in the spec and commit that file on the job branch.
+// Never on main: it only writes in the job worktree, and only while it is on the job's own branch.
+function appendSpecLessons(repo, job, { dry = false } = {}) {
+  if (!job.spec?.path) return;
+  const say = (msg) => console.log(`lessons: ${msg}`);
+  const wt = job.worktree;
+  if (!wt || !existsSync(wt)) return say("skipped (no job worktree)");
+  const branch = git(wt, ["rev-parse", "--abbrev-ref", "HEAD"]).out;
+  if (branch !== brand.jobBranch(job)) return say(`skipped (worktree is on ${branch || "no branch"}, not ${brand.jobBranch(job)}; lessons are written on the job branch only)`);
+  const path = join(wt, job.spec.path);
+  if (!existsSync(path)) return say(`skipped (${job.spec.path} is not on the job branch)`);
+  const rows = decisionRows(repo, job.id).map((row) => row.split("\t"));
+  const lessons = specs.collectLessons({ job, rows, evidence: checkEvidence(repo, job) });
+  if (!lessons.length) return say("none to add");
+  const before = readFileSync(path, "utf8");
+  const merged = specs.mergeLessons(before, lessons, { date: new Date().toISOString().slice(0, 10), jobId: job.id });
+  if (!merged.added && !merged.bumped) return say(`${lessons.length} already in ${job.spec.path}`);
+  const counts = `${merged.added} added, ${merged.bumped} seen again${merged.compressed ? `, ${merged.compressed} folded (over ${specs.LESSONS_MAX_LINES} lines)` : ""}`;
+  if (dry) return say(`would update ${job.spec.path} on ${branch}: ${counts}`);
+  writeFileSync(path, merged.text);
+  git(wt, ["add", "--", job.spec.path]);
+  const committed = git(wt, ["commit", "-q", "-m", `Spec lessons: ${job.spec.feature || job.spec.path} (job ${job.id})`, "--", job.spec.path]);
+  const sha = committed.code === 0 ? git(wt, ["rev-parse", "--short", "HEAD"]).out : "";
+  job.lessons = { at: new Date().toISOString(), added: merged.added, bumped: merged.bumped, compressed: merged.compressed, commit: sha || null };
+  save(repo, job);
+  appendDecision(repo, job.id, ["lessons", `${counts} in ${job.spec.path}`, "orka done on a spec'd job", sha || "not committed", committed.code === 0 ? "committed" : `commit failed: ${committed.err.slice(0, 120)}`]);
+  say(committed.code === 0 ? `${counts} in ${job.spec.path}, committed ${sha} on ${branch}` : `${counts} in ${job.spec.path}, written but NOT committed (${committed.err.split("\n")[0] || "git commit failed"})`);
+}
+
 function verifierFailReason(rounds, blocking = []) {
   const checks = [...new Set(blocking.map((b) => b.check))];
   return `verifier failed after ${rounds} round${rounds === 1 ? "" : "s"}${checks.length ? `: ${checks.join(", ")}` : ""}`;
@@ -2448,6 +2499,7 @@ async function cmdDone(args) {
     if (verifierLine(view)) console.log(verifierLine(view));
     const preview = await deliverFinish(repo, { ...view, status: failing ? "failed" : "done" }, { dryRun: true });
     for (const line of preview.lines) console.log(`finish webhook: ${line}`);
+    appendSpecLessons(repo, view, { dry: true });
     releaseJob(repo, job, { dryRun: true, keep: args.keep });
     return;
   }
@@ -2473,6 +2525,11 @@ async function cmdDone(args) {
   console.log(`${failed ? "failed" : "done"} ${id}: ${why}`);
   if (verifierLine(job)) console.log(verifierLine(job));
   console.log(finishLine(wake));
+  try {
+    appendSpecLessons(repo, job);
+  } catch (err) {
+    console.log(`lessons: failed (${err?.message || err}); the job status stands`);
+  }
   releaseJob(repo, job, { keep: args.keep });
 }
 
