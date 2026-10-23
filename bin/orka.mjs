@@ -1010,7 +1010,9 @@ function herdr(args, timeoutMs = 30000) {
 function herdrFail(got, what) {
   const detail = got.json?.error?.message || got.json?.error || got.text;
   const msg = typeof detail === "string" ? detail : JSON.stringify(detail);
-  fail(`${what} failed:\n${msg.slice(0, 800)}`);
+  // herdr says "already used ... status=Blocked" when the agent of that name is stuck on a dialog.
+  const blocked = /already used/i.test(msg) && /status=Blocked/i.test(msg) ? `\nThe agent under that name is blocked on a dialog in its pane, not a name clash: herdr pane read <pane> shows it (Claude's folder-trust dialog in an untrusted repo is the usual one).` : "";
+  fail(`${what} failed:\n${msg.slice(0, 800)}${blocked}`);
 }
 
 function agentName(id) {
@@ -2176,6 +2178,32 @@ function createWorkspace(job) {
   return { pane, workspace: workspace || "" };
 }
 
+// Claude Code stops a new session on its folder-trust dialog in a repo it has not trusted yet (trust is
+// kept per repo root in ~/.claude.json). The pane then sits there; herdr reports the agent Blocked, and a
+// retried start used to fail with a misleading "agent name already used". orka reads the pane, says what
+// it is and how to fix it once, by hand. It never accepts the dialog.
+const TRUST_DIALOG = /Quick safety check: Is this a project you created or one you trust|Do you trust the files in this folder|Yes, I trust this folder/i;
+
+function trustDialogShown(pane) {
+  if (!pane) return false;
+  const got = herdr(["pane", "read", pane, "--source", "recent"], 10000);
+  return got.code === 0 && TRUST_DIALOG.test(got.text);
+}
+
+function trustMessage(repo, pane, what) {
+  return [
+    `${what} did not start: Claude Code is waiting on its folder-trust dialog in pane ${pane}.`,
+    `Claude has not trusted ${repo} yet (job worktrees inherit the trust of their repo).`,
+    `One-time fix, by hand: cd ${repo} && claude, choose "Yes, I trust this folder", then /exit. Then run the orka command again.`,
+    `orka does not accept the dialog for you.`,
+  ].join("\n");
+}
+
+// After a start (or a failed one): fail at once when the pane shows the trust dialog.
+function assertNotTrustBlocked(repo, kind, pane, what) {
+  if (kind === "claude" && trustDialogShown(pane)) fail(trustMessage(repo, pane, what));
+}
+
 function startLead(job) {
   const name = agentName(job.id);
   assertAgentName(name);
@@ -2186,7 +2214,12 @@ function startLead(job) {
   job.sessionId = randomUUID();
   for (let attempt = 1; attempt <= 2; attempt++) {
     last = herdr(startArgs(name, job.pane, kind, alias, job.sessionId, job), 90000);
-    if (last.code === 0 && !last.json?.error) return name;
+    if (last.code === 0 && !last.json?.error) {
+      assertNotTrustBlocked(job.repo, kind, job.pane, "the orchestrator");
+      return name;
+    }
+    // Never retry into the dialog: a second start only reports the name as already used.
+    assertNotTrustBlocked(job.repo, kind, job.pane, "the orchestrator");
     if (attempt === 1 && /not an available shell|agent_not_ready/i.test(last.text)) {
       sleep(1000);
       continue;
@@ -2231,6 +2264,7 @@ async function cmdRun(args) {
     save(repo, job);
     const lead = promptWithRetry(job.agent, leadPrompt(job));
     job.leadDelivery = lead.ok ? "ok" : "failed";
+    if (!lead.ok) assertNotTrustBlocked(repo, job.kind === "pi" ? "pi" : "claude", job.pane, "the orchestrator");
     if (!lead.ok) fail(`orchestrator prompt not delivered: ${lead.reason}`);
     job.status = "running";
     job.started = new Date().toISOString();
@@ -2544,6 +2578,10 @@ function cmdWorker(args) {
   for (;;) {
     started = herdr(startArgs(name, pane, kind, alias, sessionId, job), 90000);
     const failed = started.code !== 0 || started.json?.error;
+    if (kind === "claude" && trustDialogShown(pane)) {
+      if (ownPane) herdr(["pane", "close", pane]);
+      fail(trustMessage(repo, pane, `worker ${name}`));
+    }
     if (!failed) break;
     if (!/already used/i.test(started.text) || tried.length >= 20) break;
     tried.push(name);
@@ -2826,10 +2864,11 @@ function startSuccessor(repo, id, slot, log) {
   if (!pane) return rollback(`pane split: ${herdrDetail(split)}`);
   const nextSession = randomUUID();
   const started = herdr(startArgs(name, pane, slot.kind, slot.alias, nextSession, job), 90000);
-  if (!herdrOk(started)) {
+  const trust = slot.kind === "claude" && trustDialogShown(pane);
+  if (!herdrOk(started) || trust) {
     // The pane was split just now and never held an agent: close only that one.
     herdr(["pane", "close", pane]);
-    return rollback(`agent start ${name}: ${herdrDetail(started)}`);
+    return rollback(trust ? trustMessage(repo, pane, `successor ${name}`).replace(/\n/g, " ") : `agent start ${name}: ${herdrDetail(started)}`);
   }
   const record = { n: h.n, from, pane: slot.pane, sessionId: slot.sessionId, tokens: h.tokens, window: h.window, source: h.source, pct: h.pct, pctEnd: end ? pctOf(end.pct) : null, mode: h.mode, at, note: h.note };
   let prompt;
