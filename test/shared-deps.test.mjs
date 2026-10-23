@@ -109,7 +109,7 @@ esac
   g(["add", "."]);
   g(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
   mkdirSync(join(repo, "node_modules", "left-pad"), { recursive: true });
-  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_PROMPT_POLL_MS: "50", ORKA_MEMORY_GUARD: "off" };
+  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off", ORKA_PROMPT_POLL_MS: "50" };
   const orka = (args) => spawnSync("timeout", ["60", process.execPath, ORKA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...process.env, ...env } });
   orka(["init"]);
   const id = orka(["new", "--kind", "pi", "--title", "d", "--goal", "g"]).stdout.trim();

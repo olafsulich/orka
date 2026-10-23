@@ -63,7 +63,7 @@ echo '{}'
     PATH: `${bin}:${process.env.PATH}`,
     HOME: home,
     XDG_RUNTIME_DIR: run,
-    AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1",
+    AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off",
     ORKA_PROMPT_WAIT_MS: "1500",
     ORKA_PROMPT_POLL_MS: "100",
   };

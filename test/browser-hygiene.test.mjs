@@ -61,7 +61,7 @@ function scratch() {
   }
   writeFileSync(join(proc, "stat"), "btime 1000000000\n");
   execFileSync("git", ["init", "-q"], { cwd: repo });
-  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: run, AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_PROC_ROOT: proc };
+  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: run, AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off", ORKA_PROC_ROOT: proc };
   const orka = (args) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...process.env, ...env } });
   orka(["init"]);
   const calls = () => readFileSync(log, "utf8").trim().split("\n").filter(Boolean);

@@ -14,6 +14,7 @@ import { DECISION_ROWS, DIGEST_MAX, FILE_READ_MAX, SUMMARY_MAX, VERIFIER_JSON_MA
 import * as brand from "../lib/brand.mjs";
 import * as browsers from "../lib/browsers.mjs";
 import * as deps from "../lib/deps.mjs";
+import * as guard from "../lib/guard.mjs";
 import * as lifecycle from "../lib/lifecycle.mjs";
 import * as ports from "../lib/ports.mjs";
 import * as watch from "../lib/watch.mjs";
@@ -1716,6 +1717,7 @@ function orchestratorPrompt(job) {
     `Start each worker with orka, which opens a Herdr pane in this same worktree:`,
     `  orka worker --job ${job.id} --name <worker> --task "<task>"`,
     `If orka is not on PATH, run ${ORKA} instead. The binary is the same file.`,
+    `orka worker waits (queues) while memory or panes are tight, up to ${Math.round(guardLimitsOf(job.repo).waitMs / 60000)} minutes, then refuses. Give that call a long timeout (600000 ms) or run it in the background.`,
     `Write every worker --task as this brief, one labelled section per line: GOAL / SCOPE (files it owns) / CONTEXT (file pointers, not pasted text) / ACCEPTANCE / VERIFY / TIMEBOX / FORBIDDEN / REPORT. Workers cannot ask questions, so a vague task fails quietly.`,
     `When ${featureMapFile(job.worktree)} exists at the repo root, point workers at it in CONTEXT.`,
     ...(PLAYBOOK_ORCHESTRATOR_LINES[job.playbook] || PLAYBOOK_ORCHESTRATOR_LINES.feature)(dir),
@@ -2139,6 +2141,7 @@ function cmdWorker(args) {
   }
   if (!job.pane || !job.agent || !job.worktree) fail("orchestrator is not running");
   if (job.status !== "running") fail(`job ${id} is ${job.status}, not running`);
+  waitForRoom(repo, job, first, role);
   ensureJobDir(repo, job.id);
   setupDeps(repo, job);
   recordBrowserPids(repo, job);
@@ -2195,6 +2198,91 @@ function cmdWorker(args) {
   console.log(`${id} worker ${name} pane=${pane} kind=${kind}${alias ? ` model=${alias}` : ""}${role === "verifier" ? ` role=verifier round=${round}` : ""} worktree=${job.worktree}`);
 }
 
+function guardLimitsOf(repo) {
+  let cfg = {};
+  try {
+    cfg = JSON.parse(readFileSync(configPath(repo), "utf8")).memoryGuard || {};
+  } catch {
+    // defaults
+  }
+  return guard.guardLimits(cfg, (key) => brand.env(key));
+}
+
+// Live agent panes: herdr panes with an agent (agent_status other than unknown).
+// When herdr cannot list panes, the panes this repo's running jobs hold.
+function livePaneCount(repo) {
+  const got = herdr(["pane", "list"], 10000);
+  const panes = got.json?.result?.panes;
+  if (got.code === 0 && Array.isArray(panes)) return panes.filter((p) => p?.agent_status && p.agent_status !== "unknown").length;
+  return loadAllJobs(repo)
+    .filter((j) => j.status === "running")
+    .reduce((n, j) => n + (j.pane ? 1 : 0) + (j.workers || []).filter((w) => w.pane && !w.closed && w.pane !== j.pane).length, 0);
+}
+
+function hostSample(repo) {
+  return { availableMb: guard.memAvailableMb(browsers.procRootOf()), panes: livePaneCount(repo) };
+}
+
+const sampleText = (s, limits) => `MemAvailable ${s.availableMb ?? "?"}MB (min ${limits.minAvailableMb}MB), live panes ${s.panes ?? "?"}/${limits.maxPanes}`;
+
+// The memory guard. Before a worker or verifier pane starts: when MemAvailable or
+// the live pane count is past its limit, or earlier starts are already queued,
+// queue and wait (poll) until there is room and this start is first in line.
+// Logged to decisions.tsv. Past the wait limit the start is refused (exit 1).
+function waitForRoom(repo, job, name, role) {
+  const limits = guardLimitsOf(repo);
+  if (limits.off) return;
+  const dir = guard.queueDir(brand.stateDir(repo));
+  let sample = hostSample(repo);
+  let verdict = guard.guardVerdict(sample, limits);
+  const ahead = guard.liveQueue(dir, pidAlive);
+  if (verdict.ok && !ahead.length) return;
+  const since = new Date().toISOString();
+  const file = guard.enqueue(dir, { job: job.id, name, role, pid: process.pid, since });
+  const leave = () => guard.dequeue(file);
+  for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+    process.once(sig, () => {
+      leave();
+      process.exit(128 + ({ SIGHUP: 1, SIGINT: 2, SIGTERM: 15 }[sig]));
+    });
+  }
+  const why = verdict.ok ? `${ahead.length} earlier start(s) queued` : verdict.reasons.join("; ");
+  appendDecision(repo, job.id, ["memory-guard", `queued ${role} ${name}`, why, sampleText(sample, limits), "waiting"]);
+  console.error(`memory guard: ${why}; ${role} ${name} queued, waiting up to ${Math.round(limits.waitMs / 1000)}s`);
+  const started = Date.now();
+  for (;;) {
+    sleep(limits.pollMs);
+    sample = hostSample(repo);
+    verdict = guard.guardVerdict(sample, limits);
+    const head = guard.liveQueue(dir, pidAlive)[0];
+    const waited = Math.round((Date.now() - started) / 1000);
+    if (verdict.ok && head?.file === file) {
+      leave();
+      appendDecision(repo, job.id, ["memory-guard", `started ${role} ${name} after ${waited}s`, "room again", sampleText(sample, limits), "started"]);
+      console.error(`memory guard: room again after ${waited}s; starting ${name}`);
+      return;
+    }
+    if (Date.now() - started >= limits.waitMs) {
+      leave();
+      const still = verdict.ok ? "earlier starts still queued" : verdict.reasons.join("; ");
+      appendDecision(repo, job.id, ["memory-guard", `did not start ${role} ${name} after ${waited}s`, still, sampleText(sample, limits), "not started"]);
+      fail(`memory guard: ${still}; ${name} not started after ${waited}s. Wait for a worker to finish (or run orka cleanup), then run orka worker again.`);
+    }
+  }
+}
+
+// Host lines for orka status: free memory, live panes against the guard, and the queue.
+function printHost(repo, jobId = null) {
+  const limits = guardLimitsOf(repo);
+  const sample = hostSample(repo);
+  const queue = guard.liveQueue(guard.queueDir(brand.stateDir(repo)), pidAlive);
+  const mem = sample.availableMb == null ? "unknown" : `${sample.availableMb}MB available`;
+  const guardNote = limits.off ? "guard off" : `guard: min ${limits.minAvailableMb}MB, max ${limits.maxPanes} panes`;
+  const indent = jobId ? "  " : "";
+  console.log(`${indent}host: memory ${mem}, live panes ${sample.panes}, queue ${queue.length} (${guardNote})`);
+  for (const q of queue.filter((e) => !jobId || e.job === jobId)) console.log(`${indent}queued: ${q.job} ${q.name} (${q.role}) since ${q.since}`);
+}
+
 // A new verifier round starts clean: the previous verifier's sessions are closed
 // and any Chrome left from them (tagged or by session name) is killed.
 function reapPreviousVerifier(job) {
@@ -2249,15 +2337,14 @@ function cmdStatus(args) {
     if (job.status === "running") recordBrowserPids(repo, job);
     if (verifierLine(job)) console.log(`  ${verifierLine(job)}`);
     printVerifierDetail(job);
+    printHost(repo, job.id);
     return;
   }
   mkdirSync(jobsDir(repo), { recursive: true });
   const files = readdirSync(jobsDir(repo)).filter((f) => f.endsWith(".json")).sort();
-  if (!files.length) {
-    console.log("no jobs");
-    return;
-  }
+  if (!files.length) console.log("no jobs");
   for (const file of files) line(JSON.parse(readFileSync(join(jobsDir(repo), file), "utf8")));
+  printHost(repo);
 }
 
 function staleLabel(repo) {

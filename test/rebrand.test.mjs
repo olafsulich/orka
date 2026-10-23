@@ -31,7 +31,7 @@ function scratch(prefix = "orka-rebrand-") {
   }
   execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo });
   execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: repo });
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1" };
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off" };
   const run = (script, args, extra = {}) => spawnSync(process.execPath, [script, ...args, "--cwd", repo], { encoding: "utf8", env: { ...env, ...extra } });
   return { base, repo, orka: (args, extra) => run(ORKA, args, extra), orca: (args, extra) => run(ORCA, args, extra) };
 }
@@ -63,7 +63,9 @@ test("the orca alias behaves like orka: same stdout and exit code, one deprecati
     const a = t.orka(args);
     const b = t.orca(args);
     assert.equal(b.status, a.status, args.join(" "));
-    assert.equal(b.stdout, a.stdout, args.join(" "));
+    // The host line reads live MemAvailable, which moves between the two runs.
+    const host = (out) => out.replace(/memory [0-9]+MB available/, "memory NMB available");
+    assert.equal(host(b.stdout), host(a.stdout), args.join(" "));
     assert.equal(b.stderr, `orca is deprecated; use orka (same commands)\n${a.stderr}`, args.join(" "));
     assert.doesNotMatch(b.stdout, /orca is deprecated; use orka/);
   }
@@ -212,7 +214,7 @@ function listen(hits) {
 
 function orkaAsync(t, args, env) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [ORKA, ...args, "--cwd", t.repo], { env: { ...process.env, ORKA_NO_WATCH: "1", ...env } });
+    const child = spawn(process.execPath, [ORKA, ...args, "--cwd", t.repo], { env: { ...process.env, ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off", ...env } });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (c) => (stdout += c));

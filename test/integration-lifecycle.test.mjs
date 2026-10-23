@@ -48,7 +48,7 @@ esac`,
   );
   stub("agent-browser", `case "$*" in *"session list"*) echo '{"success":true,"data":{"sessions":[]}}';; esac`);
   execFileSync("git", ["init", "-q"], { cwd: repo });
-  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1" };
+  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off" };
   execFileSync(process.execPath, [ORKA, "init", "--cwd", repo], { env: { ...process.env, ...env } });
   return { base, repo, env, calls: () => readFileSync(log, "utf8").trim().split("\n").filter(Boolean), set: (f, v) => writeFileSync(join(base, f), v) };
 }

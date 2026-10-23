@@ -24,7 +24,7 @@ function scratch() {
   const g = (args, cwd = repo) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
   g(["init", "-q", "-b", "main"]);
   g(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]);
-  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1" };
+  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off" };
   // orka cleanup is wrapped in timeout, so a hang fails the test instead of stalling the suite.
   const orka = (args) => spawnSync("timeout", ["60", process.execPath, ORKA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...process.env, ...env } });
   orka(["init"]);
