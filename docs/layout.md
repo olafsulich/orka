@@ -20,6 +20,10 @@ A repo that already has `.orca/` (from before the rename) keeps it: every path a
 
 Commands resolve the primary checkout from the current directory, including from a job worktree (`git rev-parse --git-common-dir`). Pass `--cwd <repo>` from anywhere else.
 
+## Claude's folder trust
+
+Claude Code asks once per repo whether it trusts the folder, and keeps the answer in `~/.claude.json` per repo root; job worktrees inherit it. In a repo Claude has not trusted, every claude pane stops on that dialog. `orka run`, `orka worker` and a handoff successor read the pane after the start. When it shows the dialog, they fail at once with the repo path and the one-time fix: `cd <repo> && claude`, choose "Yes, I trust this folder", then `/exit`, and run the orka command again. orka never answers the dialog and never retries into it (a retry used to end in a misleading `agent name ... already used ... status=Blocked`; when herdr still says that, orka explains it is a blocked dialog, not a name clash). Pi panes have no such dialog.
+
 ## Trust
 
 orka does not mark a job `done` when the agent goes idle. The summary file is the completion note; `status` stays `running` until the orchestrator runs `orka review <id>`, then `review` until you sign off with `orka approve <id>` and the orchestrator runs `orka done <id>` (or you `stop` it). See [review.md](review.md). A failed `run` leaves the worktree in place and marks the job `failed`. `orka done` removes a done job's worktree and keeps the branch (see [cleanup.md](cleanup.md#worktrees-of-done-jobs)); `node_modules` in a worktree is a symlink to the main checkout's (see [cleanup.md](cleanup.md#shared-dependencies)). Done, failed, and stopped marks can all POST the finish wake. Look at the branch before you merge. The worktree is not a sandbox.
