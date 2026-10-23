@@ -102,7 +102,7 @@ test("orka worker starts the pane with --session-id and records it", () => {
   const w = j.read().workers[0];
   assert.match(w.sessionId, /^[0-9a-f-]{36}$/);
   assert.ok(w.startedAt);
-  assert.ok(t.calls().some((c) => c.startsWith("herdr agent start builder --kind pi --pane p-1") && c.endsWith(`-- --session-id ${w.sessionId}`)), t.calls().join("\n"));
+  assert.ok(t.calls().some((c) => c.startsWith("herdr agent start builder --kind pi --pane p-1") && c.includes(`-- --session-id ${w.sessionId} --skill `) && c.endsWith("plugin/skills/handoff")), t.calls().join("\n"));
 });
 
 test("below the threshold: measured and recorded, nobody prompted", () => {
@@ -176,7 +176,7 @@ test("full handoff: note asked, old agent renamed and kept open, fresh agent pic
   assert.deepEqual(fresh.handoffs.map((h) => [h.n, h.from, h.pane, h.sessionId, h.note]), [[1, "builder-h1", "p-1", first.sessionId, note]]);
   assert.equal(job.handoffs.length, 1);
   assert.equal(job.handoffs[0].worker, "builder");
-  assert.ok(calls.some((c) => c.startsWith("herdr agent start builder --kind pi --pane p-2") && c.endsWith(`--session-id ${fresh.sessionId}`)));
+  assert.ok(calls.some((c) => c.startsWith("herdr agent start builder --kind pi --pane p-2") && c.includes(`--session-id ${fresh.sessionId} --skill `)));
 
   const successor = t.prompts("builder");
   assert.equal(successor.length, 1);

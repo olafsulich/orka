@@ -928,11 +928,30 @@ function assertAgentName(name) {
 
 // sessionId names the agent's transcript (claude and pi both take --session-id), so orka reads
 // the right file when it measures context; every pane of a job shares one transcript folder.
-function startArgs(name, pane, kind, alias, sessionId) {
+function startArgs(name, pane, kind, alias, sessionId, job = null) {
   const args = ["agent", "start", name, "--kind", kind, "--pane", pane, "--timeout", "60000"];
-  const extra = [...(kind === "claude" ? ["--model", alias] : []), ...(sessionId ? ["--session-id", sessionId] : [])];
+  const extra = [...(kind === "claude" ? ["--model", alias] : []), ...(sessionId ? ["--session-id", sessionId] : []), ...(job ? paneExtras(job, kind) : [])];
   if (extra.length) args.push("--", ...extra);
   return args;
+}
+
+// orka's skills (plugin/: the handoff skill) for every pane, and for claude a statusLine that
+// records the window Claude Code reports for the session (lib/statusline.mjs -> <jobdir>/context).
+const PLUGIN_DIR = join(dirname(ORKA), "..", "plugin");
+const HANDOFF_SKILL = join(PLUGIN_DIR, "skills", "handoff", "SKILL.md");
+
+function captureDir(repo, id) {
+  return join(jobDir(repo, id), "context");
+}
+
+function paneExtras(job, kind) {
+  if (kind === "pi") return ["--skill", dirname(HANDOFF_SKILL)];
+  const dir = captureDir(job.repo, job.id);
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, "claude-settings.json");
+  const command = sh([process.execPath, join(dirname(ORKA), "..", "lib", "statusline.mjs"), dir]);
+  writeFileSync(file, `${JSON.stringify({ statusLine: { type: "command", command, padding: 0 } }, null, 2)}\n`);
+  return ["--settings", file, "--plugin-dir", PLUGIN_DIR];
 }
 
 function paneCommand(alias) {
@@ -1807,7 +1826,7 @@ function startLead(job) {
   let last = null;
   job.sessionId = randomUUID();
   for (let attempt = 1; attempt <= 2; attempt++) {
-    last = herdr(startArgs(name, job.pane, kind, alias, job.sessionId), 90000);
+    last = herdr(startArgs(name, job.pane, kind, alias, job.sessionId, job), 90000);
     if (last.code === 0 && !last.json?.error) return name;
     if (attempt === 1 && /not an available shell|agent_not_ready/i.test(last.text)) {
       sleep(1000);
@@ -1986,7 +2005,7 @@ function cmdWorker(args) {
   let started;
   const sessionId = randomUUID();
   for (;;) {
-    started = herdr(startArgs(name, pane, kind, alias, sessionId), 90000);
+    started = herdr(startArgs(name, pane, kind, alias, sessionId, job), 90000);
     const failed = started.code !== 0 || started.json?.error;
     if (!failed) break;
     if (!/already used/i.test(started.text) || tried.length >= 20) break;
@@ -2120,7 +2139,7 @@ function startSuccessor(repo, id, sessionId, log) {
   const pane = split.json?.result?.pane?.pane_id;
   if (!pane) return rollback(`pane split: ${herdrDetail(split)}`);
   const nextSession = randomUUID();
-  const started = herdr(startArgs(name, pane, worker.kind, worker.model, nextSession), 90000);
+  const started = herdr(startArgs(name, pane, worker.kind, worker.model, nextSession, job), 90000);
   if (!herdrOk(started)) {
     // The pane was split just now and never held an agent: close only that one.
     herdr(["pane", "close", pane]);
