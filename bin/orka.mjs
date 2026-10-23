@@ -4884,8 +4884,9 @@ Context handoff (builder workers and the orchestrator, both kinds)
 Verifier (both kinds)
   After every builder reports, the orchestrator starts ONE verifier:
     orka worker --job <id> --name verifier --role verifier --task "<what was built + acceptance criteria>"
-  Fresh context, same worktree, the job's worker model. It runs orka verify, npm test / npm run check when
-  package.json has them, and targeted agent-browser checks in one session (<prefix>-verifier). It does not
+  Before the pane starts, orka runs the static gates (lint, typecheck, check, test, or "gates" in config); a
+  red gate starts no verifier (docs/gates.md). Fresh context, same worktree, the job's worker model. It runs
+  orka verify and targeted agent-browser checks in one session (<prefix>-verifier). It does not
   edit product code. It may extend orka.verify.json only to cover the acceptance criteria, never weaken a check.
   It writes results/verifier.json {"verdict","failures":[{"check","evidence"}],"warnings":[{"check","evidence","base","proof"}],...}
   and notes/verifier.txt. failures block; warnings (shown to fail on the base commit too, via orka verify <id> --base)
