@@ -229,20 +229,41 @@ test("orka chain --dry-run names what a pass would do at the repo's level", () =
   writeFileSync(join(t.repo, ".orka", "chain-queue"), "# queue\n01 haiku\n");
   let r = t.orka(["chain", "--dry-run"]);
   assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /no chain\.signoff set for this repo; using auto .*Change it with orka chain --signoff each\|end\|auto/);
+  assert.match(r.stderr, /sign-off auto, autonomy L1: on a verifier pass sign off, merge into main \(no push\)/);
+  r = t.orka(["chain", "--dry-run", "--signoff", "each"]);
   assert.match(r.stderr, /autonomy L1: on a verifier pass keep the branch for review/);
   assert.match(r.stderr, /dry-run: orka new --title 'task 01 thing' --verifier-model haiku/);
   assert.equal(readFileSync(join(t.repo, ".orka", "chain-queue"), "utf8"), "# queue\n01 haiku\n", "dry-run pops nothing");
   t.setLevel("L3");
-  assert.match(t.orka(["chain", "--dry-run"]).stderr, /autonomy L3: on a verifier pass merge into main, test, push main/);
+  assert.match(t.orka(["chain", "--dry-run", "--signoff", "each"]).stderr, /autonomy L3: on a verifier pass merge into main, test, push main/);
+  assert.match(t.orka(["chain", "--dry-run", "--signoff", "end"]).stderr, /on a verifier pass leave it in review and stack the next task on its branch/);
+  assert.match(t.orka(["chain", "--dry-run", "--signoff", "sometimes"]).stderr, /--signoff must be each, end or auto/);
+});
+
+test("chain.signoff: --signoff saves it per repo; with no TTY an unset repo gets auto, said once", () => {
+  const t = scratch();
+  mkdirSync(join(t.repo, "tasks"));
+  writeFileSync(join(t.repo, "tasks", "01-thing.md"), "# 01 thing\n");
+  writeFileSync(join(t.repo, ".orka", "chain-queue"), "");
+  const cfg = () => JSON.parse(readFileSync(join(t.repo, ".orka", "config.json"), "utf8"));
+  let r = t.orka(["chain"]);
+  assert.match(r.stderr, /using auto/);
+  assert.equal(cfg().chain.signoff, "auto");
+  assert.doesNotMatch(t.orka(["chain"]).stderr, /using auto/, "said once");
+  t.orka(["chain", "--signoff", "end"]);
+  assert.equal(cfg().chain.signoff, "end");
+  assert.match(t.orka(["chain"]).stderr, /sign-off end/);
 });
 
 // Runs orka chain in the background; when the job it starts appears, a commit lands on its branch and it is marked done + pass.
-async function chainOnce(t) {
+// mark(id, wt): what the job's agents do once it runs (default: done + verifier pass).
+async function chainOnce(t, { signoff = "each", mark = async (id) => t.markDone(id), file = "feature.txt" } = {}) {
   mkdirSync(join(t.repo, "tasks"), { recursive: true });
   writeFileSync(join(t.repo, "tasks", "01-thing.md"), "# 01 thing\n");
   writeFileSync(join(t.repo, ".orka", "chain-queue"), "01\n");
   const env = { ...t.env, ORKA_CHAIN_POLL_MS: "100", ORKA_CHAIN_MIN_MEM_MB: "0", ORKA_CHAIN_MAX_LOAD: "100000" };
-  const child = spawn(process.execPath, [ORKA, "chain", "--cwd", t.repo], { env, stdio: ["ignore", "ignore", "pipe"] });
+  const child = spawn(process.execPath, [ORKA, "chain", "--signoff", signoff, "--cwd", t.repo], { env, stdio: ["ignore", "ignore", "pipe"] });
   let err = "";
   child.stderr.on("data", (d) => (err += d));
   const exited = new Promise((resolve) => child.on("exit", (code) => resolve(code)));
@@ -258,11 +279,11 @@ async function chainOnce(t) {
     }
     assert.ok(id, `chain never started a job:\n${err}`);
     const wt = t.read(id).worktree;
-    writeFileSync(join(wt, "feature.txt"), "new\n");
+    writeFileSync(join(wt, file), "new\n");
     // Async git: the chain child keeps running meanwhile.
-    await execFileAsync("git", ["add", "feature.txt"], { cwd: wt, env: t.env });
+    await execFileAsync("git", ["add", file], { cwd: wt, env: t.env });
     await execFileAsync("git", ["commit", "-q", "-m", "feature"], { cwd: wt, env: t.env });
-    t.markDone(id);
+    await mark(id, wt);
     const job = t.read(id);
     const code = await Promise.race([exited, new Promise((r) => setTimeout(() => r("timeout"), 20000))]);
     return { id, code, err, job };
@@ -291,4 +312,102 @@ test("orka chain at L3 merges, and pushes main after a pass", async () => {
   assert.equal(code, 0, err);
   assert.match(t.g("log", "-1", "--format=%s", "main"), new RegExp(`^Merge ${job.branch}: task 01 thing$`));
   assert.equal(spawnSync("git", ["--git-dir", t.remote, "rev-parse", "main"], { encoding: "utf8" }).stdout.trim(), t.g("rev-parse", "main"));
+});
+
+// The job reaches review with a verifier pass; once orka chain signs it off, "the orchestrator" runs done.
+const reviewThenDone = (t) => async (id) => {
+  const job = t.read(id);
+  Object.assign(job, { status: "review", review: { round: 1, at: new Date().toISOString(), requests: 1 }, verifier: { rounds: 1, verdict: "pass", history: [{ round: 1, verdict: "pass", failing: [] }], stale: false } });
+  t.write(id, job);
+  t.fresh();
+  writeFileSync(join(t.base, `seen-${job.agent}`), "");
+  for (let i = 0; i < 200 && !t.read(id).signoff; i++) await new Promise((r) => setTimeout(r, 50));
+  const signed = t.read(id);
+  if (signed.signoff) t.write(id, { ...signed, status: "done", finished: new Date().toISOString() });
+};
+
+test("chain auto at L1: a job in review with a verifier pass is merged into main, signed off by orka and finished; no push", async () => {
+  const t = scratch();
+  const remoteBefore = spawnSync("git", ["--git-dir", t.remote, "rev-parse", "main"], { encoding: "utf8" }).stdout.trim();
+  const { id, code, err, job } = await chainOnce(t, { signoff: "auto", mark: reviewThenDone(t) });
+  assert.equal(code, 0, err);
+  assert.match(t.g("log", "-1", "--format=%s", "main"), new RegExp(`^Merge ${job.branch}: task 01 thing$`));
+  assert.equal(t.g("show", "main:feature.txt"), "new");
+  const done = t.read(id);
+  assert.deepEqual([done.status, done.signoff.by], ["done", "auto"]);
+  assert.match(t.decisions(id), /\treview\tsigned off by orka chain \(auto\)\t.*\tchain\.signoff auto\t/);
+  assert.match(t.decisions(id), /\tautonomy\tlanded orka\/.* on main\trepo at L1/);
+  assert.match(t.calls(), /herdr agent prompt j\w+ orka chain signed off the result automatically \(chain\.signoff auto\): verifier passed; merged into main by orka chain\nRun orka done/);
+  assert.match(err, /merged into main; the next task starts from there/);
+  assert.equal(spawnSync("git", ["--git-dir", t.remote, "rev-parse", "main"], { encoding: "utf8" }).stdout.trim(), remoteBefore, "L1: no push");
+});
+
+test("chain auto: a merge conflict stops the chain with the job left in review; main untouched", async () => {
+  const t = scratch();
+  let before = "";
+  const mark = async (id) => {
+    // main moves on with its own feature.txt after the job branched: the merge must conflict.
+    writeFileSync(join(t.repo, "feature.txt"), "main's own\n");
+    t.g("add", "feature.txt");
+    t.g("commit", "-q", "-m", "conflicting");
+    before = t.g("rev-parse", "main");
+    const job = t.read(id);
+    Object.assign(job, { status: "review", verifier: { rounds: 1, verdict: "pass", history: [{ round: 1, verdict: "pass", failing: [] }], stale: false } });
+    t.write(id, job);
+  };
+  const { id, code, err } = await chainOnce(t, { signoff: "auto", mark });
+  assert.equal(code, 2, err);
+  assert.match(err, /CHAIN STOPPED: task 01: orka\/.* not merged \(merge conflict .*\); job .* stays in review for Olaf/);
+  assert.equal(t.read(id).status, "review");
+  assert.equal(t.read(id).signoff, undefined);
+  assert.equal(t.g("rev-parse", "main"), before);
+  assert.equal(t.g("status", "--porcelain", "--untracked-files=no"), "", "the merge was aborted");
+});
+
+test("chain end: a job left in review does not block; the next task stacks on its branch; one review list at the end", async () => {
+  const t = scratch();
+  mkdirSync(join(t.repo, "tasks"), { recursive: true });
+  writeFileSync(join(t.repo, "tasks", "01-one.md"), "# 01 one\n");
+  writeFileSync(join(t.repo, "tasks", "02-two.md"), "# 02 two\n");
+  writeFileSync(join(t.repo, ".orka", "chain-queue"), "01\n02\n");
+  const env = { ...t.env, ORKA_CHAIN_POLL_MS: "100", ORKA_CHAIN_MIN_MEM_MB: "0", ORKA_CHAIN_MAX_LOAD: "100000" };
+  const child = spawn(process.execPath, [ORKA, "chain", "--signoff", "end", "--cwd", t.repo], { env, stdio: ["ignore", "ignore", "pipe"] });
+  let err = "";
+  child.stderr.on("data", (d) => (err += d));
+  const exited = new Promise((resolve) => child.on("exit", resolve));
+  const current = join(t.repo, ".orka", "chain-current");
+  const waitJob = async (not) => {
+    for (let i = 0; i < 400; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      const c = (existsSync(current) ? readFileSync(current, "utf8") : "").trim().split(/\s+/)[1];
+      if (c && c !== not && existsSync(join(t.repo, ".orka", "jobs", `${c}.json`)) && t.read(c).status === "running") return c;
+    }
+    assert.fail(`no job started:\n${err}`);
+  };
+  const toReview = async (id, file) => {
+    const wt = t.read(id).worktree;
+    writeFileSync(join(wt, file), "x\n");
+    await execFileAsync("git", ["add", file], { cwd: wt, env: t.env });
+    await execFileAsync("git", ["commit", "-q", "-m", file], { cwd: wt, env: t.env });
+    const job = t.read(id);
+    Object.assign(job, { status: "review", verifier: { rounds: 1, verdict: "pass", history: [{ round: 1, verdict: "pass", failing: [] }], stale: false } });
+    t.write(id, job);
+  };
+  try {
+    const first = await waitJob();
+    await toReview(first, "one.txt");
+    const second = await waitJob(first);
+    const job2 = t.read(second);
+    assert.equal(job2.stackOn, `orka/${first}`);
+    assert.equal(job2.baseCommit, t.g("rev-parse", `orka/${first}`));
+    assert.ok(existsSync(join(job2.worktree, "one.txt")), "the second task starts from the first one's work");
+    await toReview(second, "two.txt");
+    const code = await Promise.race([exited, new Promise((r) => setTimeout(() => r("timeout"), 20000))]);
+    assert.equal(code, 0, err);
+    assert.match(err, new RegExp(`2 job\\(s\\) wait for one review, oldest first: ${first} \\(orka/${first}\\), ${second} \\(orka/${second}\\); orka approve <id> each`));
+    assert.deepEqual([t.read(first).status, t.read(second).status], ["review", "review"]);
+    assert.match(t.decisions(first), /\tchain\tleft in review \(chain\.signoff end\)/);
+  } finally {
+    if (child.exitCode === null) child.kill();
+  }
 });
