@@ -117,7 +117,7 @@ esac
   g(["worktree", "add", "-q", "-b", `orka/${id}`, wt, "HEAD"]);
   const path = join(repo, ".orka", "jobs", `${id}.json`);
   const job = JSON.parse(readFileSync(path, "utf8"));
-  Object.assign(job, { status: "running", pane: "p-1", agent: "orch", worktree: wt });
+  Object.assign(job, { status: "running", signoff: { round: 1, at: "2026-10-23T00:00:00Z" }, pane: "p-1", agent: "orch", worktree: wt });
   writeFileSync(path, JSON.stringify(job));
   const calls = () => readFileSync(log, "utf8");
   return { repo, wt, id, orka, g, calls, read: () => JSON.parse(readFileSync(path, "utf8")) };

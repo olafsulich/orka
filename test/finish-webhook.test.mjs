@@ -355,6 +355,7 @@ test("pi still refuses orchestrator and worker model flags", async () => {
 function setStatus(box, status) {
   const current = job(box.jobPath);
   current.status = status;
+  if (status === "running") current.signoff = { round: 1, at: "2026-10-23T00:00:00Z" };
   writeFileSync(box.jobPath, JSON.stringify(current, null, 2) + "\n");
 }
 
@@ -450,7 +451,7 @@ test("finish webhook fires and job is done even when every herdr call fails (wor
     writeFileSync(join(bin, "herdr"), `#!/bin/sh\necho '{"error":{"message":"pane not found"}}'\nexit 1\n`);
     chmodSync(join(bin, "herdr"), 0o755);
     const data = job(box.jobPath);
-    Object.assign(data, { status: "running", workspace: "w-1", pane: "p-lead", agent: "lead", workers: [{ name: "w1", pane: "p-gone" }] });
+    Object.assign(data, { status: "running", signoff: { round: 1, at: "2026-10-23T00:00:00Z" }, workspace: "w-1", pane: "p-lead", agent: "lead", workers: [{ name: "w1", pane: "p-gone" }] });
     writeFileSync(box.jobPath, JSON.stringify(data));
     const done = await orka(box.repo, ["done", box.id], { NODE_TLS_REJECT_UNAUTHORIZED: "0", PATH: `${bin}:${process.env.PATH}` });
     assert.equal(done.status, 0, done.stderr);

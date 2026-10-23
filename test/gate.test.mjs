@@ -45,7 +45,7 @@ esac
   execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo });
   execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: repo });
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_READY_WAIT_MS: "3000", ORKA_PROMPT_WAIT_MS: "3000" };
-  const orka = (args) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", repo], { encoding: "utf8", env });
+  const orka = (args, extra = {}) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...env, ...extra } });
   const orkaAsync = async (args, extra = {}) => {
     try {
       const r = await execFileAsync(process.execPath, [ORKA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...env, ...extra } });
@@ -216,7 +216,7 @@ test("approve refuses a job that is not waiting at the gate", () => {
   const id = t.started();
   const r = t.orka(["approve", id]);
   assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /orka approve resumes a job waiting at the direction gate; .* is running/);
+  assert.match(r.stderr, /orka approve needs a job waiting for Olaf: awaiting-direction \(approves the plan\) or review \(signs off the result\); .* is running/);
   const ungated = t.orka(["new", "--title", "u", "--goal", "g", "--no-gate"]).stdout.trim();
   assert.match(t.orka(["approve", ungated]).stderr, /is queued \(gate off: --no-gate\)/);
 });
@@ -251,4 +251,150 @@ test("stop works on a job waiting at the gate", () => {
   const r = t.orka(["stop", id, "not now"]);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(t.read(id).status, "stopped");
+});
+
+// Result review: orka review parks a finished job for Olaf; orka approve in review is his sign-off; orka done waits for it.
+const summary = (t, id, text = "Adds a dark mode toggle in header.js; 3 tests pass.") => {
+  mkdirSync(t.dir(id), { recursive: true });
+  writeFileSync(join(t.dir(id), "summary.txt"), text);
+};
+const branchExists = (t, id) => spawnSync("git", ["show-ref", "--verify", "--quiet", `refs/heads/orka/${id}`], { cwd: t.repo }).status === 0;
+
+test("review: done is refused until orka approve signs off; then done removes only this job's worktree", () => {
+  const t = scratch();
+  const id = t.started("--no-gate");
+  const other = t.started("--no-gate");
+  const wt = t.read(id).worktree;
+  assert.ok(existsSync(wt));
+  const early = t.orka(["done", id]);
+  assert.equal(early.status, 1);
+  assert.match(early.stderr, /no sign-off from Olaf\. Run orka review .* and wait for orka approve /);
+  assert.match(t.orka(["done", id, "--dry-run"]).stdout, /REFUSED, no sign-off/);
+  assert.match(t.orka(["review", id]).stderr, /write .*summary\.txt first/);
+  summary(t, id);
+  const r = t.orka(["review", id]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /review \(round 1\); notification: off/);
+  assert.equal(t.read(id).status, "review");
+  assert.match(t.decisions(id), /\treview\trequest 1: awaiting sign-off\t/);
+  assert.match(t.orka(["review", id]).stderr, /already in review/);
+  assert.match(t.orka(["status", id]).stdout, /review: awaiting Olaf's sign-off since .*orka approve .* signs off the result/);
+  assert.match(t.orka(["digest", id]).stdout, /status: review \(waiting for Olaf: orka approve .* signs off the result/);
+  assert.notEqual(t.orka(["worker", "--job", id, "--name", "late", "--task", "x"]).status, 0, "no worker starts in review");
+  const inReview = t.orka(["done", id]);
+  assert.equal(inReview.status, 1);
+  assert.match(inReview.stderr, /the job is in review, waiting for orka approve/);
+  t.ready(t.read(id).agent);
+  const a = t.orka(["approve", id, "ship it"]);
+  assert.equal(a.status, 0, a.stderr);
+  assert.match(a.stdout, /signed off the result of .* \(review\); the orchestrator runs orka done now/);
+  assert.match(t.calls(), /herdr agent prompt j\w+ Olaf signed off the result: ship it\nRun orka done /);
+  let job = t.read(id);
+  assert.equal(job.status, "review");
+  assert.deepEqual([job.signoff.round, job.signoff.note], [1, "ship it"]);
+  assert.match(t.orka(["digest", id]).stdout, /status: review, signed off by Olaf: run orka done/);
+  const done = t.orka(["done", id]);
+  assert.equal(done.status, 0, done.stderr);
+  assert.match(done.stdout, /cleanup: removed worktree .*branch orka\/.* kept/);
+  job = t.read(id);
+  assert.equal(job.status, "done");
+  assert.ok(!existsSync(wt));
+  assert.ok(branchExists(t, id));
+  assert.equal(t.read(other).status, "running");
+  assert.ok(existsSync(t.read(other).worktree), "the other job's worktree is untouched");
+});
+
+test("review sends the finish webhook with status review", async () => {
+  const hits = [];
+  const server = await listen(hits);
+  const t = scratch();
+  try {
+    const id = t.started("--no-gate");
+    mkdirSync(join(t.repo, ".orka", "secrets"), { recursive: true });
+    writeFileSync(join(t.repo, ".orka", "secrets", "finish-webhook.env"), `WEBHOOK_URL=https://127.0.0.1:${server.port}/hook\nWEBHOOK_KEY=k\n`, { mode: 0o600 });
+    summary(t, id);
+    const r = await t.orkaAsync(["review", id], { NODE_TLS_REJECT_UNAUTHORIZED: "0" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /notification: accepted \(HTTP 204\)/);
+    assert.equal(hits.length, 1);
+    const body = JSON.parse(hits[0].body);
+    assert.equal(body.kind, "review");
+    assert.equal(body.status, "review");
+    assert.equal(body.job, id);
+    assert.match(body.summary, /dark mode toggle/);
+    assert.match(body.question, new RegExp(`orka approve ${id}`));
+    assert.equal(t.read(id).status, "review");
+  } finally {
+    server.close();
+  }
+});
+
+test("review: a steer is a change request; the sign-off is cleared and done is refused again", () => {
+  const t = scratch();
+  const id = t.started("--no-gate");
+  summary(t, id);
+  t.orka(["review", id]);
+  t.turnDone(t.read(id).agent);
+  const s = t.orka(["steer", id, "make the toggle 24px"]);
+  assert.equal(s.status, 0, s.stderr);
+  assert.match(s.stdout, /review: changes requested; running again/);
+  assert.match(t.calls(), /Review: Olaf asks for changes before he signs off\. No sign-off yet; do not run orka done\.\nmake the toggle 24px\n.*run orka review /);
+  const job = t.read(id);
+  assert.equal(job.status, "running");
+  assert.equal(job.signoff, undefined);
+  assert.match(t.decisions(id), /\treview\tsteer: changes requested\tmake the toggle 24px\t/);
+  assert.equal(t.orka(["done", id]).status, 1);
+  const r = t.orka(["review", id]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(t.read(id).review.requests, 2);
+});
+
+test("review refuses a failing or stale verifier; give-up and stop need no sign-off", () => {
+  const t = scratch();
+  const id = t.started("--no-gate");
+  summary(t, id);
+  const job = t.read(id);
+  job.verifier = { rounds: 1, verdict: null, history: [] };
+  writeFileSync(join(t.repo, ".orka", "jobs", `${id}.json`), JSON.stringify(job));
+  mkdirSync(join(t.dir(id), "results"), { recursive: true });
+  writeFileSync(join(t.dir(id), "results", "verifier.json"), JSON.stringify({ round: 1, verdict: "fail", failures: [{ check: "toggle", evidence: "no data-theme" }] }));
+  const r = t.orka(["review", id]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /orka review: verifier: fail/);
+  const g = t.orka(["done", id, "--give-up", "needs a design decision"]);
+  assert.equal(g.status, 0, g.stderr);
+  assert.equal(t.read(id).status, "failed");
+  const other = t.started("--no-gate");
+  summary(t, other);
+  t.orka(["review", other]);
+  t.ready(t.read(other).agent);
+  const stop = t.orka(["stop", other]);
+  assert.equal(stop.status, 0, stop.stderr);
+  assert.equal(t.read(other).status, "stopped");
+});
+
+test("approve is refused inside a job pane", () => {
+  const t = scratch();
+  const id = t.started("--no-gate");
+  summary(t, id);
+  t.orka(["review", id]);
+  const r = t.orka(["approve", id], { ORKA_JOB: id });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /refused inside a job pane/);
+  assert.equal(t.read(id).signoff, undefined);
+});
+
+test("orka new does not sweep: a done job's worktree stays until orka cleanup", () => {
+  const t = scratch();
+  const id = t.started("--no-gate");
+  const job = t.read(id);
+  Object.assign(job, { status: "done", finished: new Date().toISOString() });
+  writeFileSync(join(t.repo, ".orka", "jobs", `${id}.json`), JSON.stringify(job));
+  const r = t.orka(["new", "--title", "next", "--goal", "g", "--no-gate"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /cleanup:/);
+  assert.ok(existsSync(job.worktree));
+  const c = spawnSync("timeout", ["60", process.execPath, ORKA, "cleanup", "--cwd", t.repo], { encoding: "utf8", env: { ...process.env, PATH: `${join(t.base, "bin")}:${process.env.PATH}`, HOME: join(t.base, "home"), XDG_RUNTIME_DIR: join(t.base, "run"), AGENT_BROWSER_SOCKET_DIR: "" } });
+  assert.match(c.stdout, /cleanup: removed worktree/);
+  assert.ok(!existsSync(job.worktree));
 });

@@ -34,7 +34,7 @@ function makeJob(t, extra = {}) {
   const id = t.orka(["new", "--kind", "pi", "--title", "v", "--goal", "g"]).stdout.trim();
   const path = join(t.repo, ".orka", "jobs", `${id}.json`);
   const job = JSON.parse(readFileSync(path, "utf8"));
-  Object.assign(job, { status: "running", pane: "p-1", agent: "orch", worktree: join(t.repo, "wt") }, extra);
+  Object.assign(job, { status: "running", signoff: { round: 1, at: "2026-10-23T00:00:00Z" }, pane: "p-1", agent: "orch", worktree: join(t.repo, "wt") }, extra);
   writeFileSync(path, JSON.stringify(job));
   const results = join(t.repo, ".orka", "jobs", id, "results");
   mkdirSync(results, { recursive: true });
@@ -85,7 +85,7 @@ test("--max-rounds is an opt-in ceiling that refuses a round beyond it", () => {
   const path = join(t.repo, ".orka", "jobs", `${id}.json`);
   const job = JSON.parse(readFileSync(path, "utf8"));
   assert.equal(job.maxRounds, 2);
-  Object.assign(job, { status: "running", pane: "p-1", agent: "orch", worktree: join(t.repo, "wt"), verifier: { rounds: 1, verdict: "fail", history: [] } });
+  Object.assign(job, { status: "running", signoff: { round: 1, at: "2026-10-23T00:00:00Z" }, pane: "p-1", agent: "orch", worktree: join(t.repo, "wt"), verifier: { rounds: 1, verdict: "fail", history: [] } });
   writeFileSync(path, JSON.stringify(job));
   assert.match(t.orka(workerArgs(id)).stdout, /round=2/);
   job.verifier.rounds = 2;

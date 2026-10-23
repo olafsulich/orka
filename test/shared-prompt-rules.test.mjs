@@ -34,7 +34,7 @@ test("never-close-panes constant is used once in each of the three prompts", () 
 test("only the orchestrator gets the diff-based summary rule, before the digest line", () => {
   const orch = fn("orchestratorPrompt");
   assert.equal(count(orch, "SUMMARY_FROM_DIFF(job)"), 1);
-  assert.ok(orch.indexOf("SUMMARY_FROM_DIFF(job)") < orch.indexOf("Before orka done, run orka digest"));
+  assert.ok(orch.indexOf("SUMMARY_FROM_DIFF(job)") < orch.indexOf("Before orka review, run orka digest"));
   assert.doesNotMatch(fn("workerPrompt"), /SUMMARY_FROM_DIFF/);
   assert.doesNotMatch(fn("verifierPrompt"), /SUMMARY_FROM_DIFF/);
 });

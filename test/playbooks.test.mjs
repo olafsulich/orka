@@ -64,7 +64,7 @@ echo "  -h, --help        help"
 
 function running(t, id) {
   const job = t.read(id);
-  Object.assign(job, { status: "running", pane: "p-1", agent: "orch", worktree: join(t.repo, "wt") });
+  Object.assign(job, { status: "running", signoff: { round: 1, at: "2026-10-23T00:00:00Z" }, pane: "p-1", agent: "orch", worktree: join(t.repo, "wt") });
   writeFileSync(t.jobFile(id), JSON.stringify(job));
 }
 

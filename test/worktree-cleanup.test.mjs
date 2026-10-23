@@ -31,8 +31,7 @@ function scratch() {
   return { repo, orka, g };
 }
 
-// A job record (orka new). orka new also runs the cleanup, so create every
-// record first, then give each its worktree and status with setup().
+// A job record (orka new); give it its worktree and status with setup().
 function newJob(t, title = "w") {
   const id = t.orka(["new", "--kind", "pi", "--title", title, "--goal", "g"]).stdout.trim();
   const path = join(t.repo, ".orka", "jobs", `${id}.json`);
@@ -47,7 +46,7 @@ function setup(t, j, status, patch = {}) {
   t.g(["add", "file.txt"], j.wt);
   t.g(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "work"], j.wt);
   const rec = JSON.parse(readFileSync(j.path, "utf8"));
-  Object.assign(rec, { status, worktree: j.wt }, patch);
+  Object.assign(rec, { status, worktree: j.wt }, status === "running" ? { signoff: { round: 1, at: "2026-10-23T00:00:00Z" } } : {}, patch);
   writeFileSync(j.path, JSON.stringify(rec));
   return j;
 }

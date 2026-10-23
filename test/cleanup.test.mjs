@@ -42,7 +42,8 @@ function newJob(t, extra = {}) {
 
 function patchJob(j, status, extra = {}) {
   const job = JSON.parse(readFileSync(j.path, "utf8"));
-  Object.assign(job, { status, workspace: "w-1", browserSessions: [`${j.prefix}-w1`] }, extra);
+  // A running job carries Olaf's sign-off, so orka done is allowed.
+  Object.assign(job, { status, workspace: "w-1", browserSessions: [`${j.prefix}-w1`] }, status === "running" ? { signoff: { round: 1, at: "2026-10-23T00:00:00Z" } } : {}, extra);
   writeFileSync(j.path, JSON.stringify(job));
   return j;
 }

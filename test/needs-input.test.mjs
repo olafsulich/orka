@@ -87,6 +87,13 @@ test("idle while awaiting direction does not post: orka propose already notified
   assert.equal(h.posts.length, 0);
 });
 
+test("idle in review does not post: orka review already notified", async () => {
+  const review = { id: "j1", title: "T", status: "review" };
+  const h = harness({ statuses: ["idle", "idle", "idle", "unknown", "unknown", "unknown"], panes: ["waiting for sign-off"], jobs: [review] });
+  await run(h);
+  assert.equal(h.posts.length, 0);
+});
+
 test("idle then resume does not post", async () => {
   const h = harness({ statuses: ["idle", "working", "unknown", "unknown", "unknown"], jobs: [running] });
   await run(h);
