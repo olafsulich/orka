@@ -58,7 +58,7 @@ echo "  -h, --help        help"
   };
   const jobFile = (id) => join(repo, ".orka", "jobs", `${id}.json`);
   const read = (id) => JSON.parse(readFileSync(jobFile(id), "utf8"));
-  const mk = (...extra) => orka(["new", "--kind", "claude", "--title", "rf", "--goal", "g", ...extra]);
+  const mk = (...extra) => orka(["new", "--kind", "claude", "--title", "rf", "--goal", "g", "--no-gate", ...extra]);
   return { repo, log, orka, config, read, jobFile, mk, calls: () => readFileSync(log, "utf8") };
 }
 

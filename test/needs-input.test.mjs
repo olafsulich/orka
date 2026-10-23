@@ -80,6 +80,13 @@ test("idle without done fires once", async () => {
   assert.equal(h.posts[0].status, "idle");
 });
 
+test("idle while awaiting direction does not post: orka propose already notified", async () => {
+  const awaiting = { id: "j1", title: "T", status: "awaiting-direction" };
+  const h = harness({ statuses: ["idle", "idle", "idle", "unknown", "unknown", "unknown"], panes: ["approach written; waiting"], jobs: [awaiting] });
+  await run(h);
+  assert.equal(h.posts.length, 0);
+});
+
 test("idle then resume does not post", async () => {
   const h = harness({ statuses: ["idle", "working", "unknown", "unknown", "unknown"], jobs: [running] });
   await run(h);

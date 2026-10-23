@@ -66,8 +66,11 @@ const VALUE_FLAGS = new Set([
   "orphan-hours",
   "worker",
 ]);
-const BOOL_FLAGS = new Set(["dry-run", "help", "force", "keep", "base", "ui"]);
+const BOOL_FLAGS = new Set(["dry-run", "help", "force", "keep", "base", "ui", "no-gate"]);
 const FINISH_STATUSES = new Set(["done", "failed", "stopped"]);
+// Direction gate: a new-feature job pauses here after planning until orka approve (or orka steer revises the plan).
+const AWAITING = "awaiting-direction";
+const APPROACH_MAX = 2000;
 const VERIFIER_NAME = "verifier";
 const FINISH_TIMEOUT_MS = 8000;
 
@@ -1569,6 +1572,18 @@ const INVESTIGATION_FLOW = (job, dir) => ({
 });
 const PLAYBOOK_FLOW = { investigation: INVESTIGATION_FLOW };
 
+function gatePromptLines(job, dir) {
+  if (!gatePending(job)) return [];
+  return [
+    `DIRECTION GATE (on: this is a new feature). Plan first, then wait for Olaf's direction before building:`,
+    `1. Plan only. Read what you need. You may start research workers (names starting with research); orka refuses builder and verifier workers until the approach is approved.`,
+    `2. Write ${dir}/approach.md, a few lines: What (the outcome), How (the approach), Files (what will change), Risks.`,
+    `3. Run orka propose ${job.id}. It sets the job to ${AWAITING} and notifies Olaf. Then stop and wait; do not build.`,
+    `4. orka approve sends you "Direction approved": then split and build as below. orka steer sends a revision: update approach.md, run orka propose ${job.id} again, and wait again.`,
+    ``,
+  ];
+}
+
 function orchestratorPrompt(job) {
   const dir = jobDir(job.repo, job.id);
   const pi = job.kind === "pi";
@@ -1588,6 +1603,7 @@ function orchestratorPrompt(job) {
     `Goal:`,
     job.goal.trim(),
     ``,
+    ...gatePromptLines(job, dir),
     `Start each worker with orka, which opens a Herdr pane in this same worktree:`,
     `  orka worker --job ${job.id} --name <worker> --task "<task>"`,
     `If orka is not on PATH, run ${ORKA} instead. The binary is the same file.`,
@@ -1686,9 +1702,33 @@ function assignClaudeModels(job, args) {
   job.model = models.orchestratorModel;
 }
 
+// The direction gate is on for new-feature jobs. Off with --no-gate, for any other playbook, and when the
+// intake says it is a fix or trivial (title starts with fix/bug/hotfix/typo, or a "Kind: bugfix|trivial" line).
+const GATE_SKIP_TITLE = /^\s*(fix|bug|bugfix|hotfix|typo|trivial)\b/i;
+const GATE_SKIP_KIND = /^\s*kind:\s*(bug-?fix|fix|trivial)\s*$/im;
+
+function decideGate(args, playbook, title, goal) {
+  if (args["no-gate"]) return { on: false, reason: "--no-gate" };
+  if (playbook !== "feature") return { on: false, reason: `playbook ${playbook}` };
+  if (GATE_SKIP_TITLE.test(String(title))) return { on: false, reason: "intake: title names a fix or trivial change" };
+  if (GATE_SKIP_KIND.test(String(goal))) return { on: false, reason: `intake: ${GATE_SKIP_KIND.exec(String(goal))[0].trim()}` };
+  return { on: true, reason: "new feature", state: "planning" };
+}
+
+function gateLine(job) {
+  const g = job.gate;
+  if (!g) return "";
+  if (!g.on) return `gate: off (${g.reason})`;
+  if (job.status === AWAITING) return `gate: awaiting direction since ${g.proposedAt} (proposal ${g.proposals || 1}); orka approve ${job.id} or orka steer ${job.id} "..."`;
+  if (g.state === "approved") return `gate: approved ${g.approvedAt}`;
+  return `gate: on, ${g.state === "revising" ? "revising the approach" : "planning"} (builders wait for orka approve)`;
+}
+
+const gatePending = (job) => Boolean(job.gate?.on) && job.gate.state !== "approved";
+
 async function cmdNew(args) {
   if ("model" in args) fail("use --worker-model on orka new, not --model");
-  allowFlags(args, ["cwd", "title", "goal", "kind", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds", "ui", "playbook"]);
+  allowFlags(args, ["cwd", "title", "goal", "kind", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds", "ui", "playbook", "no-gate"]);
   const title = args.title;
   const goal = args.goal;
   const kind = args.kind || "claude";
@@ -1731,6 +1771,7 @@ async function cmdNew(args) {
     workerModel,
     ...(verifierModel ? { verifierModel, verifierSource: verifier.source } : {}),
     playbook,
+    gate: decideGate(args, playbook, title, goal),
     jobType: detected.jobType,
     ...(detected.reason ? { jobTypeReason: detected.reason } : {}),
     workers: [],
@@ -1813,7 +1854,7 @@ function startLead(job) {
 
 async function cmdRun(args) {
   if ("model" in args) fail("use --orchestrator-model and --worker-model on orka run, not --model");
-  allowFlags(args, ["cwd", "dry-run", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds", "ui", "playbook"]);
+  allowFlags(args, ["cwd", "dry-run", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds", "ui", "playbook", "no-gate"]);
   const id = args._[1];
   if (!id) fail("need id");
   const repo = requireRepo(args.cwd || process.cwd());
@@ -1822,6 +1863,8 @@ async function cmdRun(args) {
   assignClaudeModels(job, args);
   const playbook = parsePlaybook(args);
   if (playbook) job.playbook = playbook;
+  // Jobs filed before the gate existed have no job.gate and run ungated.
+  if (job.gate && (playbook || args["no-gate"])) job.gate = decideGate(args, job.playbook || "feature", job.title, job.goal);
   if (!args["dry-run"]) sweepQuietly(repo);
   if (!args["dry-run"] || job.port == null) await assignPorts(repo, job);
   if (args.keep) job.keep = true;
@@ -1945,6 +1988,11 @@ function cmdWorker(args) {
   const role = parseRole(args);
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, String(id));
+  // A dry run starts nothing, so only a real start is held at the gate.
+  if (!args["dry-run"] && job.status === AWAITING) fail(`job ${id} waits at the direction gate for orka approve; no worker starts until then`);
+  if (!args["dry-run"] && gatePending(job) && (role === "verifier" || !/^research/.test(String(requested)))) {
+    fail(`direction gate: job ${id} has no approved approach yet; only research workers (name research...) may start. Write approach.md, run orka propose ${id}, and wait for orka approve.`);
+  }
   if (role === "verifier" && !args["dry-run"]) recordVerifier(repo, job);
   checkRole(role, String(requested), job);
   const first = freeWorkerName(job, String(requested));
@@ -2055,6 +2103,8 @@ function cmdStatus(args) {
     console.log(`  worktree: ${job.worktree || "(not created)"}`);
     console.log(`  layout: ${job.workerLayout || "shared-worktree"}`);
     console.log(`  playbook: ${job.playbook || "feature"}`);
+    if (gateLine(job)) console.log(`  ${gateLine(job)}`);
+    if (job.status === AWAITING && job.gate?.approach) for (const l of job.gate.approach.split("\n").slice(0, 12)) console.log(`    ${l}`);
     if (job.port != null) console.log(`  port: ${job.port}${Array.isArray(job.ports) && job.ports.length > 1 ? ` ports=${job.ports.join(",")}` : ""}`);
     if (roundOf(job) > 1) console.log(`  round: ${roundOf(job)} (follow-up)`);
     if (job.watcherPid && job.status === "running") console.log(`  watcher: pid ${job.watcherPid}`);
@@ -2271,14 +2321,17 @@ function cmdSteer(args) {
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, id);
   const finished = FINISH_STATUSES.has(job.status);
-  if ((job.status !== "running" && !finished) || !job.agent) fail(`${id} is ${job.status}; not steered`);
+  const awaiting = job.status === AWAITING;
+  if ((job.status !== "running" && !finished && !awaiting) || !job.agent) fail(`${id} is ${job.status}; not steered`);
   // A finished job can be steered while its orchestrator pane is still open:
   // that starts a follow-up round, and the next orka done sends the wake again.
   if (finished && (job.workspaceClosed || !agentExists(job.agent))) {
     fail(`${id} is ${job.status} and its orchestrator pane is gone; not steered`);
   }
   const digest = renderDigest(digestView(job), collectDigestFiles(repo, job));
-  const sent = promptWithRetry(job.agent, steerText(digest, message));
+  // At the gate a steer revises the plan: the orchestrator rewrites approach.md and proposes again.
+  const text = awaiting ? `Direction gate: Olaf asks you to revise the approach, not to build yet.\n${message}\nUpdate ${join(jobDir(repo, id), "approach.md")}, run orka propose ${id} again, and wait.` : message;
+  const sent = promptWithRetry(job.agent, steerText(digest, text));
   const now = new Date().toISOString();
   if (!sent.ok) {
     job.steers = job.steers || [];
@@ -2296,9 +2349,14 @@ function cmdSteer(args) {
     job.status = "running";
     job.stopReason = "";
   }
+  if (awaiting) {
+    job.status = "running";
+    job.gate = { ...job.gate, state: "revising" };
+    appendDecision(repo, id, ["gate", "steer: revise the approach", message, "approach.md", "revising"]);
+  }
   save(repo, job);
   if (finished) startWatcher(repo, job);
-  console.log(finished ? `steered ${id} (follow-up round ${job.round}; run orka done ${id} when finished)` : `steered ${id}`);
+  console.log(finished ? `steered ${id} (follow-up round ${job.round}; run orka done ${id} when finished)` : awaiting ? `steered ${id} (direction gate: revising the approach; it proposes again)` : `steered ${id}`);
 }
 
 function agentExists(name) {
@@ -2320,8 +2378,9 @@ async function cmdStop(args) {
   const reason = args._.slice(2).join(" ").trim() || "stopped by request";
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, id);
+  const live = job.status === "running" || job.status === AWAITING;
   if (args["dry-run"]) {
-    if (job.status !== "running" && job.status !== "queued") {
+    if (!live && job.status !== "queued") {
       console.log(`dry-run stop ${id}: already ${job.status}; no status change; no finish webhook`);
       return;
     }
@@ -2332,12 +2391,12 @@ async function cmdStop(args) {
     releaseJob(repo, job, { dryRun: true, keep: args.keep });
     return;
   }
-  if (job.status !== "running" && job.status !== "queued") {
+  if (!live && job.status !== "queued") {
     console.log(`${id} is already ${job.status}`);
     return;
   }
   let how = "recorded";
-  if (job.status === "running") {
+  if (live) {
     let ok = false;
     if (job.agent) {
       const lead = interrupt(job.agent);
@@ -2377,6 +2436,7 @@ async function cmdDone(args) {
   const repo = requireRepo(args.cwd || process.cwd());
   const job = load(repo, id);
   if (job.status === "queued") fail(`orka done: ${id} is queued, not running; nothing finished`);
+  if (job.status === AWAITING) fail(`orka done: ${id} is waiting at the direction gate; orka approve ${id}, orka steer ${id} "...", or orka stop ${id}`);
   const terminal = job.status !== "running";
   if (args["dry-run"]) {
     if (terminal) {
@@ -3216,6 +3276,82 @@ async function cmdWatch(args) {
   log(`exit: ${result.exit}`);
 }
 
+function readApproach(repo, id) {
+  const path = join(jobDir(repo, id), "approach.md");
+  if (!existsSync(path)) fail(`no approach.md for ${id}: write ${path} (What / How / Files / Risks) first`);
+  const text = readCapped(path, FILE_READ_MAX).text.trim();
+  if (!text) fail(`${path} is empty`);
+  return { path, text: text.length > APPROACH_MAX ? `${text.slice(0, APPROACH_MAX)}\n[cut at ${APPROACH_MAX} characters; see ${path}]` : text };
+}
+
+// The orchestrator runs this after planning: the job pauses at the gate and Olaf is notified once per proposal.
+async function cmdPropose(args) {
+  allowFlags(args, ["cwd", "dry-run"]);
+  const id = args._[1];
+  if (!id) fail("need: orka propose <id>");
+  const repo = requireRepo(args.cwd || process.cwd());
+  const job = load(repo, id);
+  if (!job.gate?.on) fail(`job ${id} has no direction gate (${job.gate?.reason || "filed before the gate"}); build it`);
+  if (job.gate.state === "approved") fail(`job ${id}: the approach is already approved; build it`);
+  if (job.status === AWAITING) fail(`job ${id} is already awaiting direction; wait for orka approve or orka steer`);
+  if (job.status !== "running") fail(`job ${id} is ${job.status}, not running`);
+  const approach = readApproach(repo, id);
+  const payload = {
+    kind: AWAITING,
+    job: job.id,
+    title: job.title,
+    status: AWAITING,
+    branch: brand.jobBranch(job),
+    approach: approach.text,
+    question: `Direction for "${job.title}"? Approve: orka approve ${job.id}. Revise: orka steer ${job.id} "<what to change>".`,
+  };
+  const cfg = readFinishConfig(repo);
+  if (args["dry-run"]) {
+    console.log(`dry-run propose ${id}: running -> ${AWAITING}`);
+    console.log(`payload: ${JSON.stringify(payload)}`);
+    console.log(`notify: ${cfg.off ? "off" : cfg.error ? `invalid: ${cfg.error}` : cfg.origin}`);
+    return;
+  }
+  const now = new Date().toISOString();
+  job.status = AWAITING;
+  job.updated = now;
+  job.gate = { ...job.gate, state: "awaiting", proposedAt: now, proposals: (job.gate.proposals || 0) + 1, approach: approach.text };
+  save(repo, job);
+  appendDecision(repo, id, ["gate", `proposal ${job.gate.proposals}: awaiting direction`, "new-feature job, direction gate on", approach.path, AWAITING]);
+  let notified = "off";
+  if (cfg.error) notified = `invalid config: ${cfg.error}`;
+  else if (!cfg.off) {
+    const sent = await postFinish(cfg, payload);
+    notified = `${sent.outcome}${sent.http ? ` (HTTP ${sent.http})` : ""}`;
+  }
+  job.gate.notified = notified;
+  save(repo, job);
+  console.log(`${id} ${AWAITING} (proposal ${job.gate.proposals}); notification: ${notified}`);
+  console.log(`approve: orka approve ${id}   revise: orka steer ${id} "..."`);
+}
+
+// Olaf resumes a job paused at the direction gate. Only that: approve-and-lock of finished work, if built, needs another name.
+function cmdApprove(args) {
+  allowFlags(args, ["cwd"]);
+  const id = args._[1];
+  if (!id) fail('need: orka approve <id> ["note"]');
+  const note = args._.slice(2).join(" ").trim();
+  const repo = requireRepo(args.cwd || process.cwd());
+  const job = load(repo, id);
+  if (job.status !== AWAITING) fail(`orka approve resumes a job waiting at the direction gate; ${id} is ${job.status}${job.gate?.on ? "" : ` (gate ${job.gate ? `off: ${job.gate.reason}` : "not used"})`}`);
+  if (!job.agent || !agentExists(job.agent)) fail(`${id}: the orchestrator pane is gone; cannot resume`);
+  const text = `Direction approved by Olaf${note ? `: ${note}` : "."}\nBuild it now, following ${join(jobDir(repo, id), "approach.md")}${note ? " and the note above" : ""}: split into worker tasks and continue with the flow in your first prompt.`;
+  const sent = promptWithRetry(job.agent, text);
+  if (!sent.ok) fail(`approve not delivered: ${sent.reason}; the job stays ${AWAITING}`);
+  const now = new Date().toISOString();
+  job.status = "running";
+  job.updated = now;
+  job.gate = { ...job.gate, state: "approved", approvedAt: now, ...(note ? { note } : {}) };
+  save(repo, job);
+  appendDecision(repo, id, ["gate", "approved", note || "approach accepted", "orka approve", "building"]);
+  console.log(`approved ${id}; the orchestrator builds now`);
+}
+
 function help() {
   console.log(`orka — one job in a linked worktree
 
@@ -3233,6 +3369,9 @@ function help() {
   orka status [id] [--cwd <repo>]
   orka digest <id> [--cwd <repo>]
   orka steer <id> "message"   (also on a finished job whose orchestrator pane is still open: starts a follow-up round)
+  orka propose <id> [--dry-run]   (orchestrator, direction gate: approach.md written; pause and notify Olaf)
+  orka approve <id> ["note"]   (resume a job waiting at the direction gate; orka steer revises the plan instead)
+  orka new ... --no-gate   (skip the direction gate; it is on for new-feature jobs, off for other playbooks and fixes)
   orka stop <id> [reason] [--dry-run] [--keep]
   orka strategy <id> [--premise "<shared premise>"] "<what changed>"
   orka log <id> <phase> <decision> <why> <evidence> <result>   (appends a row to .orka/jobs/<id>/decisions.tsv)
@@ -3393,6 +3532,8 @@ async function main() {
   else if (cmd === "cleanup") cmdCleanup(args);
   else if (cmd === "reap") cmdReap(args);
   else if (cmd === "watch") await cmdWatch(args);
+  else if (cmd === "propose") await cmdPropose(args);
+  else if (cmd === "approve") cmdApprove(args);
   else fail(`unknown command ${cmd}\nrun: orka help`);
 }
 
