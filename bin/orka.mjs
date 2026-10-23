@@ -4976,14 +4976,6 @@ function chainSignoff(repo, flag, { dry = false } = {}) {
   return mode;
 }
 
-function readRepoConfig(repo) {
-  try {
-    return JSON.parse(readFileSync(configPath(repo), "utf8")) || {};
-  } catch {
-    return {};
-  }
-}
-
 async function cmdChain(args) {
   allowFlags(args, ["cwd", "dry-run", "signoff"]);
   const repo = requireRepo(args.cwd || process.cwd());
