@@ -2378,12 +2378,11 @@ function guardLimitsOf(repo) {
   return guard.guardLimits(cfg, (key) => brand.env(key));
 }
 
-// Live agent panes: herdr panes with an agent (agent_status other than unknown).
-// When herdr cannot list panes, the panes this repo's running jobs hold.
+// Orka's own live panes on this host (ORKA_JOB-tagged pane shells, any repo); Olaf's other Herdr
+// panes do not count. When /proc cannot be read, the panes this repo's running jobs hold.
 function livePaneCount(repo) {
-  const got = herdr(["pane", "list"], 10000);
-  const panes = got.json?.result?.panes;
-  if (got.code === 0 && Array.isArray(panes)) return panes.filter((p) => p?.agent_status && p.agent_status !== "unknown").length;
+  const tagged = guard.orkaPaneCount(browsers.procRootOf());
+  if (tagged !== null) return tagged;
   return loadAllJobs(repo)
     .filter((j) => j.status === "running")
     .reduce((n, j) => n + (j.pane ? 1 : 0) + (j.workers || []).filter((w) => w.pane && !w.closed && w.pane !== j.pane).length, 0);
@@ -4727,7 +4726,7 @@ Verifier (both kinds)
   It does not change job.verify.
 
 A prompt that is still idle after ~8s is sent once more.
-status reads the job file plus herdr pane list for the host line. One job also prints the finish-wake record and verify.
+status reads the job file; the host line counts Orka's own panes (ORKA_JOB-tagged, from /proc). One job also prints the finish-wake record and verify.
 stop interrupts the lead and workers, then marks stopped. It does not close the workspace.
 done marks a running job done (default reason "completed") and sends the finish wake. It refuses a queued job and leaves a finished one alone.
 done does not close the orchestrator pane or the workspace: Olaf may still want to give feedback (see Follow-up rounds).
@@ -4779,7 +4778,8 @@ Shared dependencies
   differs. orka run and every orka worker repair a missing or broken link.
 
 Memory guard
-  orka worker checks MemAvailable and live agent panes before it starts a pane. When tight it queues (.orka/queue/)
+  orka worker checks MemAvailable and Orka's live panes (ORKA_JOB-tagged pane shells on the host, not
+  Olaf's other Herdr panes) before it starts a pane. When tight it queues (.orka/queue/)
   and waits, then refuses past the limit. "memoryGuard": {"minAvailableMb":1024,"maxPanes":20,"wait":"8m","poll":"15s"}
   in .orka/config.json, or ORKA_MIN_MEM_MB, ORKA_MAX_PANES, ORKA_GUARD_WAIT, ORKA_GUARD_POLL, ORKA_MEMORY_GUARD=off.
   Logged to decisions.tsv; orka status shows memory, live panes and the queue. No disk guard.
