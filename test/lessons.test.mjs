@@ -89,6 +89,23 @@ test("lessons are skipped when the worktree is not on the job branch", () => {
   assert.doesNotMatch(readFileSync(join(t.job.worktree, "specs", "dark-mode", "spec.md"), "utf8"), /## Lessons/);
 });
 
+test("an L0 repo skips the lessons commit and leaves the spec untouched", () => {
+  const t = spedJob();
+  assert.equal(t.orka(["autonomy", "set", "L0"]).status, 0);
+  const headBefore = t.g("-C", t.job.worktree, "rev-parse", "HEAD");
+  const dry = t.orka(["done", t.id, "--dry-run"]);
+  assert.match(dry.stdout, /lessons: skipped \(5 found; the repo is at autonomy L0, read-only: no lessons commit\)/);
+  const r = t.orka(["done", t.id]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^done /m);
+  assert.match(r.stdout, /lessons: skipped \(5 found; the repo is at autonomy L0/);
+  assert.equal(t.g("-C", t.job.worktree, "rev-parse", "HEAD"), headBefore);
+  assert.equal(t.g("-C", t.job.worktree, "status", "--porcelain", "--", "specs"), "");
+  assert.doesNotMatch(t.branchSpec(), /## Lessons/);
+  assert.equal(t.read(t.id).lessons, undefined);
+  assert.match(readFileSync(join(t.repo, ".orka", "jobs", t.id, "decisions.tsv"), "utf8"), /\tlessons\t5 not written\trepo at autonomy L0, read-only\t-\tskipped/);
+});
+
 test("a job without a spec prints no lessons line", () => {
   const t = specScratch("orka-lessons-");
   const id = t.orka(["new", "--title", "plain", "--goal", "g"]).stdout.trim();

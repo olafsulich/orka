@@ -1788,12 +1788,14 @@ function specPromptLines(job) {
 
 // The direction gate is on for new-feature jobs. Off with --no-gate, for any other playbook, and when the
 // intake says it is a fix or trivial (title starts with fix/bug/hotfix/typo, or a "Kind: bugfix|trivial" line).
+// A --spec job takes Kind: from the spec header (specKind), which the spec intake goal does not carry.
 const GATE_SKIP_TITLE = /^\s*(fix|bug|bugfix|hotfix|typo|trivial)\b/i;
 const GATE_SKIP_KIND = /^\s*kind:\s*(bug-?fix|fix|trivial)\s*$/im;
 
-function decideGate(args, playbook, title, goal) {
+function decideGate(args, playbook, title, goal, specKind = "") {
   if (args["no-gate"]) return { on: false, reason: "--no-gate" };
   if (playbook !== "feature") return { on: false, reason: `playbook ${playbook}` };
+  if (specKind && GATE_SKIP_KIND.test(`Kind: ${specKind}`)) return { on: false, reason: `spec: Kind: ${specKind}` };
   if (GATE_SKIP_TITLE.test(String(title))) return { on: false, reason: "intake: title names a fix or trivial change" };
   if (GATE_SKIP_KIND.test(String(goal))) return { on: false, reason: `intake: ${GATE_SKIP_KIND.exec(String(goal))[0].trim()}` };
   return { on: true, reason: "new feature", state: "planning" };
@@ -1858,7 +1860,7 @@ async function cmdNew(args) {
     workerModel,
     ...(verifierModel ? { verifierModel, verifierSource: verifier.source } : {}),
     playbook,
-    gate: decideGate(args, playbook, title, goal),
+    gate: decideGate(args, playbook, title, goal, spec?.parsed.kind),
     jobType: detected.jobType,
     ...(detected.reason ? { jobTypeReason: detected.reason } : {}),
     workers: [],
@@ -1872,7 +1874,7 @@ async function cmdNew(args) {
     created: new Date().toISOString(),
   };
   if (maxRounds) job.maxRounds = maxRounds;
-  if (spec) job.spec = { path: spec.rel, feature: spec.feature, commit: spec.commit };
+  if (spec) job.spec = { path: spec.rel, feature: spec.feature, commit: spec.commit, ...(spec.parsed.kind ? { kind: spec.parsed.kind } : {}) };
   sweepQuietly(repo);
   await assignPorts(repo, job);
   const head = git(repo, ["rev-parse", "--verify", "--quiet", "HEAD"]);
@@ -1953,7 +1955,7 @@ async function cmdRun(args) {
   const playbook = parsePlaybook(args);
   if (playbook) job.playbook = playbook;
   // Jobs filed before the gate existed have no job.gate and run ungated.
-  if (job.gate && (playbook || args["no-gate"])) job.gate = decideGate(args, job.playbook || "feature", job.title, job.goal);
+  if (job.gate && (playbook || args["no-gate"])) job.gate = decideGate(args, job.playbook || "feature", job.title, job.goal, job.spec?.kind);
   if (!args["dry-run"]) sweepQuietly(repo);
   if (!args["dry-run"] || job.port == null) await assignPorts(repo, job);
   if (args.keep) job.keep = true;
@@ -2546,6 +2548,12 @@ function appendSpecLessons(repo, job, { dry = false } = {}) {
   const rows = decisionRows(repo, job.id).map((row) => row.split("\t"));
   const lessons = specs.collectLessons({ job, rows, evidence: checkEvidence(repo, job) });
   if (!lessons.length) return say("none to add");
+  // L0 is read-only: the commit would be refused, and a written but uncommitted spec would dirty the worktree.
+  const { level } = autonomy.readLevel(repo);
+  if (!autonomy.allows(level, "commit").ok) {
+    if (!dry) appendDecision(repo, job.id, ["lessons", `${lessons.length} not written`, `repo at autonomy ${level}, read-only`, "-", "skipped"]);
+    return say(`skipped (${lessons.length} found; the repo is at autonomy ${level}, read-only: no lessons commit)`);
+  }
   const before = readFileSync(path, "utf8");
   const merged = specs.mergeLessons(before, lessons, { date: new Date().toISOString().slice(0, 10), jobId: job.id });
   if (!merged.added && !merged.bumped) return say(`${lessons.length} already in ${job.spec.path}`);
