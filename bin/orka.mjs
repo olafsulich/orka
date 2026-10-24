@@ -1027,9 +1027,12 @@ function assertAgentName(name) {
 
 // sessionId names the agent's transcript (claude and pi both take --session-id), so orka reads
 // the right file when it measures context; every pane of a job shares one transcript folder.
-function startArgs(name, pane, kind, alias, sessionId, job = null) {
+// resume (orka resume): claude reopens the session with --resume <id>; pi's --session-id already
+// continues an existing session of that id.
+function startArgs(name, pane, kind, alias, sessionId, job = null, { resume = false } = {}) {
   const args = ["agent", "start", name, "--kind", kind, "--pane", pane, "--timeout", "60000"];
-  const extra = [...(kind === "claude" ? ["--model", alias] : []), ...(sessionId ? ["--session-id", sessionId] : []), ...(job ? paneExtras(job, kind) : [])];
+  const session = sessionId ? [resume && kind === "claude" ? "--resume" : "--session-id", sessionId] : [];
+  const extra = [...(kind === "claude" ? ["--model", alias] : []), ...session, ...(job ? paneExtras(job, kind) : [])];
   if (extra.length) args.push("--", ...extra);
   return args;
 }
@@ -3462,10 +3465,11 @@ function steerInbox(repo, job, target, message) {
   const name = lead ? job.agent : rec.name;
   const from = brand.env("JOB") ? "orchestrator" : "olaf";
   const text = lead ? steerText(renderDigest(digestView(job), collectDigestFiles(repo, job)), message) : `orka inbox: a message for you from the ${from}:\n${message}`;
+  const status = agentStatus(name);
+  if (lead && status === "unknown" && !agentExists(name)) fail(paneGone(id, "not steered"));
   const file = inbox.enqueue(dir, target, { from, message, text });
   let delivery = "inbox";
   let reason = "";
-  const status = agentStatus(name);
   if (!PENDING.has(rec?.handoff?.state) && context.SAFE_STATUSES.includes(status)) {
     const entries = inbox.claim(dir, target, "orka steer");
     if (entries.length) {
@@ -3512,6 +3516,7 @@ function cmdSteer(args) {
   if (finished && (job.workspaceClosed || !agentExists(job.agent))) {
     fail(`${id} is ${job.status} and its orchestrator pane is gone; not steered`);
   }
+  if ((awaiting || inReview) && !agentExists(job.agent)) fail(paneGone(id, "not steered"));
   if (finished) restoreWorktree(repo, job);
   const digest = renderDigest(digestView(job), collectDigestFiles(repo, job));
   // At the gate a steer revises the plan: the orchestrator rewrites approach.md and proposes again.
@@ -5332,7 +5337,7 @@ function cmdApprove(args) {
 
 function approvePlan(repo, job, note) {
   const id = job.id;
-  if (!job.agent || !agentExists(job.agent)) fail(`${id}: the orchestrator pane is gone; cannot resume`);
+  if (!job.agent || !agentExists(job.agent)) fail(paneGone(id, `the job stays ${AWAITING}`));
   const text = `Direction approved by Olaf${note ? `: ${note}` : "."}\nBuild it now, following ${join(jobDir(repo, id), "approach.md")}${note ? " and the note above" : ""}: split into worker tasks and continue with the flow in your first prompt.`;
   const sent = promptWithRetry(job.agent, text, { readyStatuses: GATE_READY });
   if (!sent.ok) fail(`approve not delivered: ${sent.reason}; the job stays ${AWAITING}`);
@@ -5356,7 +5361,7 @@ function approveResult(repo, job, note, { by = "olaf" } = {}) {
   appendDecision(repo, id, ["review", by === "auto" ? "signed off by orka chain (auto)" : "signed off", note || "result accepted", by === "auto" ? "chain.signoff auto" : "orka approve", "finishing"]);
   const who = by === "auto" ? "orka chain signed off the result automatically (chain.signoff auto)" : "Olaf signed off the result";
   const gone = !job.agent || !agentExists(job.agent);
-  const sent = gone ? { ok: false, reason: "the orchestrator pane is gone" } : promptWithRetry(job.agent, `${who}${note ? `: ${note}` : "."}\nRun orka done ${id} now (or ${ORKA} done ${id}). Start no new work.`, { readyStatuses: GATE_READY });
+  const sent = gone ? { ok: false, reason: `the orchestrator pane is gone (orka resume ${id} reattaches it; then orka done ${id} can run)` } : promptWithRetry(job.agent, `${who}${note ? `: ${note}` : "."}\nRun orka done ${id} now (or ${ORKA} done ${id}). Start no new work.`, { readyStatuses: GATE_READY });
   if (by === "auto") return sent;
   if (!sent.ok) {
     console.error(`signed off ${id} (review), but the orchestrator was not prompted: ${sent.reason}. Run orka done ${id} yourself.`);
@@ -5364,6 +5369,119 @@ function approveResult(repo, job, note, { by = "olaf" } = {}) {
     return;
   }
   console.log(`signed off the result of ${id} (review); the orchestrator runs orka done now`);
+}
+
+const RESUMABLE = new Set(["running", AWAITING, REVIEW]);
+
+const paneGone = (id, what) => `${id}: the orchestrator pane is gone (herdr restart, reboot or a closed workspace); ${what}. Run orka resume ${id} to reattach it, then run this again.`;
+
+function paneAlive(pane) {
+  if (!pane) return false;
+  const got = herdr(["pane", "get", pane], 10000);
+  return got.code === 0 && !got.json?.error;
+}
+
+// Where the new orchestrator pane goes: next to the old one if its pane still exists (the agent in it
+// died), else next to a live worker pane, else a new workspace. No pane is closed or reused.
+function resumePlace(job) {
+  const candidates = [job.pane, ...[...(job.workers || [])].reverse().map((w) => w.pane)].filter(Boolean);
+  const from = [...new Set(candidates)].find(paneAlive);
+  return from ? { split: from } : { workspace: true };
+}
+
+// The watcher of a job that is waiting on Olaf or running: stop the recorded one (and any other for this
+// job in this repo), start a fresh one that follows the new pane.
+function restartWatcher(repo, job) {
+  killWatcher(job);
+  for (const w of watch.listWatchers()) {
+    if (w.jobId !== job.id || w.cwd !== repo || w.pid === Number(job.watcherPid)) continue;
+    try {
+      process.kill(w.pid, "SIGTERM");
+    } catch {
+      // gone already
+    }
+  }
+  delete job.watcherPid;
+  if (brand.env("NO_WATCH") === "1") return;
+  try {
+    job.watcherPid = watch.spawnWatcher({ bin: ORKA, jobId: job.id, repo, logPath: join(ensureJobDir(repo, job.id), "watcher.log") });
+  } catch (err) {
+    console.error(`watcher not started: ${err?.message || err}`);
+  }
+}
+
+function resumeLines(job, mode, pane) {
+  const waiting = {
+    [AWAITING]: `Status ${AWAITING}: approach.md is proposed. Start nothing; wait for Olaf's orka approve or orka steer.`,
+    [REVIEW]: `Status ${REVIEW}: the result is waiting for Olaf's sign-off. Start nothing; wait for orka approve (then run orka done ${job.id}) or orka steer.`,
+    running: `Status running: continue the flow where the digest shows it. Workers' panes were not touched: a worker whose result is there is done; start a worker again only when its pane is gone and its result is missing.`,
+  }[job.status];
+  const head =
+    mode === "resume"
+      ? `orka resume: your pane was gone (herdr restart, reboot or a closed workspace), and orka reopened this session in a new pane ${pane}.`
+      : `orka resume: you replace an orchestrator whose pane and session are gone (no transcript was found). You do not have its memory; the digest below, ${decisionsPath(job.repo, job.id)} and the job file are what remains.`;
+  return [head, waiting, `Current state (orka digest ${job.id}):`].join("\n");
+}
+
+// Reattach the orchestrator of a running, awaiting-direction or review job whose pane is gone. The
+// claude session is reopened (--resume <sessionId>; pi continues the same --session-id); with no
+// transcript a fresh orchestrator starts on the first prompt plus the digest. Workers are not touched.
+function cmdResume(args) {
+  allowFlags(args, ["cwd", "dry-run"]);
+  const id = args._[1];
+  if (!id) fail("need: orka resume <id> [--dry-run]");
+  const repo = requireRepo(args.cwd || process.cwd());
+  const job = load(repo, id);
+  if (!RESUMABLE.has(job.status)) {
+    const why = FINISH_STATUSES.has(job.status) ? ` (a finished job: orka steer starts a follow-up round while its pane is open)` : job.status === "queued" ? ` (start it with orka run ${id})` : "";
+    fail(`${id} is ${job.status}; orka resume only reattaches a running, ${AWAITING} or ${REVIEW} job${why}`);
+  }
+  if (!job.worktree || !existsSync(job.worktree)) fail(`${id}: worktree ${job.worktree || "(none)"} is missing; cannot resume`);
+  const name = job.agent || agentName(id);
+  if (agentExists(name)) fail(`${id}: the orchestrator ${name} is still alive (pane ${agentPane(name) || job.pane}); nothing to resume. orka steer ${id} "..." talks to it`);
+  const kind = job.kind === "pi" ? "pi" : "claude";
+  const alias = kind === "claude" ? job.orchestratorModel || job.model : "";
+  if (kind === "claude" && !alias) fail("job has no orchestratorModel");
+  const transcript = context.findTranscript({ kind, cwd: job.worktree, sessionId: job.sessionId, home: homedir() });
+  const mode = transcript ? "resume" : "fresh";
+  const place = resumePlace(job);
+  const where = place.split ? `split from pane ${place.split}` : "a new workspace";
+  if (args["dry-run"]) {
+    console.log(`dry-run resume ${id} (${job.status}): ${mode === "resume" ? `reopen session ${job.sessionId} (${transcript})` : `no transcript for session ${job.sessionId || "(none)"}: fresh orchestrator, first prompt plus digest`}`);
+    console.log(`  pane: ${where}; agent ${name} (${kind}${alias ? ` ${alias}` : ""}); watcher restarted; workers untouched`);
+    return;
+  }
+  const old = { pane: job.pane, sessionId: job.sessionId };
+  let pane;
+  if (place.split) pane = splitPane(place.split, job.worktree, job, "orchestrator");
+  else {
+    const made = createWorkspace(job);
+    pane = made.pane;
+    job.workspace = made.workspace;
+    delete job.workspaceClosed;
+  }
+  const sessionId = mode === "resume" ? job.sessionId : randomUUID();
+  const started = herdr(startArgs(name, pane, kind, alias, sessionId, job, { resume: mode === "resume" }), 90000);
+  assertNotTrustBlocked(repo, kind, pane, "the resumed orchestrator");
+  if (!herdrOk(started)) herdrFail(started, `agent start (resume; the new pane ${pane} stays open)`);
+  const at = new Date().toISOString();
+  // The record first, so the watcher follows the new pane.
+  job.agent = name;
+  job.pane = pane;
+  job.sessionId = sessionId;
+  job.resumes = [...(Array.isArray(job.resumes) ? job.resumes : []), { at, mode, status: job.status, from: old, pane, sessionId }];
+  job.updated = at;
+  save(repo, job);
+  const digest = renderDigest(digestView(job), collectDigestFiles(repo, job));
+  // A reopened session that was waiting on Olaf keeps waiting: orka approve or steer prompts it.
+  const text = mode === "fresh" ? `${leadPrompt(job)}\n\n${resumeLines(job, mode, pane)}\n${digest}` : job.status === "running" ? `${resumeLines(job, mode, pane)}\n${digest}` : "";
+  const sent = text ? promptWithRetry(name, text, job.status === "running" ? {} : { readyStatuses: GATE_READY }) : { ok: true, skipped: true };
+  job.leadDelivery = sent.ok ? "ok" : "failed";
+  restartWatcher(repo, job);
+  save(repo, job);
+  appendDecision(repo, id, ["resume", `orchestrator reattached (${mode === "resume" ? "session reopened" : "fresh, from the digest"})`, `old pane ${old.pane || "-"} gone; status ${job.status}`, mode === "resume" ? transcript : "no transcript", sent.ok ? `pane=${pane}${sent.skipped ? " (waiting on Olaf, not prompted)" : ""}` : `prompt failed: ${sent.reason}`]);
+  if (!sent.ok) fail(`resumed ${id} in pane ${pane}, but the prompt was not delivered: ${sent.reason}`);
+  console.log(`${id} resumed (${mode === "resume" ? `session ${sessionId} reopened` : "fresh orchestrator from the digest"}) pane=${pane} agent=${name}${sent.skipped ? `; ${job.status}: waiting on Olaf (orka approve / orka steer)` : ""}`);
 }
 
 function help() {
@@ -5394,6 +5512,8 @@ function help() {
   orka approve <id> ["note"]   (Olaf only; by status: awaiting-direction -> approves the plan, the orchestrator builds;
            review -> signs off the result, the orchestrator runs orka done. orka steer revises / requests changes instead)
   orka new ... --no-gate   (skip the direction gate; it is on for new-feature jobs, off for other playbooks and fixes)
+  orka resume <id> [--dry-run]   (reattach the orchestrator of a running, awaiting-direction or review job whose pane is gone:
+           reopens its session in a new pane, or starts it fresh from the digest; restarts the watcher; workers untouched)
   orka stop <id> [reason] [--dry-run] [--keep]
   orka strategy <id> [--premise "<shared premise>"] "<what changed>"
   orka log <id> <phase> <decision> <why> <evidence> <result>   (appends a row to .orka/jobs/<id>/decisions.tsv)
@@ -5608,6 +5728,7 @@ async function main() {
   else if (cmd === "review") await cmdReview(args);
   else if (cmd === "handoff") cmdHandoff(args);
   else if (cmd === "wake") cmdWake(args);
+  else if (cmd === "resume") cmdResume(args);
   else fail(`unknown command ${cmd}\nrun: orka help`);
 }
 
