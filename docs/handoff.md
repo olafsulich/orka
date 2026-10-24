@@ -103,6 +103,10 @@ Worker finish wakes and queued steers go to whoever holds the orchestrator's nam
 
 No handoff closes a pane. Old worker and old orchestrator panes stay open and idle until `orka done`, `orka stop` or cleanup closes them with the other worker panes (never the current orchestrator pane). Each handoff keeps one more idle agent process (~300 MB) until then.
 
+## Resume
+
+A handoff replaces a pane that is full. `orka resume <id>` replaces one that is gone: the orchestrator pane of a `running`, `awaiting-direction` or `review` job after a herdr restart, a VPS reboot or a closed workspace. The new pane goes next to a pane of the job that is still open, or into a new workspace. The session is the same one: `claude --resume <sessionId>`, or pi's `--session-id`, which continues an existing session. So the transcript, and the context measuring above, carry on. With no transcript, a fresh orchestrator starts on the first prompt, the digest and a note that it has no memory of the old one; it gets a new `sessionId`. A running orchestrator is told to continue where the digest shows it. One waiting on Olaf is not prompted: `orka approve` or `orka steer` reach it as usual. Workers are not touched. The watcher is restarted, and `job.resumes` and a `resume` row in `decisions.tsv` record the reattachment. A live orchestrator, or a finished or queued job, is refused.
+
 ## Config
 
 ```json

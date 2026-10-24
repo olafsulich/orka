@@ -14,4 +14,4 @@ Orka works in any repo you `init`. Job state lives in that repo, under `.orka/`,
 
 ## v0 skips
 
-Tickets, reviewers, advisors, resume, prune, and diff. Those are not missing by accident.
+Tickets, reviewers, advisors, prune, and diff. Those are not missing by accident.

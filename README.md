@@ -42,6 +42,7 @@ Commands (full flags in [commands.md](docs/commands.md)):
 | `orka propose <id>` | orchestrator: pause at the direction gate, notify ([gate.md](docs/gate.md)) |
 | `orka review <id>` | orchestrator: verifier passed, wait for Olaf's sign-off, notify ([review.md](docs/review.md)) |
 | `orka approve <id>` | Olaf: approve the plan (`awaiting-direction`) or sign off the result (`review`) |
+| `orka resume <id>` | reattach the orchestrator of a job whose pane is gone (herdr restart, reboot) ([handoff.md](docs/handoff.md#resume)) |
 | `orka stop` / `done` | end a job; send the finish wake (`done` needs Olaf's sign-off, or `--give-up`) |
 | `orka strategy` / `log` | record a strategy change / a decision |
 | `orka verify <id>` | browser checks in the worktree |

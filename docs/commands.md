@@ -18,6 +18,7 @@ orka wake <id> [--dry-run]
 orka propose <id> [--dry-run]
 orka review <id> [--dry-run]   # orchestrator: verifier passed, summary.txt written; status review until orka approve
 orka approve <id> ["note"]
+orka resume <id> [--dry-run]   # reattach the orchestrator of a running/awaiting-direction/review job whose pane is gone
 orka stop <id> [reason] [--dry-run] [--keep]
 orka done <id> [reason] [--give-up "<reason>"] [--dry-run] [--keep] [--cwd <repo>]
 orka strategy <id> [--premise "<shared premise>"] "<what changed>"
@@ -49,6 +50,8 @@ Worker briefs: the orchestrator writes every worker `--task` as GOAL / SCOPE / C
 `steer` on a running job writes the message (with a capped digest for the lead) to the target's steer inbox: delivered at once when the target is idle, else by its hook between tool calls or by the watcher once idle. `--to <worker>` messages a worker the same way. It records only the message on the job; digest and status count what is still undelivered. `wake` runs one pass of the watcher's finish wakes and inbox delivery ([workers.md](workers.md)). It also works on a `done`, `failed` or `stopped` job whose orchestrator pane still exists: that starts a follow-up round (see [follow-up.md](follow-up.md)).
 
 `propose` is run by the orchestrator of a gated job after planning: it reads `approach.md` from the job dir, sets `awaiting-direction` and POSTs the approach once. `approve` resumes that job; `steer` on it asks for a revised approach instead. Builders and the verifier are refused until approval; `--no-gate` on `new` (or `run`) skips the gate. See [gate.md](gate.md).
+
+`resume` reattaches the orchestrator of a `running`, `awaiting-direction` or `review` job whose pane is gone (herdr restart, VPS reboot, a closed workspace). It starts a new pane (split next to a pane of the job that is still open, else a new workspace) and reopens the session with `claude --resume <sessionId>` (pi: the same `--session-id`). If the transcript is missing it starts a fresh orchestrator on the first prompt plus `orka digest`. A running job's orchestrator is told to continue; one waiting on Olaf is not prompted. It updates `job.agent`, `job.pane` and `job.sessionId`, records `job.resumes`, logs a `resume` decision and restarts the watcher. It refuses a live orchestrator and a finished or queued job, and it never touches worker panes or closes a pane. `approve` and `steer` on a job whose orchestrator pane is gone say to run `orka resume <id>`. See [handoff.md](handoff.md#resume).
 
 `stop` interrupts the lead and its workers and sets `stopped`. It leaves the Herdr workspace open (see [cleanup.md](cleanup.md)). It does not delete the worktree or the branch. The finish wake, if configured, is sent after that status is saved, then terminal cleanup runs (see [cleanup.md](cleanup.md)). `--dry-run` prints the plan and does not stop or send.
 
