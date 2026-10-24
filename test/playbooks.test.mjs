@@ -240,3 +240,26 @@ test("orka run --playbook investigation sets the playbook on a queued job", () =
   assert.equal(t.read(id).playbook, "investigation");
   assert.match(promptOf(t, id), /Playbook investigation/);
 });
+
+test("every playbook asks for checkable ACCEPTANCE, a 'no external proof' line instead of waiting, and the choices made", () => {
+  for (const name of [undefined, "bug-fix", "investigation", "hillclimb"]) {
+    const prompt = lines(name).join("\n");
+    const label = name || "feature";
+    assert.match(prompt, /ACCEPTANCE must be checkable: each line names its proof, preferably one outside the agents \(a command and its expected output, a test, a number or threshold, an HTTP response, a file diff, or the job's reference artifact such as an image or golden file\)\./, label);
+    assert.match(prompt, /When the goal, spec or incoming brief already names the proof, copy it as-is; do not re-interpret the goal\./, label);
+    assert.match(prompt, /When no outside proof exists \(taste or visual judgement\), do not invent one and do not wait for an answer: make your first status line orka log JOB plan "no external proof: <what is subjective>"/, label);
+    assert.match(prompt, /Every REPORT asks the worker to list its choices made: one line each, "chose X over Y because Z"/, label);
+    assert.match(prompt, /summary\.txt ends with "Choices made:", one line per decision you or the workers made on Olaf's behalf that the goal left open/, label);
+  }
+  assert.match(lines().join("\n"), /Build the verifier --task from the builders' ACCEPTANCE lines \(copy them in with their proof, one per builder\)/);
+});
+
+test("a proof the goal already names reaches the orchestrator verbatim, with the rule to copy it as-is", () => {
+  const t = scratch();
+  const goal = "Add a dark mode toggle.\nACCEPTANCE: `npm test -- dark` prints 3 passing; GET /settings returns 200 with data-theme=dark.";
+  const id = t.orka(["new", "--kind", "claude", "--title", "rf", "--goal", goal, "--no-gate"]).stdout.trim();
+  assert.equal(t.orka(["run", id]).status, 0);
+  const prompt = promptOf(t, id);
+  assert.ok(prompt.includes("ACCEPTANCE: `npm test -- dark` prints 3 passing; GET /settings returns 200 with data-theme=dark."), "the goal's proof is passed through unchanged");
+  assert.ok(prompt.indexOf("copy it as-is") > 0);
+});
