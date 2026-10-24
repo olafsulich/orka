@@ -41,7 +41,7 @@ esac
   const g = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, ...gitEnv } }).trim();
   g("init", "-q", "-b", "main");
   g("commit", "-q", "--allow-empty", "-m", "init");
-  const env = { ...process.env, ...gitEnv, PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), XDG_CONFIG_HOME: join(base, "home", ".config"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_READY_WAIT_MS: "3000", ORKA_PROMPT_WAIT_MS: "3000" };
+  const env = { ...process.env, ...gitEnv, PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), XDG_CONFIG_HOME: join(base, "home", ".config"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off", ORKA_READY_WAIT_MS: "3000", ORKA_PROMPT_WAIT_MS: "3000" };
   const orka = (args, opts = {}) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", opts.cwd || repo], { encoding: "utf8", env: { ...env, ...(opts.env || {}) }, input: opts.input });
   orka(["init"]);
   g("add", ".gitignore");

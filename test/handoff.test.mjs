@@ -55,7 +55,7 @@ esac
   };
   registry(200000);
   const env = {
-    PATH: `${bin}:${process.env.PATH}`, HOME: home, XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1",
+    PATH: `${bin}:${process.env.PATH}`, HOME: home, XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off",
     ORKA_PROMPT_POLL_MS: "10", ORKA_PROMPT_WAIT_MS: "250", ORKA_PROMPT_BACKOFF_MS: "20", ORKA_READY_WAIT_MS: "1500", ORKA_HANDOFF_NUDGE_GRACE_MS: "1",
   };
   const orka = (args) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...process.env, ...env } });
