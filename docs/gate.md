@@ -19,13 +19,24 @@ Jobs filed before the gate existed have no `job.gate` and run ungated.
 ## The flow
 
 1. **Plan.** The orchestrator prompt gets a DIRECTION GATE block. It reads what it needs and may start research workers (names starting with `research`). `orka worker` refuses builders and the verifier until the approach is approved: the CLI holds the gate, not the prompt.
-2. **Propose.** It writes `.orka/jobs/<id>/approach.md` (What / How / Files / Risks, a few lines) and runs `orka propose <id>`. The job goes to `awaiting-direction`, decisions.tsv gets a `gate` row, and the webhook (`.orka/secrets/finish-webhook.env`, if present) gets one POST:
+2. **Propose.** It writes `.orka/jobs/<id>/approach.md`, the agreement Olaf approves: a few lines, one labelled field each.
+   - **Outcome:** what Olaf can do afterwards.
+   - **Scope:** the files or areas that change, and what is out of scope.
+   - **Boundaries:** the principles to keep, each with its reason, and what counts as failure.
+   - **Proof:** one line per outcome saying how it will be shown, by the same rule as a checkable ACCEPTANCE line ([commands.md](commands.md), "Worker briefs"): an outside proof preferred (a command and its expected output, a test, a number, an HTTP response, a file diff, a reference image), or `no external proof: <what is subjective>` when it is taste.
+
+   A field is a `Proof:` line, a `- Proof:` bullet, `**Proof:**` or a `## Proof` heading; its value runs to the next field. The same four fields work for a code repo and a visual one.
+
+   Then it runs `orka propose <id>`. A missing field is a warning on stderr, not a refusal, so a job planned on the older What / How / Files / Risks template still proposes. The job goes to `awaiting-direction`, decisions.tsv gets a `gate` row, and the webhook (`.orka/secrets/finish-webhook.env`, if present) gets one POST:
    ```json
    {"kind":"awaiting-direction","job":"<id>","title":"...","status":"awaiting-direction","branch":"orka/<id>","approach":"<approach.md, up to 2000 chars>","question":"Direction for \"...\"? Approve: orka approve <id>. Revise: orka steer <id> \"<what to change>\"."}
    ```
    The needs-input watcher stays quiet while the job waits, so there is no second "idle" ping.
 3. **Decide.**
    - `orka approve <id> ["note"]` prompts the orchestrator `Direction approved by Olaf[: note]. Build it now...`, sets the job back to `running` and unlocks builders.
+     - It also copies the Proof lines (up to 12) from approach.md into `job.proof`. The prompt repeats them and tells the orchestrator to put each one into the verifier `--task` with its proof.
+     - orka pastes them into every verifier brief as "Approved proof", so they reach the verifier even if the task leaves one out.
+     - The decisions row says how many were copied, and `orka status` shows `gate: approved <time>; N proof line(s) for the verifier`.
    - `orka steer <id> "what to change"` sends the revision. The job goes back to `running` (state `revising`, builders still refused); the orchestrator updates approach.md and runs `orka propose` again (proposal 2, another POST).
    - `orka stop <id>` ends it. `orka done` is refused while the job waits.
 
