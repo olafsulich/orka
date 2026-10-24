@@ -1722,6 +1722,7 @@ function verifierPrompt(job, name, task, alias, round) {
     `What was built and the acceptance criteria:`,
     String(task).trim(),
     ``,
+    ...approvedProofLines(job),
     ...specPromptLines(job),
     ...(job.playbook === "bug-fix" ? [...REPRO_VERIFIER_LINES(dir), ``] : []),
     `Evidence standard (a pass needs proof, not a claim):`,
@@ -1834,9 +1835,11 @@ function gatePromptLines(job, dir) {
   return [
     `DIRECTION GATE (on: this is a new feature). Plan first, then wait for Olaf's direction before building:`,
     `1. Plan only. Read what you need. You may start research workers (names starting with research); orka refuses builder and verifier workers until the approach is approved.`,
-    `2. Write ${dir}/approach.md, a few lines: What (the outcome), How (the approach), Files (what will change), Risks.`,
+    `2. Write ${dir}/approach.md as the agreement Olaf approves: a few lines, one labelled field each (${APPROACH_FIELDS.map(([, label]) => `${label}:`).join(" ")}).`,
+    `   Outcome: what Olaf can do afterwards. Scope: the files or areas that change, and what is out of scope. Boundaries: the principles to keep, each with its reason, and what counts as failure.`,
+    `   Proof: one line per outcome, how it will be shown, by the same rule as a checkable ACCEPTANCE line (an outside proof preferred: a command and its expected output, a test, a number, an HTTP response, a file diff, a reference image; "no external proof: <what is subjective>" when it is taste).`,
     `3. Run orka propose ${job.id}. It sets the job to ${AWAITING} and notifies Olaf. Then stop and wait; do not build.`,
-    `4. orka approve sends you "Direction approved": then split and build as below. orka steer sends a revision: update approach.md, run orka propose ${job.id} again, and wait again.`,
+    `4. orka approve sends you "Direction approved" with the Proof lines, which orka copies into the job: then split and build as below, and put every Proof line into the verifier --task with its proof. orka steer sends a revision: update approach.md, run orka propose ${job.id} again, and wait again.`,
     ``,
   ];
 }
@@ -2001,6 +2004,12 @@ function jobSpecText(job) {
   return shown.code === 0 ? shown.out : "";
 }
 
+// The Proof lines Olaf approved with approach.md (orka approve): acceptance criteria with their proof.
+function approvedProofLines(job) {
+  if (!Array.isArray(job.proof) || !job.proof.length) return [];
+  return [`Approved proof (Olaf approved these with approach.md; each is an acceptance criterion, shown by the proof it names):`, ...job.proof.map((l) => `- ${l}`), ``];
+}
+
 function specPromptLines(job) {
   const text = jobSpecText(job);
   return text ? [specs.specBlock(text, job.spec.path), ``] : [];
@@ -2026,7 +2035,7 @@ function gateLine(job) {
   if (!g) return "";
   if (!g.on) return `gate: off (${g.reason})`;
   if (job.status === AWAITING) return `gate: awaiting direction since ${g.proposedAt} (proposal ${g.proposals || 1}); orka approve ${job.id} approves the plan, or orka steer ${job.id} "..."`;
-  if (g.state === "approved") return `gate: approved ${g.approvedAt}`;
+  if (g.state === "approved") return `gate: approved ${g.approvedAt}${Array.isArray(job.proof) && job.proof.length ? `; ${job.proof.length} proof line(s) for the verifier` : ""}`;
   return `gate: on, ${g.state === "revising" ? "revising the approach" : "planning"} (builders wait for orka approve)`;
 }
 
@@ -3522,7 +3531,7 @@ function cmdSteer(args) {
   // At the gate a steer revises the plan: the orchestrator rewrites approach.md and proposes again.
   // In review a steer is a change request: the job runs again and comes back through orka review.
   const text = awaiting
-    ? `Direction gate: Olaf asks you to revise the approach, not to build yet.\n${message}\nUpdate ${join(jobDir(repo, id), "approach.md")}, run orka propose ${id} again, and wait.`
+    ? `Direction gate: Olaf asks you to revise the approach, not to build yet.\n${message}\nUpdate ${join(jobDir(repo, id), "approach.md")} (Outcome / Scope / Boundaries / Proof), run orka propose ${id} again, and wait.`
     : inReview
       ? `Review: Olaf asks for changes before he signs off. No sign-off yet; do not run orka done.\n${message}\nMake the changes (workers, then the verifier again), rewrite summary.txt, run orka review ${id} again, and wait.`
       : message;
@@ -5217,10 +5226,43 @@ async function cmdChain(args) {
 
 function readApproach(repo, id) {
   const path = join(jobDir(repo, id), "approach.md");
-  if (!existsSync(path)) fail(`no approach.md for ${id}: write ${path} (What / How / Files / Risks) first`);
+  if (!existsSync(path)) fail(`no approach.md for ${id}: write ${path} (${APPROACH_FIELDS.map(([, label]) => label).join(" / ")}) first`);
   const text = readCapped(path, FILE_READ_MAX).text.trim();
   if (!text) fail(`${path} is empty`);
-  return { path, text: text.length > APPROACH_MAX ? `${text.slice(0, APPROACH_MAX)}\n[cut at ${APPROACH_MAX} characters; see ${path}]` : text };
+  return { path, raw: text, text: text.length > APPROACH_MAX ? `${text.slice(0, APPROACH_MAX)}\n[cut at ${APPROACH_MAX} characters; see ${path}]` : text };
+}
+
+// approach.md is the agreement: Outcome / Scope / Boundaries / Proof, one labelled field each. A label is
+// "Proof:", "- Proof: ...", "**Proof:**" or a "## Proof" heading; its value runs to the next label.
+const APPROACH_FIELDS = [
+  ["outcome", "Outcome"],
+  ["scope", "Scope"],
+  ["boundaries", "Boundaries"],
+  ["proof", "Proof"],
+];
+const PROOF_MAX_LINES = 12;
+const PROOF_LINE_MAX = 400;
+
+function approachLabel(line) {
+  const m = /^\s*(?:[-*]\s+)?(#{1,6}\s+)?(?:\*\*|__)?(outcome|scope|boundaries|proof)s?(?:\*\*|__)?\s*(:)?\s*(?:\*\*|__)?\s*(:)?\s*(.*)$/i.exec(line);
+  if (!m || !(m[1] || m[3] || m[4])) return null;
+  return { key: m[2].toLowerCase(), rest: m[5].trim() };
+}
+
+function parseApproach(text) {
+  const fields = {};
+  let key = null;
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const label = approachLabel(line);
+    if (label) {
+      key = label.key;
+      fields[key] = fields[key] || [];
+      if (label.rest) fields[key].push(label.rest);
+    } else if (key && line.trim()) fields[key].push(line.trim());
+  }
+  const item = (l) => l.replace(/^(?:[-*+]|\d+[.)])\s+/, "").trim();
+  const proof = (fields.proof || []).map(item).filter(Boolean).slice(0, PROOF_MAX_LINES).map((l) => (l.length > PROOF_LINE_MAX ? `${l.slice(0, PROOF_LINE_MAX)}…` : l));
+  return { fields, proof, missing: APPROACH_FIELDS.filter(([k]) => !fields[k]?.length).map(([, label]) => label) };
 }
 
 // The orchestrator runs this after planning: the job pauses at the gate and Olaf is notified once per proposal.
@@ -5235,6 +5277,9 @@ async function cmdPropose(args) {
   if (job.status === AWAITING) fail(`job ${id} is already awaiting direction; wait for orka approve or orka steer`);
   if (job.status !== "running") fail(`job ${id} is ${job.status}, not running`);
   const approach = readApproach(repo, id);
+  const shape = parseApproach(approach.raw);
+  // Warned, not refused: a job planned on the older What / How / Files / Risks template still proposes.
+  if (shape.missing.length) console.error(`warning: ${approach.path} has no ${shape.missing.join(", ")} field; the approach is ${APPROACH_FIELDS.map(([, label]) => `${label}:`).join(" ")} (see the DIRECTION GATE block). Proposed anyway.`);
   const payload = {
     kind: AWAITING,
     job: job.id,
@@ -5338,15 +5383,22 @@ function cmdApprove(args) {
 function approvePlan(repo, job, note) {
   const id = job.id;
   if (!job.agent || !agentExists(job.agent)) fail(paneGone(id, `the job stays ${AWAITING}`));
-  const text = `Direction approved by Olaf${note ? `: ${note}` : "."}\nBuild it now, following ${join(jobDir(repo, id), "approach.md")}${note ? " and the note above" : ""}: split into worker tasks and continue with the flow in your first prompt.`;
+  const approachFile = join(jobDir(repo, id), "approach.md");
+  const { proof } = parseApproach(existsSync(approachFile) ? readCapped(approachFile, FILE_READ_MAX).text : job.gate?.approach);
+  const proofLines = proof.length
+    ? [`Proof (from approach.md; orka copied it into the job as job.proof and pastes it into the verifier brief): put each line into the verifier --task as an acceptance criterion, with its proof as written:`, ...proof.map((l) => `- ${l}`)]
+    : [`approach.md has no Proof lines: build the verifier --task from the builders' ACCEPTANCE lines as usual.`];
+  const text = [`Direction approved by Olaf${note ? `: ${note}` : "."}`, `Build it now, following ${approachFile}${note ? " and the note above" : ""}: split into worker tasks and continue with the flow in your first prompt.`, ...proofLines].join("\n");
   const sent = promptWithRetry(job.agent, text, { readyStatuses: GATE_READY });
   if (!sent.ok) fail(`approve not delivered: ${sent.reason}; the job stays ${AWAITING}`);
   const now = new Date().toISOString();
   job.status = "running";
   job.updated = now;
   job.gate = { ...job.gate, state: "approved", approvedAt: now, ...(note ? { note } : {}) };
+  if (proof.length) job.proof = proof;
+  else delete job.proof;
   save(repo, job);
-  appendDecision(repo, id, ["gate", "approved", note || "approach accepted", "orka approve", "building"]);
+  appendDecision(repo, id, ["gate", "approved", note || "approach accepted", "orka approve", `building; ${proof.length} proof line(s) copied`]);
   console.log(`approved the plan of ${id} (direction gate); the orchestrator builds now`);
 }
 

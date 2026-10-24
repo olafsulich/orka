@@ -10,6 +10,15 @@ import { promisify } from "node:util";
 const ORKA = join(import.meta.dirname, "..", "bin", "orka.mjs");
 const execFileAsync = promisify(execFile);
 
+const APPROACH = [
+  "Outcome: Olaf can switch the site to dark mode from the header",
+  "Scope: header.js and theme.css; out of scope: per-page themes",
+  "Boundaries: no flash on load, because it is the first thing a visitor sees; failure: any page unreadable in dark mode",
+  "Proof:",
+  "- npm test -- dark prints 3 passing",
+  "- GET / after the toggle returns 200 with data-theme=dark",
+].join("\n");
+
 // Fake herdr (logs its arguments; a new agent is idle and ready, then working once prompted) and a real git repo.
 function scratch() {
   const base = mkdtempSync(join(tmpdir(), "orka-gate-"));
@@ -78,7 +87,7 @@ esac
     assert.equal(r.status, 0, r.stderr);
     return id;
   };
-  const writeApproach = (id, text = "What: a toggle\nHow: a data-theme attribute\nFiles: header.js\nRisks: flash on load") => {
+  const writeApproach = (id, text = APPROACH) => {
     mkdirSync(dir(id), { recursive: true });
     writeFileSync(join(dir(id), "approach.md"), text);
   };
@@ -117,7 +126,11 @@ test("the orchestrator is told to plan, write approach.md and orka propose; an u
   const t = scratch();
   const id = t.started();
   assert.match(t.calls(), /DIRECTION GATE \(on: this is a new feature\)/);
-  assert.match(t.calls(), new RegExp(`Write ${t.dir(id)}/approach\\.md, a few lines: What \\(the outcome\\), How \\(the approach\\), Files \\(what will change\\), Risks`));
+  assert.match(t.calls(), new RegExp(`Write ${t.dir(id)}/approach\\.md as the agreement Olaf approves: a few lines, one labelled field each \\(Outcome: Scope: Boundaries: Proof:\\)\\.`));
+  assert.match(t.calls(), /Outcome: what Olaf can do afterwards\. Scope: the files or areas that change, and what is out of scope\. Boundaries: the principles to keep, each with its reason, and what counts as failure\./);
+  assert.match(t.calls(), /Proof: one line per outcome, how it will be shown, by the same rule as a checkable ACCEPTANCE line \(an outside proof preferred[^\n]*"no external proof: <what is subjective>" when it is taste\)\./);
+  assert.match(t.calls(), /orka approve sends you "Direction approved" with the Proof lines, which orka copies into the job: then split and build as below, and put every Proof line into the verifier --task with its proof\./);
+  assert.doesNotMatch(t.calls(), /What \(the outcome\)|Files \(what will change\)|Risks\./);
   assert.match(t.calls(), new RegExp(`Run orka propose ${id}\\.`));
   t.fresh();
   t.started("--no-gate");
@@ -158,14 +171,14 @@ test("propose pauses the job, notifies once with the approach, and done is refus
   assert.equal(body.kind, "awaiting-direction");
   assert.equal(body.status, "awaiting-direction");
   assert.equal(body.job, id);
-  assert.match(body.approach, /^What: a toggle\nHow: a data-theme attribute/);
+  assert.match(body.approach, /^Outcome: Olaf can switch the site to dark mode from the header\nScope: header\.js/);
   assert.match(body.question, new RegExp(`orka approve ${id}`));
   const job = t.read(id);
   assert.equal(job.status, "awaiting-direction");
   assert.equal(job.gate.state, "awaiting");
   const status = t.orka(["status", id]).stdout;
   assert.match(status, /gate: awaiting direction since .* \(proposal 1\)/);
-  assert.match(status, /\n    What: a toggle\n/);
+  assert.match(status, /\n    Outcome: Olaf can switch the site to dark mode from the header\n/);
   assert.match(t.orka(["propose", id]).stderr, /already awaiting direction/);
   const done = t.orka(["done", id]);
   assert.notEqual(done.status, 0);
@@ -194,6 +207,49 @@ test("approve resumes the orchestrator and unlocks builders", () => {
   assert.equal(b.status, 0, b.stderr);
   assert.match(t.decisions(id), /\tgate\tapproved\tkeep it under 30 lines\t/);
   assert.match(t.orka(["propose", id]).stderr, /already approved/);
+});
+
+test("approve copies the Proof lines into the job, sends them to the orchestrator, and the verifier gets them", () => {
+  const t = scratch();
+  const id = t.started();
+  t.writeApproach(id);
+  const p = t.orka(["propose", id]);
+  assert.equal(p.status, 0, p.stderr);
+  assert.doesNotMatch(p.stderr, /warning/);
+  t.ready(t.read(id).agent);
+  assert.equal(t.orka(["approve", id]).status, 0);
+  const proof = ["npm test -- dark prints 3 passing", "GET / after the toggle returns 200 with data-theme=dark"];
+  assert.deepEqual(t.read(id).proof, proof);
+  assert.match(t.calls(), /Proof \(from approach\.md; orka copied it into the job as job\.proof and pastes it into the verifier brief\): put each line into the verifier --task as an acceptance criterion, with its proof as written:\n- npm test -- dark prints 3 passing\n- GET \/ after the toggle returns 200 with data-theme=dark/);
+  assert.match(t.decisions(id), /\tgate\tapproved\tapproach accepted\torka approve\tbuilding; 2 proof line\(s\) copied/);
+  assert.match(t.orka(["status", id]).stdout, /gate: approved .*; 2 proof line\(s\) for the verifier/);
+  t.fresh();
+  const v = t.orka(["worker", "--job", id, "--name", "verifier", "--role", "verifier", "--task", "Built: a dark mode toggle"]);
+  assert.equal(v.status, 0, v.stderr);
+  assert.match(t.calls(), /Built: a dark mode toggle\n\nApproved proof \(Olaf approved these with approach\.md; each is an acceptance criterion, shown by the proof it names\):\n- npm test -- dark prints 3 passing\n- GET \/ after the toggle returns 200 with data-theme=dark\n/);
+});
+
+test("approach.md fields may be headings or bold labels; numbered Proof items are copied", () => {
+  const t = scratch();
+  const id = t.started();
+  t.writeApproach(id, "## Outcome\nOlaf can export a PNG\n\n## Scope\nexport.js\n\n## Boundaries\nno new dependency, because installs are slow\n\n**Proof:** 1. `node export.js` writes out.png\n2. no external proof: whether the colours look right\n");
+  const p = t.orka(["propose", id]);
+  assert.equal(p.status, 0, p.stderr);
+  assert.doesNotMatch(p.stderr, /warning/);
+  t.ready(t.read(id).agent);
+  assert.equal(t.orka(["approve", id]).status, 0);
+  assert.deepEqual(t.read(id).proof, ["`node export.js` writes out.png", "no external proof: whether the colours look right"]);
+});
+
+test("an approach with no Proof field approves with no job.proof and says so", () => {
+  const t = scratch();
+  const id = t.started();
+  t.writeApproach(id, "Outcome: x\nScope: a.js\nBoundaries: none");
+  assert.match(t.orka(["propose", id]).stderr, /has no Proof field/);
+  t.ready(t.read(id).agent);
+  assert.equal(t.orka(["approve", id]).status, 0);
+  assert.equal(t.read(id).proof, undefined);
+  assert.match(t.calls(), /approach\.md has no Proof lines: build the verifier --task from the builders' ACCEPTANCE lines as usual\./);
 });
 
 test("approve and the gate steer reach an orchestrator herdr reports as done (turn ended, not idle)", () => {
@@ -230,13 +286,16 @@ test("steer at the gate asks for a revised plan and the job proposes again", () 
   const s = t.orka(["steer", id, "use a CSS variable, not a class"]);
   assert.equal(s.status, 0, s.stderr);
   assert.match(s.stdout, /direction gate: revising the approach/);
-  assert.match(t.calls(), /Direction gate: Olaf asks you to revise the approach, not to build yet\.\nuse a CSS variable, not a class\nUpdate .*approach\.md, run orka propose/);
+  assert.match(t.calls(), /Direction gate: Olaf asks you to revise the approach, not to build yet\.\nuse a CSS variable, not a class\nUpdate .*approach\.md \(Outcome \/ Scope \/ Boundaries \/ Proof\), run orka propose/);
   let job = t.read(id);
   assert.equal(job.status, "running");
   assert.equal(job.gate.state, "revising");
   assert.match(t.orka(["worker", "--job", id, "--name", "builder", "--task", "GOAL: x\nSCOPE: a\nACCEPTANCE: b"]).stderr, /direction gate/);
+  // An approach on the older What / How / Files / Risks template is warned about, not refused.
   t.writeApproach(id, "What: a toggle\nHow: a CSS variable\nFiles: theme.css\nRisks: none");
-  assert.match(t.orka(["propose", id]).stdout, /proposal 2/);
+  const again = t.orka(["propose", id]);
+  assert.match(again.stdout, /proposal 2/);
+  assert.match(again.stderr, /warning: .*approach\.md has no Outcome, Scope, Boundaries, Proof field; the approach is Outcome: Scope: Boundaries: Proof: .*Proposed anyway\./);
   job = t.read(id);
   assert.equal(job.gate.proposals, 2);
   assert.match(job.gate.approach, /CSS variable/);
