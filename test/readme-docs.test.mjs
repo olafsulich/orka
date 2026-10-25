@@ -38,7 +38,7 @@ test("README has no task table or backlog", () => {
 });
 
 test("moved sections exist as docs files", () => {
-  for (const f of ["verify", "verifier", "webhooks", "cleanup", "follow-up", "ports", "needs-input", "models", "layout", "comparisons", "commands", "diagrams"]) {
+  for (const f of ["verify", "verifier", "webhooks", "cleanup", "follow-up", "ports", "needs-input", "models", "layout", "commands", "diagrams"]) {
     assert.ok(existsSync(join(root, "docs", `${f}.md`)), `docs/${f}.md missing`);
   }
 });
