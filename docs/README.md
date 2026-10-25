@@ -11,6 +11,7 @@
 - [verify.md](verify.md): `orka verify` and `orka.verify.json`
 - [gates.md](gates.md): static gates before every verifier round, base comparison, acceptance by gate
 - [verifier.md](verifier.md): the verifier worker, rounds, stall, strategy, patch-id guard
+- [feature-map.md](feature-map.md): `orka.features.md`, Keep in mind from builders, Stale entries
 - [webhooks.md](webhooks.md): the finish wake and `orka webhook`
 - [needs-input.md](needs-input.md): the needs-input watcher
 - [follow-up.md](follow-up.md): follow-up rounds with `orka steer`

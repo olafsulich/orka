@@ -4,7 +4,7 @@ The path between workers and the orchestrator is run by orka, not by the agents.
 
 ## Finish wake
 
-A builder writes `results/<name>.json` (`{"worker","ok","result"}`) and `notes/<name>.txt`. The verifier writes `results/verifier.json`. Neither messages the orchestrator: their prompts say so.
+A builder writes `results/<name>.json` (`{"worker","ok","result"}`) and `notes/<name>.txt`. The verifier writes `results/verifier.json`. Neither messages the orchestrator: their prompts say so. A builder result may also carry `keepInMind`, which orka merges into the feature map at the wake ([feature-map.md](feature-map.md)).
 
 The watcher (`orka watch`, every poll) and `orka wake <id>` (one pass by hand, `--dry-run` to preview) send one wake per result file:
 
