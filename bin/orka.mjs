@@ -22,6 +22,7 @@ import * as context from "../lib/context.mjs";
 import * as handoffHook from "../lib/handoff-hook.mjs";
 import * as inbox from "../lib/inbox.mjs";
 import * as wake from "../lib/wake.mjs";
+import * as featureMap from "../lib/featuremap.mjs";
 import * as lifecycle from "../lib/lifecycle.mjs";
 import * as autonomy from "../lib/autonomy.mjs";
 import * as ports from "../lib/ports.mjs";
@@ -1220,7 +1221,7 @@ async function assignPorts(repo, job) {
 const REVERSIBLE_RULE = `Reversible work never waits on a human. Irreversible actions (push, delete outside the worktree, external sends, purchases) stop and ask.`;
 const NEVER_CLOSE_PANES = `Never close panes (yours or anyone's, no herdr pane close): finished panes stay open, and orka frees them when the job is done or stopped.`;
 const COMMIT_BEFORE_DONE = (job) =>
-  `Before orka review, commit everything in the worktree on the job branch${job.playbook === "investigation" ? "" : `, including the checks file and feature map the verifier wrote (${verifyFile(job.worktree)}, ${featureMapFile(job.worktree)}): they are meant to be committed`}. orka done removes a done job's worktree (the branch stays), and keeps it only when something is left uncommitted.`;
+  `Before orka review, commit everything in the worktree on the job branch${job.playbook === "investigation" ? "" : `, including the checks file and feature map the verifier and orka wrote (${verifyFile(job.worktree)}, ${featureMapFile(job.worktree)}): they are meant to be committed`}. orka done removes a done job's worktree (the branch stays), and keeps it only when something is left uncommitted.`;
 // Checkable acceptance and the choices made on Olaf's behalf: generic across CLIs, libraries, web apps,
 // research and visual work. Never a reason to wait for a human.
 const ACCEPTANCE_LINES = (job) => [
@@ -1403,8 +1404,10 @@ function workerPrompt(job, name, task, alias) {
     String(task).trim(),
     ``,
     ...specPromptLines(job),
+    `Feature map: ${featureMapFile(job.worktree)} at the worktree root, if it exists, records per feature how to reach, drive and prove it, and what to keep in mind. Read the entries for what you touch. Never edit it.`,
     `When finished, write ${result} as JSON:`,
     `{"worker":"${name}","ok":true,"result":"<what you did, a few sentences>"}`,
+    `If you learned a constraint the code does not show (an order that matters, a slow or flaky step, a required env var or service), add "keepInMind": ["<one line>"] to that JSON, or {"<feature heading in the map>": ["<one line>"]}. orka merges it into the map.`,
     `Also write one line at ${note}: at most 200 characters, no logs, diffs or the job file.`,
     `Do not message the orchestrator. When your turn ends with the result file written, orka sends it a short wake with your result; it runs orka digest for the rest.`,
     `Messages for you (from the orchestrator or Olaf) may arrive between your tool calls as "orka inbox" text: read them and follow them.`,
@@ -1732,9 +1735,10 @@ function verifierPrompt(job, name, task, alias, round) {
     `- Save proof under ${join(dir, "results")}/ (screenshots, command output) and name the file in the check notes or failure evidence.`,
     `- "Inconclusive" or "could not test" is a fail, not a pass. If you cannot show it works, the verdict is fail.`,
     ``,
-    `Feature map: before running checks, read ${featureMapFile(job.worktree)} at the worktree root. Per feature it records how to reach it (URL or command), how to drive it, how to prove it works, and when it was last verified (date + commit). Use it to start faster and check consistently.`,
+    `Feature map: before running checks, read ${featureMapFile(job.worktree)} at the worktree root. Per feature it records how to reach it (URL or command), how to drive it, how to prove it works, when it was last verified (date + commit), and what to keep in mind (constraints the code does not show; orka merges them from the builders' results). Use it to start faster and check consistently, and keep the Keep in mind lines when you update an entry.`,
     `Staleness guard: each entry carries the commit it was last proven at. Every entry whose commit is older than HEAD (git rev-parse HEAD) must be re-proved by you before you rely on it or mark it verified, never trusted, whether or not this job touched the feature.`,
     `If ${featureMapFile(job.worktree)} is missing, that is fine: create it with one entry per feature you check. On a pass, update the entries you touched (reach, drive, prove, last-verified date and HEAD commit). Editing ${featureMapFile(job.worktree)} is allowed even though you do not edit product code. On a fail, do not mark entries as proven.`,
+    `Stale entries: when an entry's Reach step fails on HEAD and also on the base commit, do not delete it: add the line "- Stale: marked by ${job.id}" to it. orka drops an entry that stays stale for ${featureMap.STALE_JOBS} more jobs. When a Stale entry's Reach works again, prove it and remove its Stale line.`,
     ``,
     `Run these checks:`,
     `1. orka verify ${job.id} (if orka is not on PATH, run ${ORKA} verify ${job.id}).`,
@@ -3082,6 +3086,40 @@ function handoffBusy(repo, id) {
   return agents.some((a) => names.has(a.name) && a.agent_status === "working");
 }
 
+// Feature map write-back (docs/feature-map.md), once per finished result file: a builder's
+// "keepInMind" is merged into orka.features.md; at a verifier result, Stale entries are carried one
+// job further or dropped. Returns the line for the wake, or "" when the map did not change.
+function featureMapStep(repo, job, w, key) {
+  if (!key || job.featureMap?.[key] || !job.worktree || !existsSync(job.worktree)) return "";
+  const path = join(job.worktree, featureMapFile(job.worktree));
+  const before = existsSync(path) ? readFileSync(path, "utf8") : null;
+  let after = before;
+  let note = "";
+  if (w.role === "verifier") {
+    if (before == null) return "";
+    const got = featureMap.pruneStale(before, job.id);
+    after = got.text;
+    const parts = [got.dropped.length && `dropped ${got.dropped.join(", ")} (stale for ${featureMap.STALE_JOBS} jobs)`, got.carried.length && `stale: ${got.carried.join(", ")}`].filter(Boolean);
+    if (parts.length) note = `feature map: ${parts.join("; ")}`;
+  } else {
+    let data = null;
+    try {
+      data = JSON.parse(readFileSync(w.result, "utf8"));
+    } catch {}
+    const notes = featureMap.keepFromResult(data?.keepInMind);
+    if (!notes.length) return "";
+    const got = featureMap.mergeKeep(before ?? `# Feature map\n`, notes);
+    after = got.text;
+    if (got.added.length) note = `feature map: ${got.added.length} keep-in-mind line(s) merged into ${[...new Set(got.added.map((a) => a.feature))].join(", ")}`;
+  }
+  if (after !== before) writeFileSync(path, after);
+  updateJob(repo, job.id, (j) => {
+    j.featureMap = { ...(j.featureMap || {}), [key]: { worker: w.name, at: new Date().toISOString(), note } };
+  });
+  if (note) appendDecision(repo, job.id, ["feature-map", note, w.name, path, "commit it with the job"]);
+  return note;
+}
+
 // Harness-sent wake and inbox delivery (docs/workers.md). The watcher runs this every poll:
 // 1. a worker or verifier whose turn ended with its result file written gets one wake to the current
 //    orchestrator (held while the orchestrator hands off; queued mid-turn while it works);
@@ -3104,6 +3142,7 @@ function wakeTick(repo, id, { log = console.log, dry = false } = {}) {
       seen.push({ kind: "wake", worker: w.name, state: `waiting: ${w.name} is ${status}` });
       continue;
     }
+    const mapNote = dry ? "" : featureMapStep(repo, job, w, key);
     if (leadHandoff) {
       seen.push({ kind: "wake", worker: w.name, state: "held: the orchestrator is handing off" });
       continue;
@@ -3122,7 +3161,7 @@ function wakeTick(repo, id, { log = console.log, dry = false } = {}) {
     }
     const got = wake.readResult(raw);
     const commits = w.startedAt && job.worktree && existsSync(job.worktree) ? git(job.worktree, ["log", "--oneline", `-${wake.COMMIT_LINES}`, `--since=${w.startedAt}`]) : null;
-    const text = wake.wakeText({ jobId: id, worker: w.name, role: w.role, state: got.state, text: got.text, path: w.result, commits: commits && commits.code === 0 ? commits.out.split("\n").filter(Boolean) : null, undelivered: inbox.pendingTotal(dir) });
+    const text = wake.wakeText({ jobId: id, worker: w.name, role: w.role, state: got.state, text: got.text, path: w.result, commits: commits && commits.code === 0 ? commits.out.split("\n").filter(Boolean) : null, undelivered: inbox.pendingTotal(dir) }) + (mapNote || job.featureMap?.[key]?.note ? `\n${mapNote || job.featureMap[key].note}` : "");
     seen.push({ kind: "wake", worker: w.name, state: `wake ${mode === "now" ? "sent" : "queued mid-turn"}`, text });
     if (dry) continue;
     const sent = mode === "now" ? promptWithRetry(job.agent, text, { readyStatuses: context.SAFE_STATUSES }) : queuePrompt(job.agent, text);

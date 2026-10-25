@@ -134,6 +134,6 @@ test("orka new never removes another job's worktree; orka cleanup does", () => {
 
 test("the orchestrator prompt says to commit the verifier's files before done", () => {
   const src = readFileSync(ORKA, "utf8");
-  assert.match(src, /commit everything in the worktree on the job branch\$\{job\.playbook === "investigation" \? "" : `, including the checks file and feature map the verifier wrote/);
+  assert.match(src, /commit everything in the worktree on the job branch\$\{job\.playbook === "investigation" \? "" : `, including the checks file and feature map the verifier and orka wrote/);
   assert.match(src, /COMMIT_BEFORE_DONE\(job\),/);
 });
