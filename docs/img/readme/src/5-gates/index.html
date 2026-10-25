@@ -6,7 +6,7 @@
 import { Clip } from '/engine/index.js';
 
 // Step 5: before every verifier round orka runs the repo's static gates. A red gate that also fails on the base commit is only a warning; one that fails only on the branch blocks and goes back to the builder.
-const clip = await Clip.create({ duration: 5 });
+const clip = await Clip.create({ duration: 5, skin: 'dark' });
 const B = clip.beat({ build: 0.3, legend: 3.4 });
 
 const start = clip.node({ x: 140, y: 300, name: 'orka worker', sub: '--role verifier', shape: 'pill', type: 'store', minW: 150 });
@@ -23,11 +23,11 @@ const a3 = clip.arrow(q1, ver, { kind: 'accent', label: 'yes' });
 const a4 = clip.arrow(q1, q2, { label: 'no', labelSide: 'right' });
 const a5 = clip.arrow(q2, warn, { label: 'yes' });
 const a6 = clip.arrow(warn, ver, { from: 'top', to: 'bottom', label: 'not blocking', labelSide: 'right' });
-const a7 = clip.arrow(q2, back, { kind: 'fail', label: 'no: blocks' });
+const a7 = clip.arrow(q2, back, { kind: 'accent', dashed: true, label: 'no: blocks' });
 
 const legend = clip.legend([
   { shape: 'pill', label: 'Start / next step' }, { node: 'focal', label: 'orka CLI' }, { shape: 'diamond', label: 'Decision' },
-  { arrow: 'accent', label: 'Pass' }, { arrow: 'fail', label: 'Block' },
+  { arrow: 'accent', label: 'Pass' }, { arrow: 'accent', dashed: true, label: 'Block' },
 ]);
 
 clip.animate((t) => {

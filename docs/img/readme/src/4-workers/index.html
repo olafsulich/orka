@@ -6,7 +6,7 @@
 import { Clip } from '/engine/index.js';
 
 // Step 4: the orchestrator starts one builder per task in the shared worktree. Builders only write their result files; orka wakes the orchestrator when a turn ends.
-const clip = await Clip.create({ duration: 4.5 });
+const clip = await Clip.create({ duration: 4.5, skin: 'dark' });
 const B = clip.beat({ build: 0.3, legend: 3 });
 
 const orch = clip.node({ x: 120, y: 340, name: 'Orchestrator', sub: 'splits the goal', tag: 'opus', minW: 140 });

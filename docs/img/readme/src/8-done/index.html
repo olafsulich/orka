@@ -6,7 +6,7 @@
 import { Clip } from '/engine/index.js';
 
 // Step 8: after your sign-off, orka done sends the finish wake once, frees this job's browsers, servers, worker panes and worktree, and keeps the branch. You merge it (L1), or orka land merges, tests and pushes (L3).
-const clip = await Clip.create({ duration: 4.5 });
+const clip = await Clip.create({ duration: 4.5, skin: 'dark' });
 const B = clip.beat({ build: 0.3, legend: 3.2 });
 
 const done = clip.node({ x: 160, y: 320, name: 'orka done', sub: 'needs your sign-off', type: 'focal', tag: 'cli', minW: 170 });

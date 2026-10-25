@@ -6,7 +6,7 @@
 import { Clip } from '/engine/index.js';
 
 // Step 1: a task goes in. orka new files a queued job record, from a title and goal or from a committed spec.
-const clip = await Clip.create({ duration: 4 });
+const clip = await Clip.create({ duration: 4, skin: 'dark' });
 const B = clip.beat({ build: 0.3, legend: 2.4 });
 
 const you = clip.node({ x: 160, y: 300, name: 'You', sub: 'title · goal', type: 'external', tag: 'ext' });
