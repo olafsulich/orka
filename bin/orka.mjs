@@ -1385,6 +1385,27 @@ const RESEARCH_REPORT = [
   `- Cut narration. Stay compact.`,
 ].join("\n");
 
+// A research worker reads and reports; it gets no GATES block (names start with research, as at the direction gate).
+const isResearchWorker = (name, task) => /^research/.test(String(name)) || String(task).includes("RESEARCH REPORT FORMAT");
+
+// The GATES block of a builder brief (docs/gates.md "Builders run the gates too"): the same
+// detection and per-gate limit as the gate round before the verifier. [] when there are no gates.
+function workerGateLines(job, name, task) {
+  if (isResearchWorker(name, task)) return [];
+  const config = readRepoConfig(job.repo);
+  const found = gatesLib.detectGates(job.worktree || job.repo, config);
+  if (!found.gates.length) return [];
+  const secs = Math.max(1, Math.ceil(gatesLib.gateLimits(config).timeoutMs / 1000));
+  return [
+    `GATES (${found.reason}). orka runs the same gates before the verifier; catch them here first.`,
+    `Before you write your result, run every gate below in ${job.worktree}, one at a time in this order, never in parallel or in the background, each exactly as written (the timeout is the per-gate limit):`,
+    ...found.gates.map((g) => `  timeout -k 5 ${secs} sh -c ${q(g.command)}`),
+    `A failure in a file inside your SCOPE is yours: fix it and rerun that gate. A failure in a file outside your SCOPE is not yours (other workers share this worktree): do not edit that file; report it. Rerun until your own files are green or your TIMEBOX ends.`,
+    `Record the last run of each gate in your result as "gates": [{"cmd":"<the gate command, without the timeout prefix>","ok":<exit 0>,"ownFailures":["<file in your SCOPE>"],"otherFailures":["<file outside it>"]}], at most 5 files per list, no log text. If your own files are still red, set "ok": false and say why in "result".`,
+    ``,
+  ];
+}
+
 function workerPrompt(job, name, task, alias) {
   const dir = jobDir(job.repo, job.id);
   const result = join(dir, "results", `${name}.json`);
@@ -1405,6 +1426,7 @@ function workerPrompt(job, name, task, alias) {
     ``,
     ...specPromptLines(job),
     `Feature map: ${featureMapFile(job.worktree)} at the worktree root, if it exists, records per feature how to reach, drive and prove it, and what to keep in mind. Read the entries for what you touch. Never edit it.`,
+    ...workerGateLines(job, name, task),
     `When finished, write ${result} as JSON:`,
     `{"worker":"${name}","ok":true,"result":"<what you did, a few sentences>"}`,
     `If you learned a constraint the code does not show (an order that matters, a slow or flaky step, a required env var or service), add "keepInMind": ["<one line>"] to that JSON, or {"<feature heading in the map>": ["<one line>"]}. orka merges it into the map.`,
@@ -1874,6 +1896,7 @@ function orchestratorPrompt(job) {
     `orka worker waits (queues) while memory or panes are tight, up to ${Math.round(guardLimitsOf(job.repo).waitMs / 60000)} minutes, then refuses. Give that call a long timeout (600000 ms) or run it in the background.`,
     `Write every worker --task as this brief, one labelled section per line: GOAL / SCOPE (files it owns) / CONTEXT (file pointers, not pasted text) / ACCEPTANCE / VERIFY / TIMEBOX / FORBIDDEN / REPORT. Workers cannot ask questions, so a vague task fails quietly.`,
     ...ACCEPTANCE_LINES(job),
+    `Builders run the repo's gates themselves before they write a result and report them in its "gates" field (orka digest shows one gates line per builder). A builder that reports its own gates red is not done: steer it back with orka steer --to <worker> to fix them.`,
     `When ${featureMapFile(job.worktree)} exists at the repo root, point workers at it in CONTEXT.`,
     ...(job.spec?.path ? [`This job has a spec: ${job.spec.path} in the worktree. orka pastes it into every worker and verifier brief, so do not copy it into a --task. Every "Done when" line of it goes into the verifier --task as an acceptance criterion.`] : []),
     ...(PLAYBOOK_ORCHESTRATOR_LINES[job.playbook] || PLAYBOOK_ORCHESTRATOR_LINES.feature)(dir),
@@ -3423,22 +3446,30 @@ function readCapped(path, maxBytes) {
 
 const SAFE_WORKER = /^[a-z][a-z0-9_-]{0,31}$/;
 
-function workerOk(dir, worker, files) {
-  if (worker.role === "verifier") return files.verifierSkipped == null && files.verifier?.verdict === "pass";
+// A builder's results/<name>.json, parsed, or null (missing, too big, unreadable).
+function builderResult(dir, worker) {
   const path = join(dir, "results", `${worker.name}.json`);
-  if (!existsSync(path)) return false;
+  if (!existsSync(path)) return null;
   try {
     const size = statSync(path).size;
-    if (size > FILE_READ_MAX) return false;
-    return JSON.parse(readCapped(path, size).text)?.ok === true;
+    if (size > FILE_READ_MAX) return null;
+    return JSON.parse(readCapped(path, size).text);
   } catch {
-    return false;
+    return null;
   }
+}
+
+function workerOk(dir, worker, files) {
+  if (worker.role === "verifier") return files.verifierSkipped == null && files.verifier?.verdict === "pass";
+  const data = builderResult(dir, worker);
+  // The builder's own gate run rides along for the digest; a result without "gates" is from an older worker.
+  if (Array.isArray(data?.gates)) files.gates[worker.name] = data.gates;
+  return data?.ok === true;
 }
 
 function collectDigestFiles(repo, job) {
   const dir = jobDir(repo, job.id);
-  const files = { notes: {}, ok: {}, stateDir: brand.stateDirName(repo) };
+  const files = { notes: {}, ok: {}, gates: {}, stateDir: brand.stateDirName(repo) };
   const summaryPath = join(dir, "summary.txt");
   if (existsSync(summaryPath)) {
     try {
