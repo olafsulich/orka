@@ -6,6 +6,8 @@ The path between workers and the orchestrator is run by orka, not by the agents.
 
 A builder writes `results/<name>.json` (`{"worker","ok","result"}`) and `notes/<name>.txt`. The verifier writes `results/verifier.json`. Neither messages the orchestrator: their prompts say so. A builder result may also carry `keepInMind`, which orka merges into the feature map at the wake ([feature-map.md](feature-map.md)).
 
+Before it writes the result, a builder runs the repo's gates from the GATES block in its brief, fixes failures in its own SCOPE, reports failures in other workers' files without touching them, and records the last run in the result's `"gates"` field. `orka digest` shows one gates line per builder. Research workers and the verifier get no GATES block. Details: [gates.md](gates.md#builders-run-the-gates-too).
+
 The watcher (`orka watch`, every poll) and `orka wake <id>` (one pass by hand, `--dry-run` to preview) send one wake per result file:
 
 - **When:** the worker's turn has ended (herdr status is not `working` or `blocked`) and its result file exists. Retired handoff panes are skipped; their successor writes the result.
