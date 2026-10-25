@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>orka-readme-6-verifier</title>
+<script type="module">
+import { Clip } from '/engine/index.js';
+
+// Step 6: a fresh verifier checks the work and writes a verdict. A fail routes each blocking failure back to its builder for another round; the same failure twice is a stall and forces a strategy change.
+const clip = await Clip.create({ duration: 5.5 });
+const B = clip.beat({ build: 0.3, legend: 4 });
+
+const ver = clip.node({ x: 150, y: 300, name: 'Verifier', sub: 'fresh · round N', type: 'focal', tag: 'verify', minW: 140 });
+const checks = clip.node({ x: 420, y: 300, name: 'Checks', sub: 'orka verify · tests\nagent-browser', minW: 170 });
+const res = clip.node({ x: 700, y: 300, name: 'verifier.json', sub: 'failures · warnings', type: 'store', minW: 170 });
+const verdict = clip.node({ x: 960, y: 300, name: 'Verdict', shape: 'diamond', minW: 100 });
+const pass = clip.node({ x: 1180, y: 300, name: 'Review', sub: 'step 7', shape: 'pill', type: 'store', minW: 110 });
+const orch = clip.node({ x: 960, y: 490, name: 'Orchestrator', sub: 'routes evidence', tag: 'opus', minW: 150 });
+const build = clip.node({ x: 700, y: 490, name: 'Builder', sub: 'fixes its files', tag: 'sonnet', minW: 140 });
+const strat = clip.node({ x: 960, y: 650, name: 'orka strategy', sub: 'same fail twice', type: 'optional', tag: 'stall', minW: 160 });
+
+const a1 = clip.arrow(ver, checks, { kind: 'accent', label: 'runs' });
+const a2 = clip.arrow(checks, res, { kind: 'accent' });
+const a3 = clip.arrow(res, verdict, { kind: 'accent' });
+const a4 = clip.arrow(verdict, pass, { kind: 'accent', label: 'pass' });
+const a5 = clip.arrow(verdict, orch, { from: 'bottom', to: 'top', kind: 'fail', label: 'fail', labelSide: 'right' });
+const a6 = clip.arrow(orch, build, { label: 'failures' });
+const a7 = clip.arrow(build, ver, { from: 'left', to: 'bottom', label: 'round N+1', labelSeg: 0 });
+const a8 = clip.arrow(orch, strat, { from: 'bottom', to: 'top', dashed: true, label: 'on a stall', labelSide: 'right' });
+const a9 = clip.arrow(strat, build, { from: 'left', to: 'bottom', dashed: true, label: 'new approach', labelSeg: 0 });
+
+const legend = clip.legend([
+  { node: 'focal', label: 'Verifier' }, { node: 'backend', label: 'Agent / step' }, { node: 'store', label: 'File' },
+  { shape: 'diamond', label: 'Decision' }, { node: 'optional', label: 'Only on a stall' },
+  { arrow: 'accent', label: 'Pass' }, { arrow: 'fail', label: 'Fail' },
+]);
+
+clip.animate((t) => {
+  [ver, a1, checks, a2, res, a3, verdict, a4, pass, a5, orch, a6, build, a7, a8, strat, a9].forEach((it, i) => it.enter(t, B.build + i * 0.22));
+  legend.enter(t, B.legend, 'fade');
+});
+
+clip.mount();
+</script>
+</html>
