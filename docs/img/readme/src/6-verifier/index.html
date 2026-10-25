@@ -6,7 +6,7 @@
 import { Clip } from '/engine/index.js';
 
 // Step 6: a fresh verifier checks the work and writes a verdict. A fail routes each blocking failure back to its builder for another round; the same failure twice is a stall and forces a strategy change.
-const clip = await Clip.create({ duration: 5.5 });
+const clip = await Clip.create({ duration: 5.5, skin: 'dark' });
 const B = clip.beat({ build: 0.3, legend: 4 });
 
 const ver = clip.node({ x: 150, y: 300, name: 'Verifier', sub: 'fresh · round N', type: 'focal', tag: 'verify', minW: 140 });

@@ -6,7 +6,7 @@
 import { Clip } from '/engine/index.js';
 
 // Step 2: orka run checks out a linked worktree on branch orka/<id>, opens a Herdr workspace and starts the orchestrator there; a watcher runs beside it.
-const clip = await Clip.create({ duration: 4.5 });
+const clip = await Clip.create({ duration: 4.5, skin: 'dark' });
 const B = clip.beat({ build: 0.3, legend: 2.8 });
 
 const run = clip.node({ x: 160, y: 300, name: 'orka run', sub: 'orka run <id>', type: 'focal', tag: 'cli', minW: 130 });

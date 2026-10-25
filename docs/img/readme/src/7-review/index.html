@@ -6,7 +6,7 @@
 import { Clip } from '/engine/index.js';
 
 // Step 7: a passing verifier is not the end. The orchestrator writes summary.txt and runs orka review; you sign off with orka approve, or send changes with orka steer.
-const clip = await Clip.create({ duration: 4.5 });
+const clip = await Clip.create({ duration: 4.5, skin: 'dark' });
 const B = clip.beat({ build: 0.3, legend: 3 });
 
 const orch = clip.node({ x: 160, y: 320, name: 'Orchestrator', sub: 'verifier passed', tag: 'opus', minW: 150 });

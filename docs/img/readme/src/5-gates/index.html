@@ -6,7 +6,7 @@
 import { Clip } from '/engine/index.js';
 
 // Step 5: before every verifier round orka runs the repo's static gates. A red gate that also fails on the base commit is only a warning; one that fails only on the branch blocks and goes back to the builder.
-const clip = await Clip.create({ duration: 5 });
+const clip = await Clip.create({ duration: 5, skin: 'dark' });
 const B = clip.beat({ build: 0.3, legend: 3.4 });
 
 const start = clip.node({ x: 140, y: 300, name: 'orka worker', sub: '--role verifier', shape: 'pill', type: 'store', minW: 150 });

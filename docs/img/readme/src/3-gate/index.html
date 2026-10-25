@@ -6,7 +6,7 @@
 import { Clip } from '/engine/index.js';
 
 // Step 3: the direction gate. The orchestrator plans, writes approach.md and runs orka propose; builders stay locked until you approve, a steer sends it back to revise.
-const clip = await Clip.create({ duration: 5 });
+const clip = await Clip.create({ duration: 5, skin: 'dark' });
 const B = clip.beat({ build: 0.3, legend: 3.4 });
 
 const orch = clip.node({ x: 160, y: 300, name: 'Orchestrator', sub: 'plans first', tag: 'opus', minW: 140 });
