@@ -13,9 +13,29 @@ test("README stays short outside tables", () => {
   assert.ok(prose.length <= 120, `README has ${prose.length} non-table lines`);
 });
 
-test("README has exactly the two main sections", () => {
+test("README sections: install, quickstart, how it works, commands", () => {
   const h2 = lines.filter((l) => l.startsWith("## "));
-  assert.deepEqual(h2, ["## How orka works", "## What you can use"]);
+  assert.deepEqual(h2, ["## Install", "## Quickstart", "## How it works", "## Commands and config"]);
+});
+
+test("How it works: eight numbered steps, each with its diagram and a docs link", () => {
+  const steps = readme.split(/^### /m).slice(1);
+  assert.equal(steps.length, 8);
+  steps.forEach((step, i) => {
+    assert.ok(step.startsWith(`${i + 1}. `), `step ${i + 1} heading: ${step.split("\n")[0]}`);
+    assert.match(step, new RegExp(`!\\[[^\\]]+\\]\\(docs/img/readme/${i + 1}-[a-z]+\\.png\\)`), `step ${i + 1} has no diagram`);
+    assert.match(step, /^Docs: \[[a-z-]+\.md\]\(docs\//m, `step ${i + 1} has no docs link`);
+  });
+});
+
+test("every README diagram has its source", () => {
+  for (const [, png] of readme.matchAll(/\(docs\/img\/readme\/([\w-]+)\.png\)/g)) {
+    assert.ok(existsSync(join(root, "docs/img/readme/src", png, "index.html")), `no source for ${png}`);
+  }
+});
+
+test("README footer credits limen and pstack", () => {
+  assert.match(readme, /Inspired by \[limen\]\(https:\/\/github\.com\/overment\/limen\) and \[pstack\]\(https:\/\/github\.com\/cursor\/plugins\/tree\/main\/pstack\)/);
 });
 
 test("README relative links and images resolve", () => {
@@ -25,9 +45,6 @@ test("README relative links and images resolve", () => {
   for (const t of relative) {
     const file = t.split("#")[0];
     assert.ok(existsSync(join(root, file)), `missing ${t}`);
-  }
-  for (const png of ["orca-how-it-works.png", "orca-loop.png", "orca-context-injection.png"]) {
-    assert.ok(readme.includes(`docs/${png}`), `README does not reference ${png}`);
   }
 });
 
