@@ -23,11 +23,11 @@ const a3 = clip.arrow(q1, ver, { kind: 'accent', label: 'yes' });
 const a4 = clip.arrow(q1, q2, { label: 'no', labelSide: 'right' });
 const a5 = clip.arrow(q2, warn, { label: 'yes' });
 const a6 = clip.arrow(warn, ver, { from: 'top', to: 'bottom', label: 'not blocking', labelSide: 'right' });
-const a7 = clip.arrow(q2, back, { kind: 'fail', label: 'no: blocks' });
+const a7 = clip.arrow(q2, back, { kind: 'accent', dashed: true, label: 'no: blocks' });
 
 const legend = clip.legend([
   { shape: 'pill', label: 'Start / next step' }, { node: 'focal', label: 'orka CLI' }, { shape: 'diamond', label: 'Decision' },
-  { arrow: 'accent', label: 'Pass' }, { arrow: 'fail', label: 'Block' },
+  { arrow: 'accent', label: 'Pass' }, { arrow: 'accent', dashed: true, label: 'Block' },
 ]);
 
 clip.animate((t) => {

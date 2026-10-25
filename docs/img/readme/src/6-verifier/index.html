@@ -22,7 +22,7 @@ const a1 = clip.arrow(ver, checks, { kind: 'accent', label: 'runs' });
 const a2 = clip.arrow(checks, res, { kind: 'accent' });
 const a3 = clip.arrow(res, verdict, { kind: 'accent' });
 const a4 = clip.arrow(verdict, pass, { kind: 'accent', label: 'pass' });
-const a5 = clip.arrow(verdict, orch, { from: 'bottom', to: 'top', kind: 'fail', label: 'fail', labelSide: 'right' });
+const a5 = clip.arrow(verdict, orch, { from: 'bottom', to: 'top', kind: 'accent', dashed: true, label: 'fail', labelSide: 'right' });
 const a6 = clip.arrow(orch, build, { label: 'failures' });
 const a7 = clip.arrow(build, ver, { from: 'left', to: 'bottom', label: 'round N+1', labelSeg: 0 });
 const a8 = clip.arrow(orch, strat, { from: 'bottom', to: 'top', dashed: true, label: 'on a stall', labelSide: 'right' });
@@ -31,7 +31,7 @@ const a9 = clip.arrow(strat, build, { from: 'left', to: 'bottom', dashed: true, 
 const legend = clip.legend([
   { node: 'focal', label: 'Verifier' }, { node: 'backend', label: 'Agent / step' }, { node: 'store', label: 'File' },
   { shape: 'diamond', label: 'Decision' }, { node: 'optional', label: 'Only on a stall' },
-  { arrow: 'accent', label: 'Pass' }, { arrow: 'fail', label: 'Fail' },
+  { arrow: 'accent', label: 'Pass' }, { arrow: 'accent', dashed: true, label: 'Fail' },
 ]);
 
 clip.animate((t) => {

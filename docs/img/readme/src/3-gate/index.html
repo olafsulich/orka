@@ -11,7 +11,7 @@ const B = clip.beat({ build: 0.3, legend: 3.4 });
 
 const orch = clip.node({ x: 160, y: 300, name: 'Orchestrator', sub: 'plans first', tag: 'opus', minW: 140 });
 const res = clip.node({ x: 160, y: 480, name: 'Research worker', sub: 'reads only', type: 'optional', tag: 'optional', minW: 150 });
-const appr = clip.node({ x: 440, y: 300, name: 'approach.md', sub: 'what · how · risks', type: 'store', minW: 150 });
+const appr = clip.node({ x: 440, y: 300, name: 'approach.md', sub: 'Outcome / Scope / Boundaries / Proof', type: 'store', minW: 150 });
 const prop = clip.node({ x: 720, y: 300, name: 'orka propose', sub: 'awaiting-direction', type: 'focal', tag: 'gate', minW: 160 });
 const you = clip.node({ x: 1000, y: 300, name: 'You', sub: 'read the plan', type: 'external', tag: 'ext' });
 const build = clip.node({ x: 1000, y: 480, name: 'Builders', sub: 'unlocked', tag: 'step 4', minW: 130 });
