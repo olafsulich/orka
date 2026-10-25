@@ -8,6 +8,8 @@ An entry is only trusted when its commit equals HEAD. If it is older, re-prove i
 - Drive: click "New item", type a title, press Enter
 - Prove: `{"text":"#list li:last-child","includes":"<title>"}` in orka.verify.json
 - Last verified: 2026-10-19 at commit `e2ef32e`
+- Keep in mind:
+  - the dev server needs `npm run build:css` once after a fresh clone, or the page loads unstyled
 
 ## CLI export command
 - Reach: `node bin/cli.mjs export --out /tmp/out.json`
