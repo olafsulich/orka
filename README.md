@@ -1,109 +1,122 @@
-# orka
+# Orka
 
-Local jobs for one git repo. `orka init` marks the repo. `orka run` checks out a linked worktree and starts an agent there, in a Herdr pane. You decide what to merge.
+Orka runs agent jobs in one git repo. You file a task. `orka run` checks out a linked worktree on its own branch and starts an orchestrator agent in a Herdr pane. The orchestrator splits the work across builder agents, and a fresh verifier checks the result. The CLI enforces the rules: who may start, when a check blocks, and when a job is done. By default nothing is marked done or merged without your sign-off. Node ESM, zero dependencies.
 
-Not a fork of [limen](https://github.com/overment/limen). Not the old `orch` script. Fresh Node ESM, zero dependencies, local git only. Details live in [docs/](docs/README.md). Backlog: [tasks/](tasks/).
+The command is `orka`. Orka was called orca, and `orca` still works as a deprecated alias ([rename.md](docs/rename.md)).
 
-Formerly **orca**. `orca` still works as a deprecated alias, and repos with an existing `.orca/` keep using it; see [rename.md](docs/rename.md).
+## Install
 
-## How orka works
+Needs Node 22+, git, Herdr, and Claude Code (or Pi). `agent-browser` is optional and needed only for browser checks.
 
-![How orka works](docs/orca-how-it-works.png)
+```bash
+git clone https://github.com/olafsulich/orka.git && cd orka
+ln -s "$PWD/bin/orka.mjs" ~/.local/bin/orka   # any directory on PATH; agent panes call orka too
+orka doctor                                   # lists anything missing, with the fix
+```
 
-**Orchestrator, workers, verifier.** `orka run` starts an orchestrator that splits the goal and starts one worker per task, in parallel when tasks are independent. After the builders report, it starts one verifier, in rounds. The verifier runs `orka verify`, the project's checks and targeted browser checks, and writes a pass/fail verdict. On fail the orchestrator routes each blocking failure back to the builder that owns it. If the same check fails two rounds in a row, orka flags a stall and the orchestrator must change strategy (`orka strategy`) instead of repeating itself. When the verifier passes the orchestrator runs `orka review` and waits for Olaf's sign-off (`orka approve`); only then does it run `orka done` ([review.md](docs/review.md)). See [verifier.md](docs/verifier.md), [verify.md](docs/verify.md).
+## Quickstart
 
-![Orchestrator, workers and verifier rounds](docs/orca-loop.png)
+```bash
+cd ~/projects/my-app
+claude                     # once per repo: answer "Yes, I trust this folder", then /exit
+orka init                  # marks the repo, gitignores .orka/
+id=$(orka new --title "Fix footer year" --goal "The footer shows 2025; show the current year. Done when npm test passes.")
+orka run "$id"             # worktree, branch orka/<id>, orchestrator pane
+orka status "$id"          # any time
+orka approve "$id"         # when it asks for your sign-off
+git merge "orka/$id"       # orka never merges for you (unless the repo is at L3)
+```
 
-**Panes and Herdr.** Each job gets a Herdr workspace; workers and the verifier are split panes in it. orka frees finished worker panes and browsers on `done`/`stop` and reaps a worker's browsers mid-job (`orka reap`). The orchestrator pane stays open for feedback until `orka cleanup` closes stale workspaces. See [cleanup.md](docs/cleanup.md), [ports.md](docs/ports.md).
+A title that starts with "Fix" skips the direction gate (step 3). A new feature stops there first, so you can approve the plan.
 
-**Worktrees.** Each job runs on branch `orka/<id>` in a linked worktree under `.orka/worktrees/<id>`. All workers share that checkout, so keep their tasks off the same files. Nothing is merged for you: look at the branch, then merge it yourself. See [layout.md](docs/layout.md).
+## How it works
 
-**Watcher and webhook.** `orka run` starts a needs-input watcher that POSTs when the orchestrator is blocked or idle on a question. When the CLI marks a job `done`, `failed` or `stopped`, it POSTs the finish wake once. Both are off unless `.orka/secrets/finish-webhook.env` exists. See [needs-input.md](docs/needs-input.md), [webhooks.md](docs/webhooks.md), [follow-up.md](docs/follow-up.md).
+### 1. File the task
 
-**Context injection.** Each agent gets its context at a fixed point: the orchestrator prompt at `run`, a worker or verifier prompt at `orka worker`, a capped digest plus your message on `steer`, notes and results files when a worker reports, and the finish payload at the end.
+![orka new writes a queued job record from a goal or a committed spec](docs/img/readme/1-file.png)
 
-![What each agent receives and when](docs/orca-context-injection.png)
+`orka new` writes a job record under `.orka/jobs/` with status `queued`. The task comes from `--title` and `--goal`, or from a committed spec (`orka spec init`, then `orka new --spec`). Flags choose the agent kind, the models, the playbook, and whether the gate runs.
+Docs: [commands.md](docs/commands.md), [specs.md](docs/specs.md), [models.md](docs/models.md).
 
-Diagram sources: [diagrams.md](docs/diagrams.md).
+### 2. Start the orchestrator
 
-## What you can use
+![orka run opens a Herdr workspace and starts the orchestrator in the job's worktree; a watcher runs beside it](docs/img/readme/2-run.png)
 
-Commands (full flags in [commands.md](docs/commands.md)):
+`orka run <id>` creates the branch `orka/<id>` in a linked worktree under `.orka/worktrees/<id>`. It opens a Herdr workspace and starts the orchestrator there (default `opus`). It also starts a watcher, which delivers wakes, pings you when the orchestrator is stuck on a question, and hands a pane off to a fresh agent when its context fills up.
+Docs: [layout.md](docs/layout.md), [needs-input.md](docs/needs-input.md), [handoff.md](docs/handoff.md), [ports.md](docs/ports.md).
+
+### 3. Agree on the approach
+
+![The orchestrator writes approach.md and runs orka propose; builders stay locked until you approve, a steer sends it back](docs/img/readme/3-gate.png)
+
+For a new feature, the orchestrator plans before anything is built. It may start read-only research workers. Then it writes `approach.md` and runs `orka propose`, which sends you a webhook. `orka worker` refuses builders until you run `orka approve <id>`. `orka steer <id> "..."` sends the plan back for revision. Fixes, the other playbooks (bug-fix, investigation, hillclimb) and `--no-gate` skip this step.
+Docs: [gate.md](docs/gate.md).
+
+### 4. Builders work in parallel
+
+![The orchestrator starts one builder per task in the shared worktree; orka sends a bounded wake when each one finishes](docs/img/readme/4-workers.png)
+
+The orchestrator starts one builder per task with `orka worker` (default `sonnet`). All builders share the job's worktree, so their tasks must stay off each other's files. A builder only writes `results/<name>.json` and a note. When its turn ends, orka (not the agent) wakes the orchestrator with a bounded summary. `orka steer --to <worker>` reaches a builder between its tool calls.
+Docs: [workers.md](docs/workers.md), [handoff.md](docs/handoff.md).
+
+### 5. Static gates
+
+![Before a verifier round orka runs lint, typecheck and tests; a failure that also fails on the base commit is a warning, otherwise it blocks](docs/img/readme/5-gates.png)
+
+Before each verifier round, `orka worker --role verifier` runs the repo's cheap checks itself: lint, typecheck, check and test, or the list in `.orka/config.json`. If a gate fails, orka reruns it on the base commit. A gate that fails there too is a pre-existing warning. A gate that fails only on the branch blocks: no verifier starts, and the log goes back to the builder.
+Docs: [gates.md](docs/gates.md).
+
+### 6. Verifier rounds
+
+![A fresh verifier runs the checks and writes a verdict; a fail routes evidence back to the builder, a repeated fail forces a strategy change](docs/img/readme/6-verifier.png)
+
+One verifier starts with a fresh context. It runs `orka verify`, the project's checks and targeted `agent-browser` checks, and writes a verdict. It never edits product code. On `fail`, the orchestrator routes each blocking failure, with its evidence, to the builder that owns it, then starts the next round. If the same check fails two rounds in a row, that is a stall, and the orchestrator must change strategy (`orka strategy`).
+Docs: [verifier.md](docs/verifier.md), [verify.md](docs/verify.md), [doctor.md](docs/doctor.md).
+
+### 7. Review and sign-off
+
+![After a pass the orchestrator writes summary.txt and runs orka review; you approve or steer](docs/img/readme/7-review.png)
+
+A pass does not finish the job. The orchestrator writes `summary.txt` from the diff and runs `orka review`, which sends you a webhook. Look at the branch. `orka approve <id>` signs off, and the orchestrator runs `orka done`. `orka steer <id> "..."` asks for changes, and the job goes back through the workers and the verifier.
+Docs: [review.md](docs/review.md), [follow-up.md](docs/follow-up.md).
+
+### 8. Done, cleanup and merge
+
+![orka done sends the finish wake, frees the job's resources and keeps the branch; you merge it, or orka land does at L3](docs/img/readme/8-done.png)
+
+`orka done` refuses without your sign-off. With it, `orka done` sends the finish wake once and closes this job's browsers, dev servers and worker panes. It removes the worktree and keeps the branch. At the default level (L1) you merge `orka/<id>` yourself. At L2 `orka push --pr` opens a PR, and at L3 `orka land` merges, tests and pushes. The orchestrator pane stays open for follow-ups until `orka cleanup` closes stale workspaces.
+Docs: [cleanup.md](docs/cleanup.md), [webhooks.md](docs/webhooks.md), [autonomy.md](docs/autonomy.md).
+
+## Commands and config
 
 | Command | What it does |
 | --- | --- |
 | `orka init` | mark the repo, gitignore `.orka/` |
-| `orka new` | file a job (title, goal) |
-| `orka spec init <feature>` | scaffold `specs/<feature>/spec.md` ([specs.md](docs/specs.md)) |
+| `orka new` / `spec init` | file a job / scaffold a committed spec |
 | `orka run <id>` | worktree, pane, orchestrator, watcher |
-| `orka worker` | start a builder or verifier worker; a verifier round runs the static gates first ([gates.md](docs/gates.md)) |
-| `orka status` / `digest` | show a job, free memory, live panes, worker queue / capped snapshot |
-| `orka steer <id> [--to <worker>] "msg"` | message the lead (or a worker) through its inbox; follow-up round on a finished job ([workers.md](docs/workers.md)) |
-| `orka propose <id>` | orchestrator: pause at the direction gate, notify ([gate.md](docs/gate.md)) |
-| `orka review <id>` | orchestrator: verifier passed, wait for Olaf's sign-off, notify ([review.md](docs/review.md)) |
-| `orka approve <id>` | Olaf: approve the plan (`awaiting-direction`) or sign off the result (`review`) |
-| `orka resume <id>` | reattach the orchestrator of a job whose pane is gone (herdr restart, reboot) ([handoff.md](docs/handoff.md#resume)) |
-| `orka stop` / `done` | end a job; send the finish wake (`done` needs Olaf's sign-off, or `--give-up`) |
+| `orka worker` | start a builder, or a verifier round (gates first) |
+| `orka status` / `digest` | show a job / a capped snapshot |
+| `orka steer <id> [--to <worker>] "msg"` | message the orchestrator or a worker; a follow-up round on a finished job |
+| `orka propose` / `review` | orchestrator: wait for your direction / your sign-off |
+| `orka approve <id>` | approve the plan, or sign off the result |
+| `orka done` / `stop` | end a job (`done` needs your sign-off, or `--give-up`) |
+| `orka resume <id>` | reattach the orchestrator of a job whose pane is gone |
 | `orka strategy` / `log` | record a strategy change / a decision |
-| `orka verify <id>` | browser checks in the worktree |
-| `orka reap` / `cleanup` | free browsers / sweep finished jobs: browsers, done worktrees, stale workspaces (only when you run it) |
-| `orka webhook <id>` | preview or retry the finish POST |
-| `orka doctor [--job <id>] [--fix]` | environment check with a fix per problem; runs by itself on a `blocked` verdict ([doctor.md](docs/doctor.md)) |
-| `orka autonomy [set <L0-L3>]` | per-repo level, CLI-enforced ([autonomy.md](docs/autonomy.md)) |
-| `orka push <id> [--pr]` | push the job branch, open a PR (L2) |
-| `orka land <id> [--push]` | merge into main, test, push (L3) |
-| `orka chain [--signoff auto\|each\|end]` | run the task queue one job at a time; auto (default) merges each pass into main ([autonomy.md](docs/autonomy.md#orka-chain)) |
-| `orka watch <id>` | needs-input watcher and context handoff (started by `run`) |
-| `orka handoff <id> [<worker>\|orchestrator]` | one context-handoff pass; `--dry-run` shows each pane's %, window and its source; a name hands that pane off now |
+| `orka verify <id>` | browser checks from `orka.verify.json` |
+| `orka reap` / `cleanup` | free a worker's browsers / sweep finished jobs |
+| `orka doctor` | environment check, with a fix per problem |
+| `orka autonomy`, `push`, `land`, `chain` | per-repo level L0-L3, push and PR, merge into main, run a queue |
+| `orka watch` / `handoff` / `webhook` | watcher (started by `run`), context handoff, finish POST |
 
-Key flags:
-
-| Flag | Meaning |
+| Config | Purpose |
 | --- | --- |
-| `--kind claude\|pi` | agent kind (default `claude`) |
-| `--*-model <alias>` | orchestrator, worker or verifier model |
-| `--max-rounds N` | opt-in ceiling on verifier rounds |
-| `--spec <path>` | build the job from a committed spec |
-| `--ui`, `--playbook` | UI job; feature, bug-fix, investigation, hillclimb |
-| `--no-gate` | skip the direction gate (on for new features) |
-| `--keep` | skip cleanup for this job |
-| `--dry-run` | print the plan, change nothing |
-| `--cwd <repo>` | run from outside the repo |
-
-Roles:
-
-| Role | Does |
-| --- | --- |
-| builder | implements one task in the shared worktree |
-| verifier | checks the result, never edits product code |
-
-Models (details in [models.md](docs/models.md)):
-
-| Role | Default |
-| --- | --- |
-| orchestrator | `opus` |
-| worker | `sonnet` |
-| verifier | `haiku` (CLI job), `sonnet` (UI job) |
-| Pi job | `pi` for all roles, no model flags |
-
-Webhooks (details in [webhooks.md](docs/webhooks.md)):
-
-| Webhook | When |
-| --- | --- |
-| finish wake | job `done`, `failed` or `stopped` |
-| needs-input | orchestrator blocked or idle on a question |
-| `orka webhook <id>` | retry or preview; `--force` re-sends |
-| env | `WEBHOOK_URL`, `WEBHOOK_KEY` in `.orka/secrets/finish-webhook.env` |
-
-Config:
-
-| File | Purpose |
-| --- | --- |
-| `~/.config/orka/config.json` | autonomy level per repo path (default L1) |
-| `node_modules` in a job worktree | symlink to the main checkout's; real install when the lockfile differs |
-| `.orka/config.json` | local mark; `verify`, `verifierModel`, `staleAfter`, `memoryGuard`, `handoff` |
-| `handoff` | `{"threshold": 0.4, "orchestrator": true, "maxHandoffs": 3, "busyPollMs": 5000, "contextWindow": N}` or `false`; builders and the orchestrator past the threshold of their detected window (asked by their own Claude or Pi hook after a tool call, the watcher as fallback) write a note with the handoff skill and hand off to a fresh pane ([handoff.md](docs/handoff.md)) |
+| `.orka/config.json` | per repo: `gates`, `verify`, `verifierModel`, `staleAfter`, `memoryGuard`, `handoff` |
+| `~/.config/orka/config.json` | autonomy level per repo (default L1) |
+| `.orka/secrets/finish-webhook.env` | `WEBHOOK_URL`, `WEBHOOK_KEY`; no file, no webhooks |
 | `orka.verify.json` | browser checks at the worktree root; commit it |
-| ports | 4 per job: `ORKA_PORT`, `ORKA_PORTS` |
 
-More: [comparisons.md](docs/comparisons.md) (limen, old orch, v0 skips).
+Every flag: [commands.md](docs/commands.md). All docs: [docs/](docs/README.md). Diagram sources: [diagrams.md](docs/diagrams.md).
+
+---
+
+Inspired by [limen](https://github.com/overment/limen) and [pstack](https://github.com/cursor/plugins/tree/main/pstack).

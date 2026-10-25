@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>orka-readme-7-review</title>
+<script type="module">
+import { Clip } from '/engine/index.js';
+
+// Step 7: a passing verifier is not the end. The orchestrator writes summary.txt and runs orka review; you sign off with orka approve, or send changes with orka steer.
+const clip = await Clip.create({ duration: 4.5 });
+const B = clip.beat({ build: 0.3, legend: 3 });
+
+const orch = clip.node({ x: 160, y: 320, name: 'Orchestrator', sub: 'verifier passed', tag: 'opus', minW: 150 });
+const sum = clip.node({ x: 430, y: 320, name: 'summary.txt', sub: 'from the diff', type: 'store', minW: 150 });
+const rev = clip.node({ x: 700, y: 320, name: 'orka review', sub: 'status review', type: 'focal', tag: 'cli', minW: 150 });
+const you = clip.node({ x: 970, y: 320, name: 'You', sub: 'look at the branch', type: 'external', tag: 'ext', minW: 150 });
+const done = clip.node({ x: 970, y: 510, name: 'orka done', sub: 'orchestrator runs it', shape: 'pill', type: 'store', minW: 190 });
+
+const a1 = clip.arrow(orch, sum, { kind: 'accent', label: 'writes' });
+const a2 = clip.arrow(sum, rev, { kind: 'accent' });
+const a3 = clip.arrow(rev, you, { kind: 'accent', label: 'webhook' });
+const a4 = clip.arrow(you, done, { from: 'bottom', to: 'top', kind: 'accent', label: 'orka approve', labelSide: 'right' });
+const a5 = clip.arrow(you, orch, { from: 'top', to: 'top', out: 70, label: 'orka steer' });
+
+const legend = clip.legend([
+  { node: 'focal', label: 'orka CLI' }, { node: 'backend', label: 'Agent' }, { node: 'store', label: 'File' },
+  { node: 'external', label: 'You' }, { arrow: 'accent', label: 'Sign-off' }, { arrow: 'default', label: 'Change request' },
+]);
+
+clip.animate((t) => {
+  [orch, a1, sum, a2, rev, a3, you, a4, done, a5].forEach((it, i) => it.enter(t, B.build + i * 0.26));
+  legend.enter(t, B.legend, 'fade');
+});
+
+clip.mount();
+</script>
+</html>

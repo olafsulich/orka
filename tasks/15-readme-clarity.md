@@ -20,7 +20,7 @@ The README is a 316-line reference that mixes concepts, flags and edge cases. It
     - models (opus/sonnet defaults, overrides, Pi, and the verifier model once 02 lands);
     - webhooks (finish wake, needs-input, `orca webhook`, env);
     - config (`.orca/config.json`, `orca.verify.json`, ports).
-- **Move detail to `docs/`.** Move the long sections (Verify, Verifier worker, Finish wake, Cleanup, Follow-up rounds, Ports, Needs-input watcher, Limen/orch comparisons) into topic files such as `docs/verify.md`, `docs/webhooks.md`, `docs/cleanup.md` and `docs/models.md`. The README links to them, and nothing accurate is lost.
+- **Move detail to `docs/`.** Move the long sections (Verify, Verifier worker, Finish wake, Cleanup, Follow-up rounds, Ports, Needs-input watcher) into topic files such as `docs/verify.md`, `docs/webhooks.md`, `docs/cleanup.md` and `docs/models.md`. The README links to them, and nothing accurate is lost.
 - **No backlog or roadmap in the README.** Tasks live only in `tasks/`. At most, add one link: "Backlog: tasks/".
 - **Graphs come from `~/projects/diagram-framework`,** in the style of `docs/orca-how-it-works.png` (source `clips/orca-how-it-works/index.html`). Render with `npm run stills -- <clip> --at …`, look at the PNGs, then commit them to `docs/`. At minimum:
   1. a refreshed how-it-works diagram;
@@ -43,4 +43,4 @@ The README is a 316-line reference that mixes concepts, flags and edge cases. It
 - "Add a task for making the README more clear (do not store tasks there). It has a lot of info now; we want to focus on how it works and what things are available to use, leveraging diagram-framework for graphs."
 
 ## Done
-README.md is now an intro plus two sections (How orca works, What you can use) with short tables and the 3 diagrams (`docs/orca-how-it-works.png`, `orca-loop.png`, `orca-context-injection.png`; clip sources in diagram-framework `clips`, commit abb09c8). 91 lines, 47 outside tables. All long detail moved to `docs/` (commands, models, verify, verifier, webhooks, needs-input, follow-up, cleanup, ports, layout, comparisons, diagrams), with `--ui`, `--playbook`, `--premise`, `orca reap` and `--orphan-hours` added. New `test/readme-docs.test.mjs` (5 tests). `npm test`: 237 pass, 0 fail.
+README.md is now an intro plus two sections (How orca works, What you can use) with short tables and the 3 diagrams (`docs/orca-how-it-works.png`, `orca-loop.png`, `orca-context-injection.png`; clip sources in diagram-framework `clips`, commit abb09c8). 91 lines, 47 outside tables. All long detail moved to `docs/` (commands, models, verify, verifier, webhooks, needs-input, follow-up, cleanup, ports, layout, diagrams), with `--ui`, `--playbook`, `--premise`, `orca reap` and `--orphan-hours` added. New `test/readme-docs.test.mjs` (5 tests). `npm test`: 237 pass, 0 fail.

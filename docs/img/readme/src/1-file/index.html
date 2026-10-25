@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>orka-readme-1-file</title>
+<script type="module">
+import { Clip } from '/engine/index.js';
+
+// Step 1: a task goes in. orka new files a queued job record, from a title and goal or from a committed spec.
+const clip = await Clip.create({ duration: 4 });
+const B = clip.beat({ build: 0.3, legend: 2.4 });
+
+const you = clip.node({ x: 160, y: 300, name: 'You', sub: 'title · goal', type: 'external', tag: 'ext' });
+const spec = clip.node({ x: 160, y: 460, name: 'Spec', sub: 'specs/<f>/spec.md', type: 'input', tag: 'optional', minW: 150 });
+const neu = clip.node({ x: 480, y: 300, name: 'orka new', sub: 'files the job', type: 'focal', tag: 'cli', minW: 130 });
+const rec = clip.node({ x: 820, y: 300, name: 'Job record', sub: '.orka/jobs/<id>.json', type: 'store', tag: 'queued', minW: 170 });
+
+const a1 = clip.arrow(you, neu, { label: '--goal' });
+const a2 = clip.arrow(spec, neu, { from: 'right', to: 'bottom', label: '--spec', labelSeg: 0 });
+const a3 = clip.arrow(neu, rec, { kind: 'accent', label: 'writes' });
+
+const legend = clip.legend([
+  { node: 'focal', label: 'orka CLI' }, { node: 'external', label: 'You' }, { node: 'input', label: 'Input' },
+  { node: 'store', label: 'File on disk' }, { arrow: 'accent', label: 'Main path' },
+]);
+
+clip.animate((t) => {
+  [you, a1, spec, a2, neu, a3, rec].forEach((it, i) => it.enter(t, B.build + i * 0.28));
+  legend.enter(t, B.legend, 'fade');
+});
+
+clip.mount();
+</script>
+</html>

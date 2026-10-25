@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>orka-readme-3-gate</title>
+<script type="module">
+import { Clip } from '/engine/index.js';
+
+// Step 3: the direction gate. The orchestrator plans, writes approach.md and runs orka propose; builders stay locked until you approve, a steer sends it back to revise.
+const clip = await Clip.create({ duration: 5 });
+const B = clip.beat({ build: 0.3, legend: 3.4 });
+
+const orch = clip.node({ x: 160, y: 300, name: 'Orchestrator', sub: 'plans first', tag: 'opus', minW: 140 });
+const res = clip.node({ x: 160, y: 480, name: 'Research worker', sub: 'reads only', type: 'optional', tag: 'optional', minW: 150 });
+const appr = clip.node({ x: 440, y: 300, name: 'approach.md', sub: 'what · how · risks', type: 'store', minW: 150 });
+const prop = clip.node({ x: 720, y: 300, name: 'orka propose', sub: 'awaiting-direction', type: 'focal', tag: 'gate', minW: 160 });
+const you = clip.node({ x: 1000, y: 300, name: 'You', sub: 'read the plan', type: 'external', tag: 'ext' });
+const build = clip.node({ x: 1000, y: 480, name: 'Builders', sub: 'unlocked', tag: 'step 4', minW: 130 });
+
+const a1 = clip.arrow(orch, res, { from: 'bottom', to: 'top', dashed: true, label: 'may start', labelSide: 'right' });
+const a2 = clip.arrow(orch, appr, { kind: 'accent', label: 'writes' });
+const a3 = clip.arrow(appr, prop, { kind: 'accent' });
+const a4 = clip.arrow(prop, you, { kind: 'accent', label: 'webhook' });
+const a5 = clip.arrow(you, build, { from: 'bottom', to: 'top', kind: 'accent', label: 'orka approve', labelSide: 'right' });
+const a6 = clip.arrow(you, orch, { from: 'top', to: 'top', out: 70, label: 'orka steer' });
+
+const legend = clip.legend([
+  { node: 'focal', label: 'orka CLI' }, { node: 'backend', label: 'Agent' }, { node: 'store', label: 'File' },
+  { node: 'external', label: 'You' }, { node: 'optional', label: 'Optional' },
+  { arrow: 'accent', label: 'Main path' }, { arrow: 'default', label: 'Revise' },
+]);
+
+clip.animate((t) => {
+  [orch, a1, res, a2, appr, a3, prop, a4, you, a5, build, a6].forEach((it, i) => it.enter(t, B.build + i * 0.25));
+  legend.enter(t, B.legend, 'fade');
+});
+
+clip.mount();
+</script>
+</html>

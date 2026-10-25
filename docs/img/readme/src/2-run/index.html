@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>orka-readme-2-run</title>
+<script type="module">
+import { Clip } from '/engine/index.js';
+
+// Step 2: orka run checks out a linked worktree on branch orka/<id>, opens a Herdr workspace and starts the orchestrator there; a watcher runs beside it.
+const clip = await Clip.create({ duration: 4.5 });
+const B = clip.beat({ build: 0.3, legend: 2.8 });
+
+const run = clip.node({ x: 160, y: 300, name: 'orka run', sub: 'orka run <id>', type: 'focal', tag: 'cli', minW: 130 });
+const herdr = clip.node({ x: 460, y: 300, name: 'Herdr workspace', sub: 'one per job', tag: 'pane', minW: 160 });
+const zone = clip.zone({ x: 680, y: 200, w: 300, h: 200, variant: 'dashed', label: 'worktree · orka/<id>' });
+const orch = clip.node({ x: 830, y: 300, name: 'Orchestrator', sub: 'opus · or pi', tag: 'lead', minW: 140 });
+const watch = clip.node({ x: 460, y: 500, name: 'Watcher', sub: 'orka watch', type: 'optional', tag: 'bg', minW: 140 });
+
+const a1 = clip.arrow(run, herdr, { kind: 'accent', label: 'spawn' });
+const a2 = clip.arrow(herdr, orch, { kind: 'accent', label: 'cwd', labelAt: 0.35 });
+const a3 = clip.arrow(run, watch, { from: 'bottom', to: 'left', dashed: true, label: 'starts', labelSide: 'left', labelSeg: 0 });
+const a4 = clip.arrow(watch, orch, { from: 'right', to: 'bottom', dashed: true, label: 'wakes · asks', labelSeg: 0 });
+
+const legend = clip.legend([
+  { node: 'focal', label: 'orka CLI' }, { node: 'backend', label: 'Agent / pane' }, { node: 'optional', label: 'Background' },
+  { arrow: 'accent', label: 'Main path' }, { arrow: 'default', dashed: true, label: 'Side channel' },
+]);
+
+clip.animate((t) => {
+  run.enter(t, B.build);
+  a1.enter(t, B.build + 0.28);
+  herdr.enter(t, B.build + 0.56);
+  zone.enter(t, B.build + 0.84, 'fade');
+  a2.enter(t, B.build + 1.0);
+  orch.enter(t, B.build + 1.28);
+  a3.enter(t, B.build + 1.56);
+  watch.enter(t, B.build + 1.84);
+  a4.enter(t, B.build + 2.1);
+  legend.enter(t, B.legend, 'fade');
+});
+
+clip.mount();
+</script>
+</html>
