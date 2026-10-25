@@ -30,6 +30,15 @@ Recorded:
 
 Gate rounds are counted apart from verifier rounds: a red gate does not use up a `--max-rounds` round and does not count toward a stall.
 
+## Builders run the gates too
+
+The gate round above stays the authority. Builders run the same gates first, so a red gate is caught by the worker that caused it:
+
+- **The brief:** at `orka worker` time a builder's brief gets a GATES block listing the exact commands, from the same detection (`"gates"`, else package.json scripts; `"gates": false` or none found means no block). Each command is wrapped as `timeout -k 5 <gateTimeout> sh -c '<command>'`, and the brief says to run them one at a time, never in parallel or in the background. Research workers (name starting with `research`, or a task carrying the research report block) and the verifier get no block.
+- **The rule:** run every gate in the worktree before writing the result. A failure in a file inside the builder's SCOPE is its own: fix it and rerun. A failure in a file outside its SCOPE belongs to another worker sharing the worktree: do not edit it, report it. Rerun until its own files are green or the TIMEBOX ends.
+- **The record:** `results/<name>.json` gets `"gates": [{"cmd", "ok", "ownFailures", "otherFailures"}]` (file lists, at most 5 each, no logs). `orka digest` shows one line under the worker: `gates: npm run lint ok, npm test RED (own 1, other 0); own gates red: not done, steer it back`. A result without the field (an older worker) shows no line.
+- **The orchestrator:** a builder that reports its own gates red is not done; the orchestrator steers it back with `orka steer --to <worker>`.
+
 ## Acceptance by gate
 
 When a job's whole acceptance is one command, a verifier agent would only rerun it. In that case:
