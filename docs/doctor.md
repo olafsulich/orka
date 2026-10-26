@@ -18,7 +18,7 @@ It prints one line per check (`ok`, `warn` or `FAIL`), with the fix under every 
 | node_modules | the main checkout lacks it (when package.json has dependencies), or the job worktree's link is missing or broken, or its lockfile differs | `orka doctor --job <id> --fix` relinks; a differing lockfile names the install command |
 | ports (`--job`) | one of the job's ports is held (`ss -ltnp`) | stop the stale server, or use another job port |
 | disk | under 2 GB free: FAIL; over 90% used: warn | `timeout 120 orka cleanup --dry-run` |
-| memory | MemAvailable under the memory guard's minimum: warn | wait, or close idle panes of finished jobs |
+| memory | MemAvailable under the memory guard's minimum: warn | names the finished jobs that still hold memory, with the `orka cleanup --dry-run` that shows what closing them frees; else wait, or close idle panes of finished jobs |
 | claude trust | the repo root is not trusted in `~/.claude.json` (`projects[<repo>].hasTrustDialogAccepted`); skipped for pi jobs | once, by hand: `cd <repo> && claude`, "Yes, I trust this folder", `/exit`. Claude offers no supported way to pre-trust from the command line, so orka only reports it and never accepts the dialog |
 | chrome | orphan agent-browser Chrome roots (no running job, older than 2h): warn | `timeout 120 orka cleanup` |
 

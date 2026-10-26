@@ -2705,6 +2705,17 @@ function livePaneCount(repo) {
     .reduce((n, j) => n + (j.pane ? 1 : 0) + (j.workers || []).filter((w) => w.pane && !w.closed && w.pane !== j.pane).length, 0);
 }
 
+// Per-job memory on this host (guard.jobMemory) and a status lookup for this repo's jobs.
+function jobMemoryOf(repo) {
+  const statuses = new Map(loadAllJobs(repo).map((j) => [j.id, j.status]));
+  return { usage: guard.jobMemory(browsers.procRootOf()), statusOf: (id) => statuses.get(id) || "" };
+}
+
+function finishedHintOf(repo) {
+  const { usage, statusOf } = jobMemoryOf(repo);
+  return guard.finishedHint(usage, statusOf);
+}
+
 function hostSample(repo) {
   return { availableMb: guard.memAvailableMb(browsers.procRootOf()), panes: livePaneCount(repo) };
 }
@@ -2734,7 +2745,8 @@ function waitForRoom(repo, job, name, role) {
   }
   const why = verdict.ok ? `${ahead.length} earlier start(s) queued` : verdict.reasons.join("; ");
   appendDecision(repo, job.id, ["memory-guard", `queued ${role} ${name}`, why, sampleText(sample, limits), "waiting"]);
-  console.error(`memory guard: ${why}; ${role} ${name} queued, waiting up to ${Math.round(limits.waitMs / 1000)}s`);
+  const hint = verdict.ok ? "" : finishedHintOf(repo);
+  console.error(`memory guard: ${why}; ${role} ${name} queued, waiting up to ${Math.round(limits.waitMs / 1000)}s${hint ? `\nmemory guard: ${hint}` : ""}`);
   const started = Date.now();
   for (;;) {
     sleep(limits.pollMs);
@@ -2752,7 +2764,8 @@ function waitForRoom(repo, job, name, role) {
       leave();
       const still = verdict.ok ? "earlier starts still queued" : verdict.reasons.join("; ");
       appendDecision(repo, job.id, ["memory-guard", `did not start ${role} ${name} after ${waited}s`, still, sampleText(sample, limits), "not started"]);
-      fail(`memory guard: ${still}; ${name} not started after ${waited}s. Wait for a worker to finish (or run orka cleanup), then run orka worker again.`);
+      const held = verdict.ok ? "" : finishedHintOf(repo);
+      fail(`memory guard: ${still}; ${name} not started after ${waited}s. Wait for a worker to finish (or run orka cleanup), then run orka worker again.${held ? `\nmemory guard: ${held}` : ""}`);
     }
   }
 }
@@ -2766,6 +2779,9 @@ function printHost(repo, jobId = null) {
   const guardNote = limits.off ? "guard off" : `guard: min ${limits.minAvailableMb}MB, max ${limits.maxPanes} panes`;
   const indent = jobId ? "  " : "";
   console.log(`${indent}host: memory ${mem}, live panes ${sample.panes}, queue ${queue.length} (${guardNote})`);
+  const { usage, statusOf } = jobMemoryOf(repo);
+  const shown = jobId ? usage.filter((u) => u.job === jobId) : usage;
+  if (shown.length) console.log(`${indent}job memory: ${guard.jobMemoryText(shown, { statusOf })}${!jobId && usage.length > 3 ? ` (+${usage.length - 3} more)` : ""}`);
   for (const q of queue.filter((e) => !jobId || e.job === jobId)) console.log(`${indent}queued: ${q.job} ${q.name} (${q.role}) since ${q.since}`);
 }
 
@@ -4674,7 +4690,9 @@ function doctorChecks(repo, job = null) {
     disk = null;
   }
   checks.push(doctor.diskCheck(disk));
-  checks.push(doctor.memoryCheck(guard.memAvailableMb(browsers.procRootOf()), guardLimitsOf(repo).minAvailableMb));
+  const availableMb = guard.memAvailableMb(browsers.procRootOf());
+  const minMb = guardLimitsOf(repo).minAvailableMb;
+  checks.push(doctor.memoryCheck(availableMb, minMb, availableMb != null && availableMb < minMb ? finishedHintOf(repo) : ""));
   if (!job || job.kind !== "pi") checks.push(doctor.trustCheck({ repo, claudeJson: join(homedir(), ".claude.json") }));
   const live = loadAllJobs(repo).filter((j) => j.status === "running");
   const orphans = browsers.selectOrphans(browsers.scanBrowsers(), { minAgeMs: ORPHAN_BROWSER_HOURS * 3600000, liveJobIds: live.map((j) => j.id), livePrefixes: live.map(browserPrefix) });
