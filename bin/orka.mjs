@@ -4582,8 +4582,13 @@ function sweep(repo, { dry = false, thresholdMs, log = console.log, budgetMs = C
   // Claude scratch folders of jobs whose workspace is closed, or closes in this pass.
   const scratch = jobs.filter((j) => j.workspaceClosed || workspaces.includes(j)).map((j) => ({ job: j, dir: claudeScratchOf(repo, j) })).filter((s) => s.dir && existsSync(s.dir));
   count += scratch.length;
+  // Processes done and stopped jobs left behind once their workspace is closed (or closes now).
+  const reapIds = jobs.filter((j) => (j.status === "done" || j.status === "stopped") && !j.keep && (j.workspaceClosed || workspaces.includes(j))).map((j) => j.id);
+  const leftovers = findLeftovers(reapIds);
+  count += leftovers.filter((p) => !leftovers.some((o) => o.pid === p.ppid)).length;
   if (!count) log("cleanup: nothing to close");
   if (dry) {
+    killLeftovers(leftovers, true, log);
     for (const s of scratch) log(`cleanup: would remove Claude scratch ${s.dir} (${lifecycle.formatKb(diskKb(s.dir))}, ${s.job.id})`);
     return count;
   }
@@ -4593,8 +4598,27 @@ function sweep(repo, { dry = false, thresholdMs, log = console.log, budgetMs = C
     save(repo, j);
     herdr(["workspace", "close", j.workspace]);
   }
+  // A fresh look: a pane's own processes may have been reparented while its workspace closed.
+  killLeftovers(findLeftovers(reapIds), false, log);
   for (const s of scratch) removeClaudeScratch(repo, s.job, s.dir, log);
   return count;
+}
+
+const findLeftovers = (ids) => lifecycle.findJobLeftovers(ids, { procRoot: browsers.procRootOf(), isBrowser: browsers.isBrowserProcess });
+
+// Kills leftover processes (lifecycle.findJobLeftovers) with their children: one line per root.
+function killLeftovers(procs, dry, log) {
+  const pids = new Set(procs.map((p) => p.pid));
+  for (const p of procs.filter((x) => !pids.has(x.ppid))) {
+    const kids = procs.filter((c) => c.ppid === p.pid).length;
+    log(`cleanup: ${dry ? "would kill" : "killed"} leftover pid ${p.pid} (${[p.job, p.worker].filter(Boolean).join(" ")}: ${p.cmdline.slice(0, 80)})${kids ? ` and ${kids} child process(es)` : ""}`);
+  }
+  if (dry || !procs.length) return;
+  try {
+    lifecycle.killProcesses([...pids], { graceMs: 3000 });
+  } catch (err) {
+    log(`cleanup: could not kill a leftover process: ${err.message}`);
+  }
 }
 
 // Claude Code's scratch root: <tmpdir>/claude-<uid>, or ORKA_CLAUDE_TMP (tests point it at a sandbox).
