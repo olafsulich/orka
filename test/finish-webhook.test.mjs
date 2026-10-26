@@ -62,8 +62,11 @@ function listen(hits) {
     "-out", join(dir, "cert.pem"),
     "-days", "1", "-nodes", "-subj", "/CN=127.0.0.1",
   ], { stdio: "ignore" });
+  // The server needs only the bytes: the folder goes now, so a run killed mid-test leaves nothing in tmp.
+  const tls = { cert: readFileSync(join(dir, "cert.pem")), key: readFileSync(join(dir, "key.pem")) };
+  rmSync(dir, { recursive: true, force: true });
   const server = createServer(
-    { cert: readFileSync(join(dir, "cert.pem")), key: readFileSync(join(dir, "key.pem")) },
+    tls,
     (req, res) => {
       const chunks = [];
       req.on("data", (chunk) => chunks.push(chunk));
@@ -81,10 +84,8 @@ function listen(hits) {
     server.listen(0, "127.0.0.1", () => resolve({
       server,
       port: server.address().port,
-      dir,
       close() {
         server.close();
-        rmSync(dir, { recursive: true, force: true });
       },
     }));
   });
