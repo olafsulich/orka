@@ -4,15 +4,16 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { enqueue, guardLimits, guardVerdict, liveQueue, memAvailableMb, orkaPaneCount } from "../lib/guard.mjs";
+import { enqueue, guardLimits, guardVerdict, liveQueue, memAvailableMb, memPressure, orkaPaneCount, swapTotalMb } from "../lib/guard.mjs";
 
 const ORKA = join(import.meta.dirname, "..", "bin", "orka.mjs");
 
 test("guardLimits: defaults, config, env override, off", () => {
   const none = () => undefined;
-  assert.deepEqual(guardLimits({}, none), { off: false, minAvailableMb: 1024, maxPanes: 20, waitMs: 480000, pollMs: 15000 });
-  const cfg = { minAvailableMb: 2048, maxPanes: 6, wait: "2m", poll: "5s" };
-  assert.deepEqual(guardLimits(cfg, none), { off: false, minAvailableMb: 2048, maxPanes: 6, waitMs: 120000, pollMs: 5000 });
+  assert.deepEqual(guardLimits({}, none), { off: false, minAvailableMb: 1024, maxPanes: 20, maxMemPsi: 10, waitMs: 480000, pollMs: 15000 });
+  const cfg = { minAvailableMb: 2048, maxPanes: 6, maxMemPsi: 25, wait: "2m", poll: "5s" };
+  assert.deepEqual(guardLimits(cfg, none), { off: false, minAvailableMb: 2048, maxPanes: 6, maxMemPsi: 25, waitMs: 120000, pollMs: 5000 });
+  assert.equal(guardLimits(cfg, (k) => (k === "MAX_MEM_PSI" ? "0" : undefined)).maxMemPsi, 0);
   const env = { MIN_MEM_MB: "999999", GUARD_WAIT: "1s" };
   const got = guardLimits(cfg, (k) => env[k]);
   assert.equal(got.minAvailableMb, 999999);
@@ -27,6 +28,23 @@ test("guardVerdict: memory and panes; an unknown reading never blocks", () => {
   assert.match(guardVerdict({ availableMb: 500, panes: 3 }, limits).reasons[0], /MemAvailable 500MB < 1024MB/);
   assert.match(guardVerdict({ availableMb: 2000, panes: 4 }, limits).reasons[0], /4 live panes >= 4/);
   assert.equal(guardVerdict({ availableMb: null, panes: null }, limits).ok, true);
+  const psi = { ...limits, maxMemPsi: 10 };
+  assert.match(guardVerdict({ availableMb: 2000, panes: 1, psi: 12.5 }, psi).reasons[0], /memory pressure 12\.5% > 10%/);
+  assert.equal(guardVerdict({ availableMb: 2000, panes: 1, psi: 9 }, psi).ok, true);
+  assert.equal(guardVerdict({ availableMb: 2000, panes: 1, psi: 90 }, { ...psi, maxMemPsi: 0 }).ok, true, "0 turns the pressure check off");
+  assert.equal(guardVerdict({ availableMb: 2000, panes: 1, psi: null }, psi).ok, true, "no PSI never blocks");
+});
+
+test("swapTotalMb and memPressure read meminfo and PSI; null when missing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orka-guard-psi-"));
+  writeFileSync(join(dir, "meminfo"), "MemTotal: 8000000 kB\nSwapTotal:       2097152 kB\n");
+  mkdirSync(join(dir, "pressure"));
+  writeFileSync(join(dir, "pressure", "memory"), "some avg10=3.25 avg60=1.00 avg300=0.10 total=1\nfull avg10=1.00 avg60=0.00 avg300=0.00 total=1\n");
+  assert.equal(swapTotalMb(dir), 2048);
+  assert.equal(memPressure(dir), 3.25);
+  assert.equal(swapTotalMb(join(dir, "nope")), null);
+  assert.equal(memPressure(join(dir, "nope")), null);
+  rmSync(dir, { recursive: true, force: true });
 });
 
 test("memAvailableMb reads meminfo; the queue is oldest first and drops dead waiters", () => {
@@ -123,6 +141,19 @@ test("a worker start past the memory limit queues, then gives up and logs it", (
   assert.match(log, /memory-guard\tqueued builder w1\tMemAvailable 4096MB < 999999MB\t.*\twaiting/);
   assert.match(log, /memory-guard\tdid not start builder w1 after [0-9]+s\t.*\tnot started/);
   assert.equal(t.orka(["worker", "--job", t.id, "--name", "w1", "--task", TASK]).status, 0, "room: starts at once");
+});
+
+test("memory pressure over the limit queues a worker start; status shows the pressure", () => {
+  const t = scratch();
+  const proc = t.env.ORKA_PROC_ROOT;
+  mkdirSync(join(proc, "pressure"), { recursive: true });
+  writeFileSync(join(proc, "pressure", "memory"), "some avg10=42.00 avg60=20.00 avg300=5.00 total=1\n");
+  assert.match(t.orka(["status", t.id]).stdout, /host: memory 4096MB available \(pressure 42%\), live panes 1/);
+  const r = t.orka(["worker", "--job", t.id, "--name", "w1", "--task", TASK], { ORKA_GUARD_WAIT: "1s" });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /memory guard: memory pressure 42% > 10%; builder w1 queued/);
+  assert.match(t.decisions(), /memory-guard\tqueued builder w1\tmemory pressure 42% > 10%\t.*pressure 42%\/10%\twaiting/);
+  assert.equal(t.orka(["worker", "--job", t.id, "--name", "w1", "--task", TASK], { ORKA_MAX_MEM_PSI: "0" }).status, 0, "0 turns the check off");
 });
 
 test("a queued worker shows in status and starts once memory frees up", async () => {

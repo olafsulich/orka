@@ -2717,10 +2717,11 @@ function finishedHintOf(repo) {
 }
 
 function hostSample(repo) {
-  return { availableMb: guard.memAvailableMb(browsers.procRootOf()), panes: livePaneCount(repo) };
+  const procRoot = browsers.procRootOf();
+  return { availableMb: guard.memAvailableMb(procRoot), panes: livePaneCount(repo), psi: guard.memPressure(procRoot) };
 }
 
-const sampleText = (s, limits) => `MemAvailable ${s.availableMb ?? "?"}MB (min ${limits.minAvailableMb}MB), live panes ${s.panes ?? "?"}/${limits.maxPanes}`;
+const sampleText = (s, limits) => `MemAvailable ${s.availableMb ?? "?"}MB (min ${limits.minAvailableMb}MB), live panes ${s.panes ?? "?"}/${limits.maxPanes}${s.psi != null ? `, pressure ${s.psi}%/${limits.maxMemPsi}%` : ""}`;
 
 // The memory guard. Before a worker or verifier pane starts: when MemAvailable or
 // the live pane count is past its limit, or earlier starts are already queued,
@@ -2775,7 +2776,7 @@ function printHost(repo, jobId = null) {
   const limits = guardLimitsOf(repo);
   const sample = hostSample(repo);
   const queue = guard.liveQueue(guard.queueDir(brand.stateDir(repo)), pidAlive);
-  const mem = sample.availableMb == null ? "unknown" : `${sample.availableMb}MB available`;
+  const mem = `${sample.availableMb == null ? "unknown" : `${sample.availableMb}MB available`}${sample.psi != null ? ` (pressure ${sample.psi}%)` : ""}`;
   const guardNote = limits.off ? "guard off" : `guard: min ${limits.minAvailableMb}MB, max ${limits.maxPanes} panes`;
   const indent = jobId ? "  " : "";
   console.log(`${indent}host: memory ${mem}, live panes ${sample.panes}, queue ${queue.length} (${guardNote})`);
@@ -4693,11 +4694,36 @@ function doctorChecks(repo, job = null) {
   const availableMb = guard.memAvailableMb(browsers.procRootOf());
   const minMb = guardLimitsOf(repo).minAvailableMb;
   checks.push(doctor.memoryCheck(availableMb, minMb, availableMb != null && availableMb < minMb ? finishedHintOf(repo) : ""));
+  checks.push(doctor.swapCheck(guard.swapTotalMb(browsers.procRootOf())));
+  checks.push(doctor.tmpfsCheck(tmpFilesystem()));
   if (!job || job.kind !== "pi") checks.push(doctor.trustCheck({ repo, claudeJson: join(homedir(), ".claude.json") }));
   const live = loadAllJobs(repo).filter((j) => j.status === "running");
   const orphans = browsers.selectOrphans(browsers.scanBrowsers(), { minAgeMs: ORPHAN_BROWSER_HOURS * 3600000, liveJobIds: live.map((j) => j.id), livePrefixes: live.map(browserPrefix) });
   checks.push(doctor.chromeCheck(orphans.filter((p) => p.chromeRoot).map((p) => p.pid)));
   return checks;
+}
+
+// The temp folder's filesystem: the longest mount point in <proc>/mounts that holds tmpdir().
+function tmpFilesystem() {
+  const path = realpathSync(tmpdir());
+  let best = null;
+  try {
+    for (const line of readFileSync(join(browsers.procRootOf(), "mounts"), "utf8").split("\n")) {
+      const [, point, fstype] = line.split(" ");
+      if (!point || !fstype) continue;
+      const mount = point.replace(/\\040/g, " ");
+      if ((path === mount || path.startsWith(mount === "/" ? "/" : `${mount}/`)) && (!best || mount.length > best.mount.length)) best = { mount, fstype };
+    }
+  } catch {
+    return null;
+  }
+  if (!best) return null;
+  try {
+    const st = statfsSync(path);
+    return { path, fstype: best.fstype, usedBytes: (st.blocks - st.bfree) * st.bsize };
+  } catch {
+    return { path, fstype: best.fstype, usedBytes: 0 };
+  }
 }
 
 // The process listening on each of the job's ports, from ss; "" when free. null when ss is missing.
@@ -5199,7 +5225,7 @@ async function cmdChain(args) {
       let avail = Infinity;
       let load = 0;
       try {
-        avail = Math.floor(Number(/MemAvailable:\s+(\d+)/.exec(readFileSync("/proc/meminfo", "utf8"))[1]) / 1024);
+        avail = guard.memAvailableMb(browsers.procRootOf()) ?? Infinity;
         load = Number(readFileSync("/proc/loadavg", "utf8").split(" ")[0]);
       } catch {}
       if (avail >= CHAIN_MIN_MEM_MB && load < CHAIN_MAX_LOAD) return log(`resources ok: avail=${avail}MB load=${load}`);
@@ -5859,10 +5885,10 @@ Shared dependencies
   differs. orka run and every orka worker repair a missing or broken link.
 
 Memory guard
-  orka worker checks MemAvailable and Orka's live panes (ORKA_JOB-tagged pane shells on the host, not
-  Olaf's other Herdr panes) before it starts a pane. When tight it queues (.orka/queue/)
-  and waits, then refuses past the limit. "memoryGuard": {"minAvailableMb":1024,"maxPanes":20,"wait":"8m","poll":"15s"}
-  in .orka/config.json, or ORKA_MIN_MEM_MB, ORKA_MAX_PANES, ORKA_GUARD_WAIT, ORKA_GUARD_POLL, ORKA_MEMORY_GUARD=off.
+  orka worker checks MemAvailable, memory pressure (PSI) and Orka's live panes (ORKA_JOB-tagged pane shells
+  on the host, not Olaf's other Herdr panes) before it starts a pane. When tight it queues (.orka/queue/)
+  and waits, then refuses past the limit. "memoryGuard": {"minAvailableMb":1024,"maxPanes":20,"maxMemPsi":10,"wait":"8m","poll":"15s"}
+  in .orka/config.json, or ORKA_MIN_MEM_MB, ORKA_MAX_PANES, ORKA_MAX_MEM_PSI, ORKA_GUARD_WAIT, ORKA_GUARD_POLL, ORKA_MEMORY_GUARD=off.
   Logged to decisions.tsv; orka status shows memory, live panes and the queue. No disk guard.
 
 Follow-up rounds
