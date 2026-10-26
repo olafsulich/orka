@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -64,6 +64,7 @@ test("isStale respects status, keep, workspace and extra activity", () => {
 
 function fakeProc() {
   const root = mkdtempSync(join(tmpdir(), "orka-lifecycle-"));
+  process.on("exit", () => rmSync(root, { recursive: true, force: true }));
   const procRoot = join(root, "proc");
   const wt = join(root, "wt");
   const wt2 = join(root, "wt2");

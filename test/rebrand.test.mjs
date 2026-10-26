@@ -200,7 +200,10 @@ test("watchers of both script names are recognised; ORCA_FAKE_WATCHERS is still 
 function listen(hits) {
   const dir = mkdtempSync(join(tmpdir(), "orka-cert-"));
   execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-keyout", join(dir, "key.pem"), "-out", join(dir, "cert.pem"), "-days", "1", "-nodes", "-subj", "/CN=127.0.0.1"], { stdio: "ignore" });
-  const server = createServer({ cert: readFileSync(join(dir, "cert.pem")), key: readFileSync(join(dir, "key.pem")) }, (req, res) => {
+  // The server needs only the bytes: the folder goes now, so a run killed mid-test leaves nothing in tmp.
+  const tls = { cert: readFileSync(join(dir, "cert.pem")), key: readFileSync(join(dir, "key.pem")) };
+  rmSync(dir, { recursive: true, force: true });
+  const server = createServer(tls, (req, res) => {
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
@@ -209,7 +212,7 @@ function listen(hits) {
       res.end();
     });
   });
-  return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve({ port: server.address().port, close: () => (server.close(), rmSync(dir, { recursive: true, force: true })) })));
+  return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve({ port: server.address().port, close: () => server.close() })));
 }
 
 function orkaAsync(t, args, env) {

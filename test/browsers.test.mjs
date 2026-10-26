@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,6 +7,7 @@ import { findTaggedBrowsers, isBrowserProcess, selectReap } from "../lib/browser
 
 function fakeProc(entries) {
   const root = mkdtempSync(join(tmpdir(), "orka-proc-"));
+  process.on("exit", () => rmSync(root, { recursive: true, force: true }));
   for (const [pid, cmd, env] of entries) {
     mkdirSync(join(root, String(pid)));
     writeFileSync(join(root, String(pid), "cmdline"), cmd.split(" ").join("\0") + "\0");
