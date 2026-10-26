@@ -19,6 +19,8 @@ It prints one line per check (`ok`, `warn` or `FAIL`), with the fix under every 
 | ports (`--job`) | one of the job's ports is held (`ss -ltnp`) | stop the stale server, or use another job port |
 | disk | under 2 GB free: FAIL; over 90% used: warn | `timeout 120 orka cleanup --dry-run` |
 | memory | MemAvailable under the memory guard's minimum: warn | names the finished jobs that still hold memory, with the `orka cleanup --dry-run` that shows what closing them frees; else wait, or close idle panes of finished jobs |
+| swap | no swap (`SwapTotal` 0): warn, because a full memory then means the OOM killer ends processes | a 2-4 GB swapfile or zram, set up by hand; orka never uses sudo |
+| tmp | the temp folder is a tmpfs (its files are RAM) with over 1 GB in use: warn | `timeout 120 orka cleanup --dry-run` lists the Claude scratch folders of finished jobs it would remove |
 | claude trust | the repo root is not trusted in `~/.claude.json` (`projects[<repo>].hasTrustDialogAccepted`); skipped for pi jobs | once, by hand: `cd <repo> && claude`, "Yes, I trust this folder", `/exit`. Claude offers no supported way to pre-trust from the command line, so orka only reports it and never accepts the dialog |
 | chrome | orphan agent-browser Chrome roots (no running job, older than 2h): warn | `timeout 120 orka cleanup` |
 

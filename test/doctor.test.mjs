@@ -35,6 +35,17 @@ test("doctor checks: node_modules, ports, disk, memory, trust, chrome, summary a
   assert.equal(doctor.diskCheck({ freeBytes: 1024 * 1048576, totalBytes: 100 * 1024 * 1048576 }).status, "fail");
   assert.equal(doctor.diskCheck({ freeBytes: 5 * 1024 * 1048576, totalBytes: 60 * 1024 * 1048576 }).status, "warn");
   assert.equal(doctor.memoryCheck(500, 1024).status, "warn");
+  assert.equal(doctor.swapCheck(2048).status, "ok");
+  assert.equal(doctor.swapCheck(null).status, "ok");
+  const noSwap = doctor.swapCheck(0);
+  assert.equal(noSwap.status, "warn");
+  assert.match(noSwap.detail, /OOM killer/);
+  assert.match(noSwap.fix, /needs sudo; orka never does it/);
+  assert.deepEqual([doctor.tmpfsCheck(null).status, doctor.tmpfsCheck({ path: "/tmp", fstype: "ext4", usedBytes: 9e9 }).status], ["ok", "ok"]);
+  assert.equal(doctor.tmpfsCheck({ path: "/tmp", fstype: "tmpfs", usedBytes: 500 * 1048576 }).status, "ok");
+  const tmpfs = doctor.tmpfsCheck({ path: "/tmp", fstype: "tmpfs", usedBytes: 1300 * 1048576 });
+  assert.deepEqual([tmpfs.status, tmpfs.detail], ["warn", "/tmp is a tmpfs (RAM) with 1300 MB in use"]);
+  assert.match(tmpfs.fix, /orka cleanup --dry-run lists the Claude scratch folders/);
   const home = join(repo, "home.json");
   writeFileSync(home, JSON.stringify({ projects: { [repo]: { hasTrustDialogAccepted: true }, "/other": {} } }));
   assert.equal(doctor.trustCheck({ repo, claudeJson: home }).status, "ok");
@@ -89,6 +100,9 @@ test("orka doctor prints every check with its fix, exits 1 on a failure, and rep
   assert.match(r.stdout, new RegExp(`^orka doctor ${t.repo}\\n`));
   assert.match(r.stdout, /  FAIL  claude trust: .* is not trusted by Claude Code/);
   assert.match(r.stdout, /  ok    herdr: /);
+  // This host's own swap and temp folder: either verdict is fine, the lines must be there.
+  assert.match(r.stdout, /  (ok  |warn)  swap: /);
+  assert.match(r.stdout, /  (ok  |warn)  tmp: /);
   assert.match(r.stdout, /doctor: \d+ failed: .*claude trust/);
   const j = t.orka(["doctor", "--job", t.id]);
   assert.doesNotMatch(j.stdout, /claude trust/, "a pi job needs no Claude trust");
