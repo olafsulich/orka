@@ -27,7 +27,7 @@ function scratch() {
   stub("herdr", "echo '{}'");
   stub("agent-browser", `case "$*" in *"session list"*) echo '{"success":true,"data":{"sessions":["$LIVE"]}}';; esac`);
   execFileSync("git", ["init", "-q"], { cwd: repo });
-  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: home, XDG_RUNTIME_DIR: run, AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off" };
+  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: home, XDG_RUNTIME_DIR: run, AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off", ORKA_CLAUDE_TMP: join(base, "claude-tmp") };
   const orka = (args) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...process.env, ...env } });
   orka(["init"]);
   const calls = () => readFileSync(log, "utf8").trim().split("\n").filter(Boolean);

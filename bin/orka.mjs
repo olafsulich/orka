@@ -4579,15 +4579,55 @@ function sweep(repo, { dry = false, thresholdMs, log = console.log, budgetMs = C
     log(`cleanup: ${verb} workspace ${j.workspace} (${j.id}, idle since ${new Date(lifecycle.lastActivity(j) || 0).toISOString()})`);
     count++;
   }
+  // Claude scratch folders of jobs whose workspace is closed, or closes in this pass.
+  const scratch = jobs.filter((j) => j.workspaceClosed || workspaces.includes(j)).map((j) => ({ job: j, dir: claudeScratchOf(repo, j) })).filter((s) => s.dir && existsSync(s.dir));
+  count += scratch.length;
   if (!count) log("cleanup: nothing to close");
-  if (dry) return count;
+  if (dry) {
+    for (const s of scratch) log(`cleanup: would remove Claude scratch ${s.dir} (${lifecycle.formatKb(diskKb(s.dir))}, ${s.job.id})`);
+    return count;
+  }
   for (const j of workspaces) {
     // The record first: closing the workspace kills any pane in it.
     j.workspaceClosed = new Date().toISOString();
     save(repo, j);
     herdr(["workspace", "close", j.workspace]);
   }
+  for (const s of scratch) removeClaudeScratch(repo, s.job, s.dir, log);
   return count;
+}
+
+// Claude Code's scratch root: <tmpdir>/claude-<uid>, or ORKA_CLAUDE_TMP (tests point it at a sandbox).
+function claudeScratchRoot() {
+  return brand.env("CLAUDE_TMP") || join(tmpdir(), `claude-${process.getuid()}`);
+}
+
+// The scratch folder of a finished, non-kept job's own worktree (under the state dir), or null.
+function claudeScratchOf(repo, job) {
+  if (job.keep || LIVE_STATUSES.has(job.status) || job.status === "queued" || !job.worktree) return null;
+  if (!resolve(job.worktree).startsWith(resolve(brand.stateDir(repo), "worktrees") + sep)) return null;
+  return lifecycle.claudeScratchDir(job.worktree, claudeScratchRoot());
+}
+
+// Removes a job's Claude scratch folder once no process works in it or in the worktree.
+// Panes of a just-closed workspace get a few seconds to exit; one still running keeps the folder.
+function removeClaudeScratch(repo, job, dir, log) {
+  const users = () => [...lifecycle.findWorktreeProcesses(job.worktree), ...lifecycle.findWorktreeProcesses(dir)];
+  let busy = users();
+  for (let i = 0; i < 20 && busy.length; i++) {
+    sleep(250);
+    busy = users();
+  }
+  if (busy.length) {
+    log(`cleanup: kept Claude scratch ${dir} (pid ${busy[0].pid} still works in it: ${busy[0].cmdline.slice(0, 60)})`);
+    return false;
+  }
+  const kb = diskKb(dir);
+  rmSync(dir, { recursive: true, force: true });
+  job.scratchRemoved = new Date().toISOString();
+  save(repo, job);
+  log(`cleanup: removed Claude scratch ${dir} (${lifecycle.formatKb(kb)}, ${job.id})`);
+  return true;
 }
 
 // orka doctor (lib/doctor.mjs, docs/doctor.md): this host's probes. Read-only.
