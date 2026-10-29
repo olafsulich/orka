@@ -27,6 +27,7 @@ import * as lifecycle from "../lib/lifecycle.mjs";
 import * as autonomy from "../lib/autonomy.mjs";
 import * as ports from "../lib/ports.mjs";
 import * as specs from "../lib/spec.mjs";
+import * as term from "../lib/term.mjs";
 import * as watch from "../lib/watch.mjs";
 
 const ORKA = fileURLToPath(import.meta.url);
@@ -435,11 +436,28 @@ function worktreePath(repo, id) {
 function load(repo, id) {
   const path = jobPath(repo, id);
   if (!existsSync(path)) fail(`no job ${id} in ${repo}`);
+  let job;
   try {
-    return JSON.parse(readFileSync(path, "utf8"));
+    job = JSON.parse(readFileSync(path, "utf8"));
   } catch {
     fail(`corrupt job file ${path}`);
   }
+  useBackend(job);
+  return job;
+}
+
+// A job keeps the backend it started on (job.backend); jobs from before backends existed ran on herdr.
+// A queued job takes ORKA_BACKEND when orka run starts it.
+function useBackend(job) {
+  term.use(job?.backend || (job?.status === "queued" ? term.defaultBackend() : "herdr"));
+}
+
+function assignBackend(job) {
+  const name = term.defaultBackend();
+  if (!term.BACKENDS.includes(name)) fail(`ORKA_BACKEND must be one of ${term.BACKENDS.join(", ")}, got ${name}`);
+  if (name === "hc" && job.kind === "pi") fail(`the hc backend runs claude agents only (pi reports no status to hc); run this pi job with ORKA_BACKEND=herdr`);
+  job.backend = name;
+  term.use(name);
 }
 
 function loadAllJobs(repo) {
@@ -985,29 +1003,10 @@ async function markTerminal(repo, job, status, reason) {
   }
 }
 
+// A herdr verb, run by the job's terminal backend: herdr itself, or hc (herdr-core) through
+// lib/term.mjs. load() picks the backend of the job it reads.
 function herdr(args, timeoutMs = 30000) {
-  const r = spawnSync("herdr", args, {
-    encoding: "utf8",
-    timeout: timeoutMs,
-    env: { ...process.env, PATH: pathPrefix() },
-  });
-  const text = `${r.stdout || ""}${r.stderr || ""}${r.error ? `\n${r.error.message}` : ""}`;
-  let json = null;
-  const trimmed = text.trim();
-  try {
-    json = JSON.parse(trimmed);
-  } catch {
-    const i = trimmed.indexOf("{");
-    const j = trimmed.lastIndexOf("}");
-    if (i >= 0 && j > i) {
-      try {
-        json = JSON.parse(trimmed.slice(i, j + 1));
-      } catch {
-        json = null;
-      }
-    }
-  }
-  return { code: r.status ?? 1, text, json };
+  return term.call(args, { timeoutMs, env: { ...process.env, PATH: pathPrefix() } });
 }
 
 function herdrFail(got, what) {
@@ -1304,11 +1303,17 @@ function recordBrowserPids(repo, job, procs = null) {
   }
 }
 
-// Live herdr pane ids, or null when herdr cannot say.
-function livePaneIds() {
-  const got = herdr(["pane", "list"], 10000);
-  const panes = got.json?.result?.panes;
-  return got.code === 0 && Array.isArray(panes) ? new Set(panes.map((p) => p?.pane_id).filter(Boolean)) : null;
+// Live pane ids on every backend the given jobs run on, or null when one of them cannot say.
+function livePaneIds(jobs = []) {
+  const ids = new Set();
+  for (const name of new Set(jobs.map((j) => j.backend || "herdr"))) {
+    term.use(name);
+    const got = herdr(["pane", "list"], 10000);
+    const panes = got.json?.result?.panes;
+    if (got.code !== 0 || !Array.isArray(panes)) return null;
+    for (const p of panes) if (p?.pane_id) ids.add(p.pane_id);
+  }
+  return ids;
 }
 
 function killBrowserProcs(procs, dry, log = console.log) {
@@ -2309,7 +2314,8 @@ async function cmdRun(args) {
     printDryRun(repo, job);
     return;
   }
-  if (job.kind === "claude") save(repo, job);
+  assignBackend(job);
+  save(repo, job);
   try {
     job.worktree = addWorktree(repo, job);
     setupDeps(repo, job);
@@ -2344,7 +2350,8 @@ async function cmdRun(args) {
   }
   const portNote = job.port != null ? ` port=${job.port}` : "";
   const extra = (job.kind === "claude" ? ` role=orchestrator model=${job.orchestratorModel} worker=${job.workerModel} verifier=${job.verifierModel || job.workerModel}` : " role=orchestrator kind=pi") + portNote;
-  console.log(`${id} running pane=${job.pane} agent=${job.agent} branch=${job.branch} worktree=${job.worktree}${extra}`);
+  const backendNote = job.backend === "hc" ? ` backend=hc terminal=${agentInfo(job.agent).terminal_id || "?"}` : "";
+  console.log(`${id} running pane=${job.pane} agent=${job.agent} branch=${job.branch} worktree=${job.worktree}${extra}${backendNote}`);
 }
 
 function splitPane(fromPane, cwd, job, worker) {
@@ -4561,7 +4568,7 @@ function sweep(repo, { dry = false, thresholdMs, log = console.log, budgetMs = C
   count += killBrowserProcs(procs, dry, log).length;
   // Browsers whose job or pane no longer exists (by tag, session or process cwd),
   // then recorded pids of finished jobs and of gone panes.
-  const panes = live.length ? livePaneIds() : null;
+  const panes = live.length ? livePaneIds(live) : null;
   const gone = browsers.selectGone(scan.filter((p) => !doomed.has(p.pid)), { jobs, prefixOf: browserPrefix, worktreesRoot: join(brand.stateDir(repo), "worktrees"), livePanes: panes });
   const goneWorker = (j, name) => {
     const w = (j.workers || []).filter((x) => x.name === name).at(-1);
@@ -4613,6 +4620,7 @@ function sweep(repo, { dry = false, thresholdMs, log = console.log, budgetMs = C
     // The record first: closing the workspace kills any pane in it.
     j.workspaceClosed = new Date().toISOString();
     save(repo, j);
+    useBackend(j);
     herdr(["workspace", "close", j.workspace]);
   }
   // A fresh look: a pane's own processes may have been reparented while its workspace closed.
