@@ -4,22 +4,24 @@ Orka starts and drives every pane through a terminal backend:
 
 | Backend | What it is | Who sees the agents |
 |---|---|---|
-| `herdr` (default) | the herdr TUI server (`herdr` 0.9) | the herdr TUI (`herdr agent list`) |
-| `hc` | herdr-core (`hc`, 0.1.13+), the runtime behind the Herdr desktop app | `hc ls`, and the Herdr app on any machine that has this host added |
+| `hc` (default) | herdr-core (`hc`, 0.1.13+), the runtime behind the Herdr desktop app | `hc ls`, and the Herdr app on any machine that has this host added |
+| `herdr` (deprecated) | the herdr TUI server (`herdr` 0.9) | the herdr TUI (`herdr agent list`) |
 
 The two do not share agents: a job started on herdr is invisible in the Herdr app, and one started on hc is invisible in the herdr TUI.
 
 ## Choosing one
 
-`ORKA_BACKEND=hc orka run <id>` starts the job on hc. Without it (or with `ORKA_BACKEND=herdr`) jobs run on herdr. `orka run` stores the choice as `job.backend`, and every later command on that job (`worker`, `steer`, `stop`, `done`, `resume`, the watcher, handoffs, cleanup) uses the job's backend whatever `ORKA_BACKEND` says then. Jobs from before backends existed have no `job.backend` and stay on herdr.
+New jobs run on hc. `ORKA_BACKEND=herdr orka run <id>` is the deprecated fallback to the herdr TUI; it stays for Pi jobs and for jobs already running there, and will go away. `orka run` stores the choice as `job.backend`, and every later command on that job (`worker`, `steer`, `stop`, `done`, `resume`, the watcher, handoffs, cleanup) uses the job's backend whatever `ORKA_BACKEND` says then. Jobs from before backends existed have no `job.backend` and stay on herdr.
 
 On hc, `orka run` prints the orchestrator's terminal: `... backend=hc terminal=t3`.
 
-The hc backend runs Claude Code agents only. Pi reports no status to hc, so `orka run` refuses a `--kind pi` job on hc before it makes anything.
+The hc backend runs Claude Code agents only. Pi reports no status to hc, so `orka run` refuses a `--kind pi` job on hc before it makes anything, and says how to run it: `ORKA_BACKEND=herdr orka run <id>`, or file it again with `--kind claude`. orka never falls back to herdr on its own.
+
+orka never starts herdr-core itself. Any hc command, even `hc server status` or `hc connect`, starts a core when none runs, so before every hc call orka checks for the core's socket (`$XDG_RUNTIME_DIR/herdr-core/<HC_SESSION or default>.sock`). Without it `orka run` fails at once ("herdr-core is not running ...") and later calls report hc as unavailable. `orka doctor` checks the socket and the `herdr-core serve` process the same read-only way.
 
 ## How hc maps onto orka (lib/term.mjs)
 
-`lib/term.mjs` keeps herdr's verb set as orka's interface: on herdr each call runs as it always did; on hc each verb is translated to herdr-core's JSON-RPC API (`hc connect`).
+`lib/term.mjs` keeps herdr's verb set as orka's interface (so `herdr agent prompt`, `herdr pane close` and similar in the other docs mean that verb on the job's backend): on herdr each call runs as it always did; on hc each verb is translated to herdr-core's JSON-RPC API (`hc connect`).
 
 | herdr verb orka uses | hc |
 |---|---|

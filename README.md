@@ -2,13 +2,13 @@
 
 <img width="1900" height="1059" alt="Screenshot 2026-10-25 at 14 41 32" src="https://github.com/user-attachments/assets/f7b904eb-a74c-4e15-881b-8f995076943d" />
 
-Orka runs agent jobs in one git repo. You file a task. `orka run` checks out a linked worktree on its own branch and starts an orchestrator agent in a Herdr pane. The orchestrator splits the work across builder agents, and a fresh verifier checks the result. The CLI enforces the rules: who may start, when a check blocks, and when a job is done. By default nothing is marked done or merged without your sign-off. Node ESM, zero dependencies.
+Orka runs agent jobs in one git repo. You file a task. `orka run` checks out a linked worktree on its own branch and starts an orchestrator agent in a herdr-core terminal, which the Herdr desktop app shows. The orchestrator splits the work across builder agents, and a fresh verifier checks the result. The CLI enforces the rules: who may start, when a check blocks, and when a job is done. By default nothing is marked done or merged without your sign-off. Node ESM, zero dependencies.
 
 The command is `orka`. Orka was called orca, and `orca` still works as a deprecated alias ([rename.md](docs/rename.md)).
 
 ## Install
 
-Needs Node 22+, git, Herdr, and Claude Code (or Pi). `agent-browser` is optional and needed only for browser checks. Panes run on the herdr TUI by default; `ORKA_BACKEND=hc` runs a job on herdr-core instead, so its agents show up in the Herdr desktop app ([backends.md](docs/backends.md)).
+Needs Node 22+, git, herdr-core (`hc`, with `herdr-core serve` running) and Claude Code. `agent-browser` is optional and needed only for browser checks. The old herdr TUI is deprecated: `ORKA_BACKEND=herdr` still uses it, and Pi jobs need it ([backends.md](docs/backends.md)).
 
 ```bash
 git clone https://github.com/olafsulich/orka.git && cd orka
@@ -44,7 +44,7 @@ Docs: [commands.md](docs/commands.md), [specs.md](docs/specs.md), [models.md](do
 
 ![orka run opens a Herdr workspace and starts the orchestrator in the job's worktree; a watcher runs beside it](docs/img/readme/2-run.png)
 
-`orka run <id>` creates the branch `orka/<id>` in a linked worktree under `.orka/worktrees/<id>`. It opens a Herdr workspace and starts the orchestrator there (default `opus`). It also starts a watcher, which delivers wakes, pings you when the orchestrator is stuck on a question, and hands a pane off to a fresh agent when its context fills up.
+`orka run <id>` creates the branch `orka/<id>` in a linked worktree under `.orka/worktrees/<id>`. It starts the orchestrator in a herdr-core terminal (default `opus`), with each worker as its child, so the job shows up in the Herdr app. It also starts a watcher, which delivers wakes, pings you when the orchestrator is stuck on a question, and hands a pane off to a fresh agent when its context fills up.
 Docs: [layout.md](docs/layout.md), [needs-input.md](docs/needs-input.md), [handoff.md](docs/handoff.md), [ports.md](docs/ports.md).
 
 ### 3. Agree on the approach
