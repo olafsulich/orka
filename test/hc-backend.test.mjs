@@ -295,3 +295,16 @@ test("a job that started on herdr stays on herdr under the hc default", () => {
     assert.deepEqual(t.calls(), [], `backend ${backend}: no hc call`);
   }
 });
+
+test("hc: ORKA_PANE_ENV copies the named caller variables into panes, and itself", () => {
+  const t = scratch();
+  const env = { ...t.env, ORKA_PANE_ENV: "NODE_EXTRA_CA_CERTS, NOT_SET,bad-name", NODE_EXTRA_CA_CERTS: "/c/ca.pem", OTHER: "no" };
+  const pane = term.hcCall(["workspace", "create", "--cwd", "/w", "--env", "ORKA_JOB=j1"], { env }).json.result.root_pane.pane_id;
+  assert.equal(term.hcCall(["agent", "start", "a1", "--kind", "claude", "--pane", pane, "--timeout", "2000"], { env }).code, 0);
+  const [lead] = t.terminals();
+  assert.equal(lead.env.NODE_EXTRA_CA_CERTS, "/c/ca.pem");
+  assert.equal(lead.env.ORKA_PANE_ENV, "NODE_EXTRA_CA_CERTS, NOT_SET,bad-name");
+  assert.equal(lead.env.OTHER, undefined);
+  assert.equal("NOT_SET" in lead.env, false);
+  assert.equal(lead.env.ORKA_JOB, "j1");
+});
