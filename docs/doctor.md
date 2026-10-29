@@ -14,6 +14,7 @@ It prints one line per check (`ok`, `warn` or `FAIL`), with the fix under every 
 | check | fails or warns when | fix it prints |
 | --- | --- | --- |
 | CLIs | `git`, `claude`, `rg`, `jq`, `file`, ImageMagick (`magick` or `identify`) missing: FAIL; `hc`, `agent-browser`, `pi`, `herdr` missing: warn (`herdr` only for the deprecated `ORKA_BACKEND=herdr`, [backends.md](backends.md)) | the package to install (`sudo apt install ripgrep` ...); orka never installs it and never uses sudo |
+| pi status | with `pi` on PATH: `pi --version` is older than 1.1.0 (no OSC 7501 status, so pi jobs on hc are refused): warn | `npm i -g @earendil-works/pi-coding-agent@latest`; `ORKA_BACKEND=herdr` meanwhile |
 | herdr-core | with `hc` on PATH: the socket `$XDG_RUNTIME_DIR/herdr-core/<HC_SESSION or default>.sock` exists and a `herdr-core serve` process of this user runs; else warn | open the Herdr app or `hc server start`. Read-only: doctor never runs an hc command, since any of them (even `hc server status`) starts a core |
 | node | older than 22, or not on PATH | `nvm install 22` |
 | node_modules | the main checkout lacks it (when package.json has dependencies), or the job worktree's link is missing or broken, or its lockfile differs | `orka doctor --job <id> --fix` relinks; a differing lockfile names the install command |
