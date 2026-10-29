@@ -158,3 +158,12 @@ test("doctor: hc and the deprecated herdr only warn when missing; herdr-core ser
   assert.match(down.fix, /hc server start; orka never starts it/);
   assert.match(doctor.hcServeCheck({ socket: "/run/s.sock", socketExists: true, serving: false }).detail, /no herdr-core serve process/);
 });
+
+test("doctor: pi status warns below 1.1.0 with the update and the herdr fallback", () => {
+  const reports = (v) => v === "1.4.0";
+  assert.equal(doctor.piStatusCheck("1.4.0", "1.1.0", reports).status, "ok");
+  const old = doctor.piStatusCheck("0.87.0", "1.1.0", reports);
+  assert.equal(old.status, "warn");
+  assert.match(old.fix, /npm i -g @earendil-works\/pi-coding-agent@latest/);
+  assert.match(old.fix, /ORKA_BACKEND=herdr/);
+});

@@ -62,7 +62,9 @@ function scratch() {
   writeFileSync(join(bin, "agent-browser"), "#!/bin/sh\necho '{}'\n");
   // Any herdr call is a bug on the hc backend: this herdr only records that it was called.
   writeFileSync(join(bin, "herdr"), `#!/bin/sh\necho "herdr $*" >> "${base}/herdr.log"\necho '{"error":{"message":"herdr called"}}'\nexit 1\n`);
-  for (const n of ["hc", "claude", "agent-browser", "herdr"]) chmodSync(join(bin, n), 0o755);
+  // pi --version answers FAKE_PI_VERSION (1.4.0 unless a test says otherwise).
+  writeFileSync(join(bin, "pi"), `#!/bin/sh\necho "\${FAKE_PI_VERSION:-1.4.0}"\n`);
+  for (const n of ["hc", "claude", "agent-browser", "herdr", "pi"]) chmodSync(join(bin, n), 0o755);
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: run, XDG_CONFIG_HOME: join(base, "config"), FAKE_HC_STATE: state, FAKE_HC_LOG: log, ORKA_HC_POLL_MS: "20", AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off", ORKA_READY_WAIT_MS: "3000", ORKA_PROMPT_WAIT_MS: "3000", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
   delete env.ORKA_JOB;
   delete env.ORCA_JOB;
@@ -158,7 +160,7 @@ test("hc: a name in use, a blocked start and a pi agent all fail with a reason",
   t.hc(["agent", "start", "a1", "--kind", "claude", "--pane", p1, "--timeout", "2000"]);
   const p2 = t.hc(["workspace", "create", "--cwd", "/w"]).json.result.root_pane.pane_id;
   assert.match(t.hc(["agent", "start", "a1", "--kind", "claude", "--pane", p2, "--timeout", "2000"]).text, /already used/);
-  assert.match(t.hc(["agent", "start", "p1", "--kind", "pi", "--pane", p2]).text, /cannot run on hc/);
+  assert.match(t.hc(["agent", "start", "x1", "--kind", "codex", "--pane", p2]).text, /not supported/);
   const blocked = term.hcCall(["agent", "start", "a2", "--kind", "claude", "--pane", p2, "--timeout", "2000"], { env: { ...t.env, FAKE_HC_START: "blocked" } });
   assert.equal(blocked.code, 1);
   assert.match(blocked.text, /status=Blocked/);
@@ -196,19 +198,63 @@ test("orka run and orka worker on ORKA_BACKEND=hc: no herdr call, job.backend ke
   assert.equal(t.herdrCalls(), "");
 });
 
-test("orka run refuses a pi job on the hc backend before it makes anything", () => {
+test("hc: a pi agent runs pi with PI_PROGRAM_STATUS=1 and is read like claude", () => {
+  const t = scratch();
+  const pane = t.hc(["workspace", "create", "--cwd", "/w", "--env", "ORKA_JOB=j9"]).json.result.root_pane.pane_id;
+  const started = t.hc(["agent", "start", "jj9", "--kind", "pi", "--pane", pane, "--timeout", "2000", "--", "--session-id", "s9"]);
+  assert.equal(started.code, 0, started.text);
+  const [lead] = t.terminals();
+  assert.deepEqual(lead.argv, ["pi", "--session-id", "s9"]);
+  assert.equal(lead.env.PI_PROGRAM_STATUS, "1");
+  assert.equal(lead.env.ORKA_JOB, "j9");
+  assert.equal(t.hc(["agent", "get", "jj9"]).json.result.agent.agent_status, "idle");
+});
+
+test("orka run and orka worker run a pi job on hc when pi reports status (1.1.0+)", () => {
+  const t = scratch();
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: t.repo, env: t.env });
+  execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init"], { cwd: t.repo, env: t.env });
+  const orka = (args, env = {}) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", t.repo], { encoding: "utf8", env: { ...t.env, ...env } });
+  orka(["init"]);
+  const id = orka(["new", "--kind", "pi", "--title", "p", "--goal", "g", "--no-gate"]).stdout.trim();
+  const ran = orka(["run", id]);
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.match(ran.stdout, /backend=hc terminal=t1/);
+  const worker = orka(["worker", "--job", id, "--name", "builder", "--task", "write the file please, all of it"]);
+  assert.equal(worker.status, 0, worker.stderr);
+  const [lead, builder] = t.terminals();
+  assert.equal(lead.argv[0], "pi");
+  assert.equal(builder.argv[0], "pi");
+  assert.ok(builder.argv.includes("-e"), "orka's pi handoff extension is loaded");
+  assert.equal(builder.parent, lead.address);
+  assert.equal(builder.env.PI_PROGRAM_STATUS, "1");
+  assert.equal(builder.status.state, "working", "the worker prompt was delivered");
+  assert.equal(t.herdrCalls(), "");
+});
+
+test("orka run refuses a pi job on hc when pi is older than 1.1.0, before it makes anything", () => {
   const t = scratch();
   execFileSync("git", ["init", "-q", "-b", "main"], { cwd: t.repo, env: t.env });
   execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init"], { cwd: t.repo, env: t.env });
   const orka = (args, env = {}) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", t.repo], { encoding: "utf8", env: { ...t.env, ...env } });
   orka(["init"]);
   const id = orka(["new", "--kind", "pi", "--title", "p", "--goal", "g"]).stdout.trim();
-  const ran = orka(["run", id], { ORKA_BACKEND: "hc" });
+  const ran = orka(["run", id], { FAKE_PI_VERSION: "0.87.0" });
   assert.notEqual(ran.status, 0);
-  assert.match(ran.stderr, /cannot run on hc/);
+  assert.match(ran.stderr, /pi 0\.87\.0 reports no status to herdr-core/);
+  assert.match(ran.stderr, /1\.1\.0 or later/);
   assert.match(ran.stderr, new RegExp(`ORKA_BACKEND=herdr orka run ${id}`));
-  assert.match(ran.stderr, /--kind claude/);
   assert.equal(t.terminals().length, 0);
+  assert.deepEqual(t.calls(), []);
+});
+
+test("piReportsStatus: 1.1.0 and later", () => {
+  assert.equal(term.piReportsStatus("1.1.0"), true);
+  assert.equal(term.piReportsStatus("1.4.0"), true);
+  assert.equal(term.piReportsStatus("2.0.0"), true);
+  assert.equal(term.piReportsStatus("1.0.4"), false);
+  assert.equal(term.piReportsStatus("0.87.0"), false);
+  assert.equal(term.piReportsStatus(""), false);
 });
 
 test("orka run on the hc default fails fast when herdr-core is not running, and never asks hc", () => {

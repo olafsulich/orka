@@ -63,8 +63,8 @@ test("the orca alias behaves like orka: same stdout and exit code, one deprecati
     const a = t.orka(args);
     const b = t.orca(args);
     assert.equal(b.status, a.status, args.join(" "));
-    // The host line reads live MemAvailable, which moves between the two runs.
-    const host = (out) => out.replace(/memory [0-9]+MB available/, "memory NMB available");
+    // The host lines read live MemAvailable and the memory of other jobs on the host, which move between the two runs.
+    const host = (out) => out.replace(/memory [0-9]+MB available/, "memory NMB available").replace(/^job memory: .*$/m, "job memory: N");
     assert.equal(host(b.stdout), host(a.stdout), args.join(" "));
     assert.equal(b.stderr, `orca is deprecated; use orka (same commands)\n${a.stderr}`, args.join(" "));
     assert.doesNotMatch(b.stdout, /orca is deprecated; use orka/);

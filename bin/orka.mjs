@@ -455,7 +455,10 @@ function useBackend(job) {
 function assignBackend(job) {
   const name = term.defaultBackend();
   if (!term.BACKENDS.includes(name)) fail(`ORKA_BACKEND must be one of ${term.BACKENDS.join(", ")}, got ${name}`);
-  if (name === "hc" && job.kind === "pi") fail(term.PI_ON_HC.replace("<id>", job.id));
+  if (name === "hc" && job.kind === "pi") {
+    const version = term.piVersion({ ...process.env, PATH: pathPrefix() });
+    if (!term.piReportsStatus(version)) fail(term.piTooOld(version, job.id));
+  }
   if (name === "hc" && !term.hcReachable()) fail(term.hcUnreachable().replace("<id>", job.id));
   job.backend = name;
   term.use(name);
@@ -4706,6 +4709,7 @@ function doctorChecks(repo, job = null) {
   };
   const nodeVersion = () => spawnSync("node", ["--version"], { encoding: "utf8", env }).stdout?.trim() || "";
   const checks = [...doctor.cliChecks({ which }), doctor.nodeCheck({ nodeVersion })];
+  if (which("pi")) checks.push(doctor.piStatusCheck(term.piVersion(env), term.PI_MIN_VERSION, term.piReportsStatus));
   if (which("hc")) checks.push(doctor.hcServeCheck({ socket: term.hcSocket(), socketExists: term.hcReachable(), serving: hcServing(browsers.procRootOf()) }));
   const wt = job?.worktree && existsSync(job.worktree) ? job.worktree : null;
   checks.push(doctor.depsCheck({ repo, worktree: wt, plan: wt ? deps.planDeps(repo, wt) : null, jobId: job?.id }));
