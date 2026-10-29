@@ -8,7 +8,7 @@ The command is `orka`. Orka was called orca, and `orca` still works as a depreca
 
 ## Install
 
-Needs Node 22+, git, Herdr, and Claude Code (or Pi). `agent-browser` is optional and needed only for browser checks.
+Needs Node 22+, git, Herdr, and Claude Code (or Pi). `agent-browser` is optional and needed only for browser checks. Panes run on the herdr TUI by default; `ORKA_BACKEND=hc` runs a job on herdr-core instead, so its agents show up in the Herdr desktop app ([backends.md](docs/backends.md)).
 
 ```bash
 git clone https://github.com/olafsulich/orka.git && cd orka

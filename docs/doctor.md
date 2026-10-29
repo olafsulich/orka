@@ -13,7 +13,7 @@ It prints one line per check (`ok`, `warn` or `FAIL`), with the fix under every 
 
 | check | fails or warns when | fix it prints |
 | --- | --- | --- |
-| CLIs | `git`, `herdr`, `claude`, `rg`, `jq`, `file`, ImageMagick (`magick` or `identify`) missing: FAIL; `agent-browser`, `pi` missing: warn | the package to install (`sudo apt install ripgrep` ...); orka never installs it and never uses sudo |
+| CLIs | `git`, `herdr`, `claude`, `rg`, `jq`, `file`, ImageMagick (`magick` or `identify`) missing: FAIL; `agent-browser`, `pi`, `hc` missing: warn (`hc` is needed only for `ORKA_BACKEND=hc`, [backends.md](backends.md)) | the package to install (`sudo apt install ripgrep` ...); orka never installs it and never uses sudo |
 | node | older than 22, or not on PATH | `nvm install 22` |
 | node_modules | the main checkout lacks it (when package.json has dependencies), or the job worktree's link is missing or broken, or its lockfile differs | `orka doctor --job <id> --fix` relinks; a differing lockfile names the install command |
 | ports (`--job`) | one of the job's ports is held (`ss -ltnp`) | stop the stale server, or use another job port |

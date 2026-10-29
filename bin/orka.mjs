@@ -5730,7 +5730,7 @@ function help() {
   orka new --spec specs/<feature>/spec.md [--title "..."] [--goal "extra"] [...]   (intake built from a committed spec)
   orka spec init <feature> [--cwd <repo>]   (scaffolds specs/<feature>/spec.md; you fill and commit it)
            [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds <N>]
-  orka run <id> [--dry-run] [--cwd <repo>] [--keep]
+  orka run <id> [--dry-run] [--cwd <repo>] [--keep]   (ORKA_BACKEND=hc: panes on herdr-core, seen in the Herdr app; docs/backends.md)
            [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds <N>]
   orka worker --job <id> --name <agent> --task "..." [--model <alias>] [--role builder|verifier] [--accept "<cmd>"] [--dry-run]
            (--role verifier first runs the static gates; a red gate starts no verifier; a single acceptance
