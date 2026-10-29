@@ -13,7 +13,7 @@ const ORKA = join(root, "bin", "orka.mjs");
 function orka(repo, args, env = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [ORKA, ...args, "--cwd", repo], {
-      env: { ...process.env, ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off", ...env },
+      env: { ...process.env, ORKA_BACKEND: "herdr", ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off", ...env },
     });
     let stdout = "";
     let stderr = "";

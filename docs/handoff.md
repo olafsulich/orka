@@ -88,7 +88,7 @@ The note goes to `<jobdir>/handoff/<name>-<n>.md` (`orchestrator-<n>.md` for the
 ## Successor
 
 1. The old agent's context is measured again (`pctEnd`: how far it went past the cap, note included).
-2. `herdr agent rename <name> <name>-h<n>` (cut to 32 characters).
+2. `herdr agent rename <name> <name>-h<n>` (cut to 32 characters; on hc the `orka_agent` label is changed, [backends.md](backends.md)).
 3. A new pane is split below the old one in the same worktree, and a fresh agent starts there as `<name>` (same kind and model, new session id, same skill and statusline).
 4. Worker: the normal worker prompt plus: read the note first, do its Remaining slice, do not redo what it lists, leave the old pane alone. Orchestrator: the normal orchestrator prompt plus: the job is already running; read the note, the job JSON and `decisions.tsv`, run `orka digest`; do not restart, re-task or close any worker or verifier pane; continue from the note's Next steps. `job.pane` and `job.sessionId` move to the new pane before the prompt, and the watcher follows the new pane. It sends no needs-input while the lead's handoff is in flight.
 5. Recorded: `handoffs: [{n, from, pane, sessionId, tokens, window, source, pct, pctEnd, mode, at, note}]` on the new worker (on `job.lead.handoffs` for the orchestrator, plus `job.retiredLeads`), the same plus `worker` in `job.handoffs`, and `decisions.tsv` rows (note asked, successor started), so the digest shows them.

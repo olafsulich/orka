@@ -455,7 +455,8 @@ function useBackend(job) {
 function assignBackend(job) {
   const name = term.defaultBackend();
   if (!term.BACKENDS.includes(name)) fail(`ORKA_BACKEND must be one of ${term.BACKENDS.join(", ")}, got ${name}`);
-  if (name === "hc" && job.kind === "pi") fail(`the hc backend runs claude agents only (pi reports no status to hc); run this pi job with ORKA_BACKEND=herdr`);
+  if (name === "hc" && job.kind === "pi") fail(term.PI_ON_HC.replace("<id>", job.id));
+  if (name === "hc" && !term.hcReachable()) fail(term.hcUnreachable().replace("<id>", job.id));
   job.backend = name;
   term.use(name);
 }
@@ -4679,6 +4680,23 @@ function removeClaudeScratch(repo, job, dir, log) {
   return true;
 }
 
+// A herdr-core serve process of this user in procRoot.
+function hcServing(procRoot) {
+  try {
+    return readdirSync(procRoot).some((p) => {
+      if (!/^\d+$/.test(p)) return false;
+      try {
+        const argv = readFileSync(join(procRoot, p, "cmdline"), "utf8").split("\0");
+        return /(^|\/)herdr-core$/.test(argv[0]) && argv[1] === "serve" && statSync(join(procRoot, p)).uid === process.getuid();
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return false;
+  }
+}
+
 // orka doctor (lib/doctor.mjs, docs/doctor.md): this host's probes. Read-only.
 function doctorChecks(repo, job = null) {
   const env = { ...process.env, PATH: pathPrefix() };
@@ -4688,6 +4706,7 @@ function doctorChecks(repo, job = null) {
   };
   const nodeVersion = () => spawnSync("node", ["--version"], { encoding: "utf8", env }).stdout?.trim() || "";
   const checks = [...doctor.cliChecks({ which }), doctor.nodeCheck({ nodeVersion })];
+  if (which("hc")) checks.push(doctor.hcServeCheck({ socket: term.hcSocket(), socketExists: term.hcReachable(), serving: hcServing(browsers.procRootOf()) }));
   const wt = job?.worktree && existsSync(job.worktree) ? job.worktree : null;
   checks.push(doctor.depsCheck({ repo, worktree: wt, plan: wt ? deps.planDeps(repo, wt) : null, jobId: job?.id }));
   if (job && (Array.isArray(job.ports) ? job.ports.length : job.port != null)) checks.push(...doctor.portChecks(portUsers(job)));
@@ -5730,7 +5749,7 @@ function help() {
   orka new --spec specs/<feature>/spec.md [--title "..."] [--goal "extra"] [...]   (intake built from a committed spec)
   orka spec init <feature> [--cwd <repo>]   (scaffolds specs/<feature>/spec.md; you fill and commit it)
            [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds <N>]
-  orka run <id> [--dry-run] [--cwd <repo>] [--keep]   (ORKA_BACKEND=hc: panes on herdr-core, seen in the Herdr app; docs/backends.md)
+  orka run <id> [--dry-run] [--cwd <repo>] [--keep]   (panes on herdr-core, seen in the Herdr app; ORKA_BACKEND=herdr: the deprecated herdr TUI; docs/backends.md)
            [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds <N>]
   orka worker --job <id> --name <agent> --task "..." [--model <alias>] [--role builder|verifier] [--accept "<cmd>"] [--dry-run]
            (--role verifier first runs the static gates; a red gate starts no verifier; a single acceptance

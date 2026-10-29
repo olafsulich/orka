@@ -6,7 +6,7 @@ Finished jobs must not pile up stale panes, but you may still want to give feedb
 
 - the job's `agent-browser` sessions (`agent-browser --session <s> close`);
 - dev or preview servers whose process cwd is inside the job worktree (never the orka process or its ancestors; a process is treated as a server by a heuristic on its command line);
-- the panes of finished workers and the verifier (`herdr pane close <pane>`, for each worker pane recorded in `job.workers`).
+- the panes of finished workers and the verifier (the backend's pane close: on hc `terminal.kill` + `terminal.rm`, on herdr `herdr pane close <pane>`; for each worker pane recorded in `job.workers`).
 
 - the worktree, on `orka done` only (see [Worktrees of done jobs](#worktrees-of-done-jobs)).
 
