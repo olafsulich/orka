@@ -26,7 +26,7 @@ orka never starts herdr-core itself. Any hc command, even `hc server status` or 
 | herdr verb orka uses | hc |
 |---|---|
 | `workspace create`, `pane split` | no empty panes in hc: orka records a pending pane (cwd, env, workspace, parent) in `$XDG_RUNTIME_DIR/orka-hc/<pane>.json` and returns its id (`hp-…`; workspaces are `hw-…`) |
-| `agent start <name> --kind claude\|pi --pane P -- args` | `terminal.run` of `claude args` or `pi args` with P's cwd and env (pi also gets `PI_PROGRAM_STATUS=1`), labels `orka_agent`, `orka_pane`, `orka_ws`, `orka_job`, hc name = the agent name; then waits for the agent's own status `idle` |
+| `agent start <name> --kind claude\|pi --pane P -- args` | `terminal.run` of `claude args` or `pi args` with P's cwd and env (pi also gets `PI_PROGRAM_STATUS=1`), labels `orka_agent`, `orka_pane`, `orka_ws`, `orka_job` and the [app's](#jobs-in-the-herdr-app) `herdr.space` / `herdr.tab`, hc name = the agent name; then waits for the agent's own status `idle` |
 | worker / verifier / successor pane | the same, with `parent` = the terminal of the pane it was split from (the orchestrator, for workers), `outlive_parent` and `no_notify` (hc types no notes into the orchestrator) |
 | `agent get`, `agent list` | `terminal.list` / `terminal.get`: status is the agent's own OSC 7501 report (`idle`, `working`, `done`, `blocked`, `error`) |
 | `agent prompt` | `terminal.send` |
@@ -41,6 +41,26 @@ orka never starts herdr-core itself. Any hc command, even `hc server status` or 
 Finish and needs-input detection is unchanged: the watcher reads the same statuses (`done`, `blocked`, `idle`) and the same pane text, now from hc.
 
 Panes on hc are children of `herdr-core hold`; the memory guard and the leftover sweep count those as panes too.
+
+## Jobs in the Herdr app
+
+The Herdr app shows an hc terminal only when it carries the labels `herdr.space=<id>` and `herdr.tab=<id>`; unlabelled terminals stay hidden (herdr-app's `src/SKILL.md` and `defaults/AGENTS.md`). An id the app does not know becomes a new space or tab. So on hc every orka job is **one space**, and its orchestrator, each worker and the verifier are **a tab each**:
+
+| Label orka sets at `terminal.run` | Value |
+|---|---|
+| `herdr.space` | `sp` + 32 hex, from the job id: the same for every agent of a job |
+| `herdr.tab` | `tb` + 32 hex, from the job id and the agent's pane: a successor after a handoff gets a tab of its own |
+| `orka_space_name`, `orka_tab_name` | the names orka wants: `orka <job slug>` (the id without its timestamp) and the role (`orchestrator`, the worker's name, `verifier`) |
+
+The app names a space it made this way after its first terminal's folder (here the worktree) and its tabs `1, 2, ...`. Names are set with the app's `space.rename` / `tab.rename`, which store them in the layout the app keeps in the core's `herdr-app` document (`doc.get` / `doc.set`; `{ spaces: [{ id, name, folder, tabs: [{ id, name, root }] }] }`). There is no label for a name. So once an agent is ready, orka waits up to `ORKA_HC_NAME_WAIT_MS` (5000) for the app to place its terminal, then writes the names into that document:
+
+- only the `name` of spaces and tabs whose ids orka's labels carry, and only while that name is empty: a name someone gave in the app stays;
+- with `doc.set`'s version check, retried on a conflict; the app takes the write like a rename from another screen;
+- best effort: a failure never fails a launch. With no layout document (no app has ever drawn this machine) there is no wait. A tab not placed in time is named by the next agent start on this machine, from its labels.
+
+orka never writes the `where` label: the app writes it (`<space> / <tab>`, which `hc ls` shows) from its layout, and the worker shows under its orchestrator in the app's Agents list because hc's `parent` is the orchestrator. A space closes when its last tab does, so `orka done` / `workspace close` (kill and remove) clears the job out of the app. hc's own notes to the parent stay off (`no_notify`): orka's watcher reports workers.
+
+`ORKA_HC_SPACES=off` keeps jobs out of the app (no `herdr.*` labels, no layout writes).
 
 ## Pi on hc
 
