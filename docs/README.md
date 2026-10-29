@@ -18,5 +18,6 @@
 - [cleanup.md](cleanup.md): what is freed when, browser processes, done-job worktrees, shared node_modules, memory guard
 - [ports.md](ports.md): per-job ports
 - [layout.md](layout.md): files on disk, and trust
+- [backends.md](backends.md): herdr or hc (herdr-core, what the Herdr desktop app shows), `ORKA_BACKEND`
 - [diagrams.md](diagrams.md): the README step diagrams, their sources and how to re-render them
 - [rename.md](rename.md): orca to orka, the `orca` alias and what stays backwards compatible
