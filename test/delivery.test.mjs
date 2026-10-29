@@ -63,7 +63,7 @@ esac
   chmodSync(join(bin, "agent-browser"), 0o755);
   execFileSync("git", ["init", "-q"], { cwd: repo });
   const fast = { ORKA_PROMPT_POLL_MS: "10", ORKA_PROMPT_WAIT_MS: "250", ORKA_PROMPT_BACKOFF_MS: "20", ORKA_READY_WAIT_MS: "1500" };
-  const full = { PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off", ...fast, ...env };
+  const full = { PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_BACKEND: "herdr", ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off", ...fast, ...env };
   const orka = (args) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", repo], { encoding: "utf8", env: { ...process.env, ...full } });
   orka(["init"]);
   const t = {

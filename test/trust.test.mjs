@@ -38,7 +38,7 @@ esac
   for (const n of ["herdr", "claude", "agent-browser"]) chmodSync(join(bin, n), 0o755);
   execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo });
   execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: repo });
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off", ORKA_READY_WAIT_MS: "1000", ORKA_PROMPT_WAIT_MS: "500" };
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_BACKEND: "herdr", ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off", ORKA_READY_WAIT_MS: "1000", ORKA_PROMPT_WAIT_MS: "500" };
   delete env.ORKA_JOB;
   const orka = (args) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", repo], { encoding: "utf8", env });
   orka(["init"]);

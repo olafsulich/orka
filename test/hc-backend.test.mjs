@@ -51,7 +51,9 @@ function scratch() {
   const bin = join(base, "bin");
   const run = join(base, "run");
   const repo = join(base, "repo");
-  for (const d of [bin, run, repo, join(base, "home")]) mkdirSync(d, { recursive: true });
+  for (const d of [bin, run, repo, join(base, "home"), join(run, "herdr-core")]) mkdirSync(d, { recursive: true });
+  // What orka checks before it talks to hc: the core's socket (here a plain file; the fake hc needs no socket).
+  writeFileSync(join(run, "herdr-core", "default.sock"), "");
   const state = join(base, "hc-state.json");
   const log = join(base, "hc.log");
   writeFileSync(log, "");
@@ -72,8 +74,9 @@ function scratch() {
   return { base, bin, run, repo, env, state, terminals, calls, herdrCalls, hc };
 }
 
-test("ORKA_BACKEND picks the backend; herdr is the default", () => {
-  assert.equal(term.defaultBackend({}), "herdr");
+test("ORKA_BACKEND picks the backend; hc is the default", () => {
+  assert.equal(term.defaultBackend({}), "hc");
+  assert.equal(term.defaultBackend({ ORKA_BACKEND: "herdr" }), "herdr");
   assert.equal(term.defaultBackend({ ORKA_BACKEND: "hc" }), "hc");
   assert.equal(term.defaultBackend({ ORCA_BACKEND: "HC" }), "hc");
 });
@@ -155,7 +158,7 @@ test("hc: a name in use, a blocked start and a pi agent all fail with a reason",
   t.hc(["agent", "start", "a1", "--kind", "claude", "--pane", p1, "--timeout", "2000"]);
   const p2 = t.hc(["workspace", "create", "--cwd", "/w"]).json.result.root_pane.pane_id;
   assert.match(t.hc(["agent", "start", "a1", "--kind", "claude", "--pane", p2, "--timeout", "2000"]).text, /already used/);
-  assert.match(t.hc(["agent", "start", "p1", "--kind", "pi", "--pane", p2]).text, /claude agents only/);
+  assert.match(t.hc(["agent", "start", "p1", "--kind", "pi", "--pane", p2]).text, /cannot run on hc/);
   const blocked = term.hcCall(["agent", "start", "a2", "--kind", "claude", "--pane", p2, "--timeout", "2000"], { env: { ...t.env, FAKE_HC_START: "blocked" } });
   assert.equal(blocked.code, 1);
   assert.match(blocked.text, /status=Blocked/);
@@ -202,6 +205,47 @@ test("orka run refuses a pi job on the hc backend before it makes anything", () 
   const id = orka(["new", "--kind", "pi", "--title", "p", "--goal", "g"]).stdout.trim();
   const ran = orka(["run", id], { ORKA_BACKEND: "hc" });
   assert.notEqual(ran.status, 0);
-  assert.match(ran.stderr, /claude agents only/);
+  assert.match(ran.stderr, /cannot run on hc/);
+  assert.match(ran.stderr, new RegExp(`ORKA_BACKEND=herdr orka run ${id}`));
+  assert.match(ran.stderr, /--kind claude/);
   assert.equal(t.terminals().length, 0);
+});
+
+test("orka run on the hc default fails fast when herdr-core is not running, and never asks hc", () => {
+  const t = scratch();
+  rmSync(join(t.run, "herdr-core", "default.sock"));
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: t.repo, env: t.env });
+  execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init"], { cwd: t.repo, env: t.env });
+  const orka = (args) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", t.repo], { encoding: "utf8", env: t.env });
+  orka(["init"]);
+  const id = orka(["new", "--title", "hc", "--goal", "g", "--no-gate"]).stdout.trim();
+  const ran = orka(["run", id]);
+  assert.notEqual(ran.status, 0);
+  assert.match(ran.stderr, /herdr-core is not running/);
+  assert.match(ran.stderr, new RegExp(`ORKA_BACKEND=herdr orka run ${id}`));
+  assert.deepEqual(t.calls(), [], "no hc call at all");
+  assert.equal(t.hc(["agent", "list"]).code, 1, "rpc refuses without a socket");
+  assert.deepEqual(t.calls(), []);
+});
+
+test("a job that started on herdr stays on herdr under the hc default", () => {
+  const t = scratch();
+  writeFileSync(join(t.bin, "herdr"), `#!/bin/sh\necho "herdr $*" >> "${t.base}/herdr.log"\necho '{"result":{}}'\n`);
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: t.repo, env: t.env });
+  execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init"], { cwd: t.repo, env: t.env });
+  const orka = (args) => spawnSync(process.execPath, [ORKA, ...args, "--cwd", t.repo], { encoding: "utf8", env: t.env });
+  orka(["init"]);
+  const id = orka(["new", "--title", "old", "--goal", "g", "--no-gate"]).stdout.trim();
+  const file = join(t.repo, ".orka", "jobs", `${id}.json`);
+  for (const backend of ["herdr", undefined]) {
+    const job = JSON.parse(readFileSync(file, "utf8"));
+    Object.assign(job, { status: "running", agent: "jold", pane: "w1:p1", workspace: "w1", backend });
+    if (!backend) delete job.backend;
+    writeFileSync(file, JSON.stringify(job));
+    writeFileSync(join(t.base, "herdr.log"), "");
+    const stopped = orka(["stop", id, "--keep"]);
+    assert.equal(stopped.status, 0, stopped.stderr);
+    assert.match(t.herdrCalls(), /herdr agent send-keys jold ctrl\+c/, `backend ${backend}`);
+    assert.deepEqual(t.calls(), [], `backend ${backend}: no hc call`);
+  }
 });

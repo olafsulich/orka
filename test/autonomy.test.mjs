@@ -44,7 +44,7 @@ esac
   writeFileSync(join(bin, "agent-browser"), "#!/bin/sh\necho '{}'\n");
   for (const n of ["herdr", "claude", "agent-browser"]) chmodSync(join(bin, n), 0o755);
   const gitEnv = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
-  const env = { ...process.env, ...gitEnv, PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), XDG_CONFIG_HOME: join(base, "config"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off", ORKA_READY_WAIT_MS: "3000", ORKA_PROMPT_WAIT_MS: "3000" };
+  const env = { ...process.env, ...gitEnv, PATH: `${bin}:${process.env.PATH}`, HOME: join(base, "home"), XDG_RUNTIME_DIR: join(base, "run"), XDG_CONFIG_HOME: join(base, "config"), AGENT_BROWSER_SOCKET_DIR: "", ORKA_BACKEND: "herdr", ORKA_NO_WATCH: "1", ORKA_MEMORY_GUARD: "off", ORKA_READY_WAIT_MS: "3000", ORKA_PROMPT_WAIT_MS: "3000" };
   delete env.ORKA_JOB;
   delete env.ORCA_JOB;
   const run = (cmd, args, opts = {}) => spawnSync(cmd, args, { cwd: opts.cwd || repo, encoding: "utf8", env: { ...env, ...(opts.env || {}) }, input: opts.input });

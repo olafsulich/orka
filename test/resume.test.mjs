@@ -50,7 +50,7 @@ esac
     HOME: home,
     XDG_RUNTIME_DIR: join(base, "run"),
     AGENT_BROWSER_SOCKET_DIR: "",
-    ORKA_NO_WATCH: "1",
+    ORKA_BACKEND: "herdr", ORKA_NO_WATCH: "1",
     ORKA_MEMORY_GUARD: "off",
     ORKA_FAKE_WATCHERS: join(base, "watchers.json"),
     ORKA_READY_WAIT_MS: "2000",

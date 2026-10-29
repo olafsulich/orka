@@ -145,3 +145,16 @@ test("a pane that does not start runs the doctor and says what it found", () => 
   assert.match(r.stderr, /worker start failed/);
   assert.match(t.decisions(), /\tdoctor\tworker builder did not start\t/);
 });
+
+test("doctor: hc and the deprecated herdr only warn when missing; herdr-core serve is checked without hc", () => {
+  const by = Object.fromEntries(doctor.cliChecks({ which: () => "" }).map((c) => [c.name, c]));
+  assert.equal(by.hc.status, "warn");
+  assert.equal(by.herdr.status, "warn");
+  assert.match(by.herdr.fix, /deprecated ORKA_BACKEND=herdr/);
+  assert.equal(doctor.hcServeCheck({ socket: "/run/s.sock", socketExists: true, serving: true }).status, "ok");
+  const down = doctor.hcServeCheck({ socket: "/run/s.sock", socketExists: false, serving: true });
+  assert.equal(down.status, "warn");
+  assert.match(down.detail, /no socket at \/run\/s\.sock/);
+  assert.match(down.fix, /hc server start; orka never starts it/);
+  assert.match(doctor.hcServeCheck({ socket: "/run/s.sock", socketExists: true, serving: false }).detail, /no herdr-core serve process/);
+});
