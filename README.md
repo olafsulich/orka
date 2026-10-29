@@ -8,7 +8,7 @@ The command is `orka`. Orka was called orca, and `orca` still works as a depreca
 
 ## Install
 
-Needs Node 22+, git, herdr-core (`hc`, with `herdr-core serve` running) and Claude Code. `agent-browser` is optional and needed only for browser checks. The old herdr TUI is deprecated: `ORKA_BACKEND=herdr` still uses it, and Pi jobs need it ([backends.md](docs/backends.md)).
+Needs Node 22+, git, herdr-core (`hc`, with `herdr-core serve` running) and Claude Code (or Pi 1.1.0+). `agent-browser` is optional and needed only for browser checks. The old herdr TUI is deprecated: `ORKA_BACKEND=herdr` still uses it ([backends.md](docs/backends.md)).
 
 ```bash
 git clone https://github.com/olafsulich/orka.git && cd orka
