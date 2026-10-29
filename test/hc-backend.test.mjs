@@ -10,7 +10,8 @@ const ORKA = join(import.meta.dirname, "..", "bin", "orka.mjs");
 
 // A fake hc: `hc connect` answers one JSON-RPC request from a state file. Terminals start with the
 // status FAKE_HC_START (idle by default; blocked shows Claude's trust dialog), a send makes them
-// working. Every request is logged as a JSON line.
+// working. Every request is logged as a JSON line. With FAKE_HC_APP=1 a Herdr app is "open": it keeps
+// the herdr-app layout document and places a terminal labelled herdr.space there, unnamed.
 const FAKE_HC = `#!/usr/bin/env node
 const fs = require("node:fs");
 const stateFile = process.env.FAKE_HC_STATE;
@@ -30,6 +31,14 @@ switch (req.method) {
     const start = process.env.FAKE_HC_START || "idle";
     const t = { address: "t" + s.next++, name: p.name || null, argv: p.argv, cwd: p.cwd, env: p.env, labels: p.labels || {}, parent: p.parent || null, state: "live", reported: true, status: { app: "claude-code", state: start }, screen: start === "blocked" ? "Quick safety check: Is this a project you created or one you trust?" : "❯ " };
     s.terminals.push(t);
+    const l = t.labels;
+    if (process.env.FAKE_HC_APP && l["herdr.space"]) {
+      s.doc = s.doc || { version: 0, value: { spaces: [] } };
+      let sp = s.doc.value.spaces.find((x) => x.id === l["herdr.space"]);
+      if (!sp) s.doc.value.spaces.push((sp = { id: l["herdr.space"], name: "", folder: t.cwd, tabs: [], extra: "kept" }));
+      sp.tabs.push({ id: l["herdr.tab"], name: "", root: { type: "row", children: [{ type: "block", content: { terminal: t.address } }] } });
+      s.doc.version++;
+    }
     reply(t);
     break;
   }
@@ -41,6 +50,14 @@ switch (req.method) {
   case "terminal.label": { const t = find(p.terminal); if (!t) { fail("not_found", "no terminal"); break; } Object.assign(t.labels, p.labels); reply(t); break; }
   case "terminal.kill": { const t = find(p.terminal); if (!t) { fail("not_found", "no terminal"); break; } t.state = "finished"; t.status = null; t.reason = "killed"; reply(t); break; }
   case "terminal.rm": { const t = find(p.terminal); if (!t) { fail("not_found", "no terminal"); break; } if (t.state === "live") { fail("live", "still live"); break; } s.terminals = s.terminals.filter((x) => x !== t); reply({ removed: t.address }); break; }
+  case "doc.get": reply(s.doc ? s.doc : { value: null, version: 0 }); break;
+  case "doc.set": {
+    const cur = s.doc ? s.doc.version : 0;
+    if (p.version !== cur) { fail("conflict", "version moved"); break; }
+    s.doc = { version: cur + 1, value: p.value };
+    reply({ version: s.doc.version });
+    break;
+  }
   default: fail("invalid_params", "unknown method " + req.method);
 }
 `;
@@ -100,7 +117,12 @@ test("hc: a workspace pane is pending until an agent starts in it, then a labell
   assert.equal(lead.env.PATH, "/x:/y");
   assert.equal(lead.env.ORKA_JOB, "j1");
   assert.equal(lead.name, "jj1");
-  assert.deepEqual(lead.labels, { orka_agent: "jj1", orka_pane: pane, orka_ws: workspace, orka_job: "j1" });
+  const { "herdr.space": space, "herdr.tab": tab, orka_space_name, orka_tab_name, ...orka } = lead.labels;
+  assert.deepEqual(orka, { orka_agent: "jj1", orka_pane: pane, orka_ws: workspace, orka_job: "j1" });
+  assert.match(space, /^sp[0-9a-f]{32}$/);
+  assert.match(tab, /^tb[0-9a-f]{32}$/);
+  assert.deepEqual([orka_space_name, orka_tab_name], ["orka j1", "jj1"]);
+  assert.equal(t.calls().filter((c) => c.method === "doc.set").length, 0, "no app, no layout write");
   const run = t.calls().find((c) => c.method === "terminal.run").params;
   assert.equal(run.no_notify, true);
   assert.equal(run.no_parent, true);
@@ -307,4 +329,69 @@ test("hc: ORKA_PANE_ENV copies the named caller variables into panes, and itself
   assert.equal(lead.env.OTHER, undefined);
   assert.equal("NOT_SET" in lead.env, false);
   assert.equal(lead.env.ORKA_JOB, "j1");
+});
+
+test("appLabels: one space per job, one tab per pane, readable names", () => {
+  const lead = term.appLabels({ job: "20261029214905714-fix-duplicated-paragraph", workspace: "hw-1", pane: "hp-a", role: "orchestrator" });
+  const docs = term.appLabels({ job: "20261029214905714-fix-duplicated-paragraph", workspace: "hw-1", pane: "hp-b", role: "docs" });
+  const other = term.appLabels({ job: "20261029220000000-other", workspace: "hw-2", pane: "hp-a", role: "orchestrator" });
+  assert.match(lead["herdr.space"], /^sp[0-9a-f]{32}$/);
+  assert.equal(lead["herdr.space"], docs["herdr.space"], "a job's agents share its space");
+  assert.notEqual(lead["herdr.tab"], docs["herdr.tab"], "each agent has its own tab");
+  assert.notEqual(lead["herdr.space"], other["herdr.space"]);
+  assert.notEqual(lead["herdr.tab"], other["herdr.tab"], "same pane id in another job is another tab");
+  assert.equal(lead.orka_space_name, "orka fix-duplicated-paragraph");
+  assert.deepEqual([lead.orka_tab_name, docs.orka_tab_name], ["orchestrator", "docs"]);
+  assert.equal(term.appLabels({ workspace: "hw-1", pane: "hp-a" })["herdr.space"].length, 34, "no job: keyed by workspace");
+  assert.deepEqual(term.appLabels({ pane: "hp-a" }), {}, "no job, no workspace: not shown");
+  assert.equal(term.jobSlug("plain-id"), "plain-id");
+});
+
+test("nameLayout names only unnamed spaces and tabs of orka terminals, keeping the rest as it is", () => {
+  const l = term.appLabels({ job: "20261029214905714-x", pane: "hp-a", role: "orchestrator" });
+  const doc = { spaces: [
+    { id: "spuser", name: "", tabs: [{ id: "tbuser", name: "" }] },
+    { id: l["herdr.space"], name: "", folder: "/w", future: 1, tabs: [{ id: l["herdr.tab"], name: "", root: { x: 1 } }, { id: "tbother", name: "" }] },
+  ] };
+  const named = term.nameLayout(structuredClone(doc), [{ labels: l }, { labels: { "herdr.space": "spuser", "herdr.tab": "tbuser" } }]);
+  assert.equal(named.spaces[0].name, "", "a space orka did not make is left alone");
+  assert.equal(named.spaces[0].tabs[0].name, "");
+  assert.equal(named.spaces[1].name, "orka x");
+  assert.deepEqual(named.spaces[1].tabs, [{ id: l["herdr.tab"], name: "orchestrator", root: { x: 1 } }, { id: "tbother", name: "" }]);
+  assert.equal(named.spaces[1].future, 1);
+  doc.spaces[1].name = "mine";
+  doc.spaces[1].tabs[0].name = "lead";
+  assert.equal(term.nameLayout(doc, [{ labels: l }]), null, "names someone gave stay");
+  assert.equal(term.nameLayout(null, [{ labels: l }]), null);
+  assert.equal(term.nameLayout({ spaces: [] }, [{ labels: l }]), null, "not placed yet");
+});
+
+test("hc with the Herdr app open: a job is one named space, its orchestrator and worker named tabs", () => {
+  const t = scratch();
+  const env = { ...t.env, FAKE_HC_APP: "1", ORKA_HC_NAME_WAIT_MS: "500" };
+  const hc = (args) => term.hcCall(args, { env });
+  const job = "20261029214905714-fix-duplicated-paragraph";
+  const pane = hc(["workspace", "create", "--cwd", "/w", "--env", `ORKA_JOB=${job}`, "--env", "ORKA_WORKER=orchestrator"]).json.result.root_pane.pane_id;
+  assert.equal(hc(["agent", "start", "j1", "--kind", "claude", "--pane", pane, "--timeout", "2000"]).code, 0);
+  const child = hc(["pane", "split", "--pane", pane, "--cwd", "/w", "--env", `ORKA_JOB=${job}`, "--env", "ORKA_WORKER=docs"]).json.result.pane.pane_id;
+  assert.equal(hc(["agent", "start", "docs", "--kind", "claude", "--pane", child, "--timeout", "2000"]).code, 0);
+  const [lead, docs] = t.terminals();
+  assert.equal(lead.labels["herdr.space"], docs.labels["herdr.space"]);
+  assert.equal(docs.parent, lead.address, "the app nests the worker under its orchestrator");
+  const { spaces } = JSON.parse(readFileSync(t.state, "utf8")).doc.value;
+  assert.equal(spaces.length, 1);
+  assert.equal(spaces[0].name, "orka fix-duplicated-paragraph");
+  assert.equal(spaces[0].extra, "kept", "fields orka does not know survive the write");
+  assert.deepEqual(spaces[0].tabs.map((c) => c.name), ["orchestrator", "docs"]);
+  assert.equal(t.calls().some((c) => c.method === "terminal.label" && "where" in (c.params.labels || {})), false, "the app writes where, not orka");
+});
+
+test("hc: ORKA_HC_SPACES=off keeps a job out of the Herdr app", () => {
+  const t = scratch();
+  const env = { ...t.env, FAKE_HC_APP: "1", ORKA_HC_SPACES: "off" };
+  const pane = term.hcCall(["workspace", "create", "--cwd", "/w", "--env", "ORKA_JOB=j1"], { env }).json.result.root_pane.pane_id;
+  assert.equal(term.hcCall(["agent", "start", "a1", "--kind", "claude", "--pane", pane, "--timeout", "2000"], { env }).code, 0);
+  const [lead] = t.terminals();
+  assert.equal(Object.keys(lead.labels).some((k) => k.startsWith("herdr.") || k.startsWith("orka_space")), false);
+  assert.equal(t.calls().some((c) => c.method.startsWith("doc.")), false);
 });
