@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { leaked } from "../scripts/test-env.mjs";
+import { leaked } from "../scripts/hermetic-env.mjs";
 
 const ROOT = join(import.meta.dirname, "..");
 
@@ -60,7 +60,7 @@ test("npm test is hermetic: a job pane's GIT_CONFIG_* hooksPath and ORKA_* tags 
   }
 });
 
-test("test-env strips only repo-local git vars and orka tags", () => {
+test("hermetic-env strips only repo-local git vars and orka tags", () => {
   for (const k of ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_12", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG_PARAMETERS", "ORKA_JOB", "ORCA_PORTS"]) assert.ok(leaked(k), k);
   for (const k of ["GIT_EDITOR", "GIT_AUTHOR_NAME", "GIT_CONFIG_GLOBAL", "GIT_SSH_COMMAND", "PATH", "HOME", "PORT"]) assert.ok(!leaked(k), k);
 });
