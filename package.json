@@ -9,7 +9,7 @@
     "orca": "./bin/orca.mjs"
   },
   "scripts": {
-    "test": "node --test",
+    "test": "node --import ./scripts/test-env.mjs --test",
     "lint": "node scripts/lint.mjs"
   },
   "engines": {
