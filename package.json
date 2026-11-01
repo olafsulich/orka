@@ -10,7 +10,8 @@
   },
   "scripts": {
     "test": "node --import ./scripts/hermetic-env.mjs --test",
-    "lint": "node scripts/lint.mjs"
+    "lint": "node scripts/lint.mjs",
+    "install-bin": "bash scripts/install.sh"
   },
   "engines": {
     "node": ">=22"

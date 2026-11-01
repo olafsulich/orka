@@ -12,7 +12,7 @@ Needs Node 22+, git, herdr-core (`hc`, with `herdr-core serve` running) and Clau
 
 ```bash
 git clone https://github.com/olafsulich/orka.git && cd orka
-ln -s "$PWD/bin/orka.mjs" ~/.local/bin/orka   # any directory on PATH; agent panes call orka too
+npm run install-bin                           # or: bash scripts/install.sh [dir]; links orka + orca alias into ~/bin
 orka doctor                                   # lists anything missing, with the fix
 ```
 
