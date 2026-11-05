@@ -114,7 +114,8 @@ Docs: [cleanup.md](docs/cleanup.md), [webhooks.md](docs/webhooks.md), [autonomy.
 | --- | --- |
 | `.orka/config.json` | per repo: `gates`, `verify`, `verifierModel`, `staleAfter`, `memoryGuard`, `handoff` |
 | `~/.config/orka/config.json` | autonomy level per repo (default L1) |
-| `.orka/secrets/finish-webhook.env` | `WEBHOOK_URL`, `WEBHOOK_KEY`; no file, no webhooks |
+| `.orka/secrets/finish-webhook.env` | `WEBHOOK_URL`, `WEBHOOK_KEY`; the default for jobs with no wake; no file, no webhooks |
+| `~/.config/<bot>-finish-wake.env` | same keys; one job's webhooks with `orka new --wake <bot>`, `--wake-file <path>` or `ORKA_WAKE` ([webhooks.md](docs/webhooks.md)) |
 | `orka.verify.json` | browser checks at the worktree root; commit it |
 
 Every flag: [commands.md](docs/commands.md). All docs: [docs/](docs/README.md). Diagram sources: [diagrams.md](docs/diagrams.md).

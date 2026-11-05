@@ -4,7 +4,7 @@
 orka init [--cwd <repo>]
 orka new --title "..." --goal "..." [--cwd <repo>] [--kind claude|pi] [--keep] \
   [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds N] \
-  [--ui] [--playbook feature|bug-fix|investigation|hillclimb] [--no-gate]
+  [--ui] [--playbook feature|bug-fix|investigation|hillclimb] [--no-gate] [--wake <bot> | --wake-file <path>]
 orka new --spec specs/<feature>/spec.md [--title "..."] [--goal "extra"] [same flags as above]
 orka spec init <feature> [--cwd <repo>]
 orka run <id> [--dry-run] [--keep] [--cwd <repo>] \
@@ -63,7 +63,7 @@ Worker briefs: the orchestrator writes every worker `--task` as GOAL / SCOPE / C
 
 `strategy` also logs a row (phase `strategy`) and appends `<what changed>` to `job.verifier.strategyChanges` for the current round and prints the count. The orchestrator runs it after changing approach on a stall.
 
-`webhook` previews or retries that POST. It does not change job status.
+`webhook` previews or retries that POST. It does not change job status. `new --wake`, `--wake-file` or `ORKA_WAKE` picks where a job's webhooks go; see [webhooks.md](webhooks.md#where-the-post-goes).
 
 `cleanup` sweeps finished jobs: their browsers, the worktrees of done jobs, the workspaces idle for a while, and, for jobs whose workspace is closed, their leftover tagged processes and Claude scratch folders. Only `orka cleanup` does this: `orka new` and `orka run` never sweep other jobs. `--dry-run` lists what it would delete, with sizes. See [cleanup.md](cleanup.md).
 
