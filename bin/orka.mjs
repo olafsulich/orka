@@ -3,12 +3,13 @@
 // <repo>/.orka/worktrees/<id> on branch orka/<id>. Workers share that worktree.
 // Repos and jobs from orca keep .orca/ and orca/<id>; lib/brand.mjs holds the fallbacks.
 // Finish wake: when the CLI marks done|failed|stopped, POST {job, status, branch}
-// if <repo>/.orka/secrets/finish-webhook.env exists. Never a home path.
+// to the job's wake (orka new --wake, --wake-file or ORKA_WAKE), else to
+// <repo>/.orka/secrets/finish-webhook.env if it exists. No home path for the repo file.
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseEnv } from "node:util";
 import { DECISION_ROWS, DIGEST_MAX, FILE_READ_MAX, SUMMARY_MAX, VERIFIER_JSON_MAX, renderDigest, steerText } from "../lib/digest.mjs";
@@ -84,6 +85,8 @@ const VALUE_FLAGS = new Set([
   "accept",
   "signoff",
   "stack-on",
+  "wake",
+  "wake-file",
 ]);
 const BOOL_FLAGS = new Set(["dry-run", "help", "force", "keep", "base", "ui", "stdin", "pr", "push", "no-gate", "fix"]);
 const FINISH_STATUSES = new Set(["done", "failed", "stopped"]);
@@ -96,6 +99,7 @@ const LIVE_STATUSES = new Set(["running", AWAITING, REVIEW]);
 const APPROACH_MAX = 2000;
 const VERIFIER_NAME = "verifier";
 const FINISH_TIMEOUT_MS = 8000;
+const WAKE_NAME = /^[a-z0-9-]+$/;
 
 function fail(msg) {
   const err = new Error(msg);
@@ -506,36 +510,60 @@ function insideStateDir(repo, path) {
   }
 }
 
-function readFinishConfig(repo) {
+// Where a job's notifications go: job.wake or job.wakeFile (fixed at orka new), else the repo file.
+// A job with its own wake never falls back to the repo file: another bot may own that one.
+function readFinishConfig(repo, job) {
+  if (job?.wake || job?.wakeFile) return readWakeConfig(repo, job);
   const path = finishEnvPath(repo);
   if (!existsSync(path)) return { off: true, path };
-  if (!insideStateDir(repo, path)) return { error: `finish-webhook.env must stay inside ${brand.stateDirName(repo)} (no home path, no escaped symlink)` };
+  if (!insideStateDir(repo, path)) return { error: `finish-webhook.env must stay inside ${brand.stateDirName(repo)} (no home path, no escaped symlink)`, path };
+  return readWebhookEnv(path);
+}
+
+function readWakeConfig(repo, job) {
+  const wake = job.wake ? { wake: String(job.wake) } : {};
+  const who = job.wake ? `wake ${job.wake}` : `wake-file ${job.wakeFile}`;
+  if (!job.wakeFile && !WAKE_NAME.test(wake.wake)) return { ...wake, error: `${who}: the name must match ${WAKE_NAME}` };
+  const path = job.wakeFile ? resolve(repo, String(job.wakeFile)) : join(homedir(), ".config", `${wake.wake}-finish-wake.env`);
+  if (!existsSync(path)) return { ...wake, path, error: `${who}: missing ${path}` };
+  const config = readWebhookEnv(path);
+  return { ...config, ...wake, ...(config.error ? { error: `${who}: ${config.error}` } : {}) };
+}
+
+// The names only: a finish record never holds the URL or the key.
+function wakeFields(config) {
+  return { ...(config.wake ? { wake: config.wake } : {}), ...(config.path ? { wakeFile: config.path } : {}) };
+}
+
+function readWebhookEnv(path) {
+  const name = basename(path);
+  const refuse = (error) => ({ error, path });
   let st;
   try {
     st = statSync(path);
   } catch {
-    return { error: "cannot stat finish-webhook.env" };
+    return refuse(`cannot stat ${name}`);
   }
-  if (!st.isFile()) return { error: "finish-webhook.env is not a file" };
-  if ((st.mode & 0o077) !== 0) return { error: "finish-webhook.env must be mode 600" };
+  if (!st.isFile()) return refuse(`${name} is not a file`);
+  if ((st.mode & 0o077) !== 0) return refuse(`${name} must be mode 600`);
   let env;
   try {
     env = parseEnv(readFileSync(path, "utf8"));
   } catch {
-    return { error: "cannot read finish-webhook.env" };
+    return refuse(`cannot read ${name}`);
   }
   const urlText = env.WEBHOOK_URL ?? "";
   const key = env.WEBHOOK_KEY ?? "";
-  if (!urlText || !key) return { error: "finish-webhook.env needs WEBHOOK_URL and WEBHOOK_KEY" };
-  if (key !== key.trim() || /[\r\n]/.test(key)) return { error: "WEBHOOK_KEY is empty or invalid" };
+  if (!urlText || !key) return refuse(`${name} needs WEBHOOK_URL and WEBHOOK_KEY`);
+  if (key !== key.trim() || /[\r\n]/.test(key)) return refuse("WEBHOOK_KEY is empty or invalid");
   let url;
   try {
     url = new URL(urlText);
   } catch {
-    return { error: "WEBHOOK_URL is not a URL" };
+    return refuse("WEBHOOK_URL is not a URL");
   }
   if (url.protocol !== "https:" || url.username || url.password || url.hash) {
-    return { error: "WEBHOOK_URL must be https with no userinfo or fragment" };
+    return refuse("WEBHOOK_URL must be https with no userinfo or fragment");
   }
   return { url: url.href, origin: url.origin, key, path };
 }
@@ -634,7 +662,7 @@ function payloadOf(job, status = job.status) {
 
 function dryRunPlan(repo, job, status) {
   const payload = payloadOf(job, status);
-  const config = readFinishConfig(repo);
+  const config = readFinishConfig(repo, job);
   const record = readFinishRecord(repo, job.id);
   const last = lastAttempt(record, roundOf(job));
   let send = "would POST";
@@ -643,7 +671,7 @@ function dryRunPlan(repo, job, status) {
   else if (config.error) send = "no (invalid config)";
   else if (record?.corrupt) send = "no (corrupt record)";
   else if (last && last.outcome !== "failed") send = `no (last attempt ${last.outcome})`;
-  const configLine = config.off ? "off" : config.error ? `invalid: ${config.error}` : config.origin;
+  const configLine = config.off ? "off" : config.error ? `invalid: ${config.error}` : `${config.origin}${config.wake ? ` (wake ${config.wake})` : ""}`;
   return {
     payload,
     lines: [`payload: ${JSON.stringify(payload)}`, `config: ${configLine}`, `send: ${send}`],
@@ -686,7 +714,7 @@ async function deliverFinish(repo, job, opts = {}) {
   const payload = payloadOf(job, status);
   if (opts.dryRun) return { action: "dry-run", ...dryRunPlan(repo, job, status) };
   if (!FINISH_STATUSES.has(status)) fail(`job ${job.id} is ${status}; finish webhook sends only for done, failed, or stopped`);
-  const config = readFinishConfig(repo);
+  const config = readFinishConfig(repo, job);
   if (config.off) {
     if (manual) fail(`no finish webhook configured\nmissing ${config.path}`);
     return { action: "off" };
@@ -695,7 +723,7 @@ async function deliverFinish(repo, job, opts = {}) {
   if (record?.corrupt) return { action: "failed", detail: "finish record is corrupt; not sent" };
   if (config.error) {
     if (!manual && lastAttempt(record, roundOf(job))) return { action: "already", detail: lastAttempt(record, roundOf(job)).detail || "already recorded" };
-    const attempt = { at: new Date().toISOString(), outcome: "failed", http: null, detail: config.error, settled: new Date().toISOString() };
+    const attempt = { at: new Date().toISOString(), outcome: "failed", http: null, detail: config.error, settled: new Date().toISOString(), ...wakeFields(config) };
     if (!appendAttempt(repo, job, payload, attempt, record)) return { action: "already", detail: "attempt already recorded" };
     return { action: "failed", detail: config.error };
   }
@@ -705,7 +733,7 @@ async function deliverFinish(repo, job, opts = {}) {
     const extra = last.outcome === "accepted" ? "" : "; pass --force to record another attempt";
     return { action: "refuse", detail: `last attempt is ${last.outcome}${extra}` };
   }
-  const claimed = appendAttempt(repo, job, payload, { at: new Date().toISOString(), outcome: "attempting", http: null, detail: "acceptance unknown" }, record);
+  const claimed = appendAttempt(repo, job, payload, { at: new Date().toISOString(), outcome: "attempting", http: null, detail: "acceptance unknown", ...wakeFields(config) }, record);
   if (!claimed) return { action: "already", detail: "attempt already recorded" };
   const sent = await postFinish(config, payload);
   try {
@@ -735,7 +763,7 @@ function finishStatusLine(repo, job) {
     const http = last.http ? ` HTTP ${last.http}` : "";
     return `finish webhook: ${last.outcome}${http} attempt ${record.attempts.length} (${last.detail})`;
   }
-  const config = readFinishConfig(repo);
+  const config = readFinishConfig(repo, job);
   if (config.off) return "finish webhook: off";
   if (config.error) return `finish webhook: ${config.error}`;
   return "finish webhook: configured, not sent";
@@ -2085,9 +2113,22 @@ const gatePending = (job) => Boolean(job.gate?.on) && job.gate.state !== "approv
 // An orchestrator paused at the gate has ended its turn; herdr reports that as done, never idle.
 const GATE_READY = ["idle", "done"];
 
+// --wake, --wake-file, then ORKA_WAKE. A destination that cannot be used stops orka new, so a job never
+// starts with a wake that would only fail at the end.
+function wakeOfNew(repo, args) {
+  if ("wake" in args && "wake-file" in args) fail("use --wake or --wake-file, not both");
+  const envName = (process.env.ORKA_WAKE ?? "").trim();
+  const from = "wake-file" in args ? "--wake-file" : "wake" in args ? "--wake" : envName ? "ORKA_WAKE" : "";
+  if (!from) return {};
+  const wake = from === "--wake-file" ? { wakeFile: resolve(flagValue(args, "wake-file")) } : { wake: from === "--wake" ? flagValue(args, "wake") : envName };
+  const config = readFinishConfig(repo, wake);
+  if (config.error) fail(`${from}: ${config.error}\nno job created`);
+  return wake;
+}
+
 async function cmdNew(args) {
   if ("model" in args) fail("use --worker-model on orka new, not --model");
-  allowFlags(args, ["cwd", "title", "goal", "kind", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds", "ui", "playbook", "spec", "no-gate", "stack-on"]);
+  allowFlags(args, ["cwd", "title", "goal", "kind", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds", "ui", "playbook", "spec", "no-gate", "stack-on", "wake", "wake-file"]);
   const kind = args.kind || "claude";
   const repo = requireRepo(args.cwd || process.cwd());
   const spec = "spec" in args ? resolveSpec(repo, flagValue(args, "spec")) : null;
@@ -2111,6 +2152,7 @@ async function cmdNew(args) {
   if (existsSync(jobPath(repo, id))) fail(`job ${id} already exists`);
   const maxRounds = parseMaxRounds(args);
   const playbook = parsePlaybook(args) || "feature";
+  const wake = wakeOfNew(repo, args);
   const job = {
     v: 1,
     id,
@@ -2137,6 +2179,7 @@ async function cmdNew(args) {
     workers: [],
     browserSessions: [],
     keep: Boolean(args.keep),
+    ...wake,
     steers: [],
     started: null,
     finished: null,
@@ -3321,6 +3364,8 @@ function cmdStatus(args) {
     console.log(`  worktree: ${job.worktree || "(not created)"}${job.worktreeRemoved ? ` (removed ${job.worktreeRemoved}; branch kept)` : ""}`);
     console.log(`  layout: ${job.workerLayout || "shared-worktree"}`);
     console.log(`  playbook: ${job.playbook || "feature"}`);
+    console.log(`  wake: ${job.wake || (job.wakeFile ? "(file)" : "repo default")}`);
+    if (job.wakeFile) console.log(`  wake-file: ${job.wakeFile}`);
     if (job.spec?.path) console.log(`  spec: ${job.spec.path}${job.spec.commit ? ` @${job.spec.commit.slice(0, 8)}` : ""}`);
     if (job.lessons) console.log(`  lessons: ${job.lessons.added} added, ${job.lessons.bumped} seen again${job.lessons.commit ? ` (commit ${job.lessons.commit})` : " (not committed)"}`);
     if (gateLine(job)) console.log(`  ${gateLine(job)}`);
@@ -4875,7 +4920,7 @@ async function cmdWatch(args) {
     return;
   }
   if (!job.agent || !job.pane) fail(`job ${id} has no orchestrator agent or pane to watch`);
-  const config = readFinishConfig(repo);
+  const config = readFinishConfig(repo, job);
   if (args["dry-run"]) {
     console.log(`dry-run watch ${id}: agent=${job.agent} pane=${job.pane}`);
     console.log(`would post {kind:"needs-input", job, title, status, question, pane} to ${config.origin || (config.off ? "(no webhook configured: log and skip)" : `(invalid config: ${config.error})`)}`);
@@ -4898,11 +4943,15 @@ async function cmdWatch(args) {
     },
     busy: () => handoffBusy(repo, id),
     post: async (payload) => {
-      const cfg = readFinishConfig(repo);
+      const cfg = readFinishConfig(repo, job);
       if (cfg.off) return log("no finish webhook configured; needs-input not sent");
-      if (cfg.error) return log(`finish webhook config invalid (${cfg.error}); needs-input not sent`);
+      if (cfg.error) {
+        // Not in <id>.finish.json: this detached process would race orka done, whose claim on that file gates the finish POST.
+        appendDecision(repo, id, ["wake", `needs-input ${payload.status} not sent`, cfg.error, cfg.path || "", "failed"]);
+        return log(`finish webhook config invalid (${cfg.error}); needs-input not sent`);
+      }
       const sent = await postFinish(cfg, payload);
-      log(`needs-input ${payload.status}: ${sent.outcome} (${sent.detail})`);
+      log(`needs-input ${payload.status}: ${sent.outcome} (${sent.detail})${cfg.wake ? ` wake ${cfg.wake}` : ""}`);
     },
     log,
     housekeep: watchTick(repo, id),
@@ -5234,7 +5283,8 @@ async function cmdChain(args) {
   const notify = async (status, message) => {
     log(`NOTIFY [${status}] ${message}`);
     if (dry) return;
-    const cfg = readFinishConfig(repo);
+    // Chain alerts belong to no job; ORKA_WAKE is what the chain's own jobs get from orka new.
+    const cfg = readFinishConfig(repo, process.env.ORKA_WAKE?.trim() ? { wake: process.env.ORKA_WAKE.trim() } : null);
     if (cfg.off || cfg.error) return log(`no webhook (${cfg.error || "off"}), skipped`);
     const sent = await postFinish(cfg, { kind: status === "done" ? "orka-chain" : "needs-input", job: "orka-chain", title: `orka chain ${basenameOf(repo)}`, status, question: message, log: p.log });
     log(`webhook ${sent.outcome}${sent.http ? ` http=${sent.http}` : ""}`);
@@ -5498,7 +5548,7 @@ async function cmdPropose(args) {
     approach: approach.text,
     question: `Direction for "${job.title}"? Approve: orka approve ${job.id}. Revise: orka steer ${job.id} "<what to change>".`,
   };
-  const cfg = readFinishConfig(repo);
+  const cfg = readFinishConfig(repo, job);
   if (args["dry-run"]) {
     console.log(`dry-run propose ${id}: running -> ${AWAITING}`);
     console.log(`payload: ${JSON.stringify(payload)}`);
@@ -5548,7 +5598,7 @@ async function cmdReview(args) {
     summary: summary.slice(0, 2000),
     question: `Sign off "${job.title}"? Approve the result: orka approve ${id}. Request changes: orka steer ${id} "<what to change>".`,
   };
-  const cfg = readFinishConfig(repo);
+  const cfg = readFinishConfig(repo, job);
   if (args["dry-run"]) {
     console.log(`dry-run review ${id}: running -> ${REVIEW}`);
     console.log(`payload: ${JSON.stringify(payload)}`);
@@ -5753,6 +5803,7 @@ function help() {
   orka new --spec specs/<feature>/spec.md [--title "..."] [--goal "extra"] [...]   (intake built from a committed spec)
   orka spec init <feature> [--cwd <repo>]   (scaffolds specs/<feature>/spec.md; you fill and commit it)
            [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds <N>]
+           [--wake <bot> | --wake-file <path>]   (where this job's webhooks go; docs/webhooks.md)
   orka run <id> [--dry-run] [--cwd <repo>] [--keep]   (panes on herdr-core, seen in the Herdr app; ORKA_BACKEND=herdr: the deprecated herdr TUI; docs/backends.md)
            [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds <N>]
   orka worker --job <id> --name <agent> --task "..." [--model <alias>] [--role builder|verifier] [--accept "<cmd>"] [--dry-run]
@@ -5874,6 +5925,8 @@ Finish wake is automatic from this CLI when it marks a job done, failed, or stop
 It POSTs {"job","status","branch"} once (plus "verifier": "verified by verifier: pass, round N" and a "verification" object
 {"verdict","rounds","strategyChanges","blocking":[{"check","evidence"}],"warnings":[...],"stopReason"?} when a verifier ran), using <repo>/.orka/secrets/finish-webhook.env (mode 600).
 Keys are WEBHOOK_URL and WEBHOOK_KEY, the same pair as herdr-finish-wake.env. Off if that file is missing.
+A job can have its own destination, fixed at orka new: --wake <bot> (~/.config/<bot>-finish-wake.env), --wake-file <path>, or ORKA_WAKE.
+It then never uses the repo file: orka new refuses a missing file, and a file missing at send time is recorded as a failed attempt.
 This CLI does not read a home path and does not run herdr-finish-watch. Agents must not either.
 A failed POST does not change job status. The attempt is <repo>/.orka/jobs/<id>.finish.json.
 orka webhook retries a failed attempt and records it. --dry-run prints the payload and does not send.
