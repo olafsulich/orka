@@ -4,8 +4,6 @@
 
 Orka runs agent jobs in one git repo. You file a task. `orka run` checks out a linked worktree on its own branch and starts an orchestrator agent in a herdr-core terminal, which the Herdr desktop app shows. The orchestrator splits the work across builder agents, and a fresh verifier checks the result. The CLI enforces the rules: who may start, when a check blocks, and when a job is done. By default nothing is marked done or merged without your sign-off. Node ESM, zero dependencies.
 
-The command is `orka`. Orka was called orca, and `orca` still works as a deprecated alias ([rename.md](docs/rename.md)).
-
 ## Install
 
 Needs Node 22+, git, herdr-core (`hc`, with `herdr-core serve` running) and Claude Code (or Pi 1.1.0+). `agent-browser` is optional and needed only for browser checks. The old herdr TUI is deprecated: `ORKA_BACKEND=herdr` still uses it ([backends.md](docs/backends.md)).
