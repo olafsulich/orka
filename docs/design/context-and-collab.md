@@ -140,13 +140,13 @@ First prompt of the successor = the normal role prompt (`workerPrompt` or `orche
 
 ### Current state
 
-Sources: `docs/research/limen-2026-10-10.md`, `docs/research/overment-vs-orca.md`, `docs/research/overment-agents.html`, and the local Limen checkout (`~/projects/limen` at `3241454`, 2026-10-17). Limen is public at https://github.com/overment/limen (background: https://mega.dev/autonomous-product-development). It has no document on context handling; the points below come from its code and templates. No context-limit threshold or custom compaction prompt exists in it.
+Source: the local Limen checkout (`~/projects/limen` at `3241454`, 2026-10-17). Limen is public at https://github.com/overment/limen (background: https://mega.dev/autonomous-product-development). It has no document on context handling; the points below come from its code and templates. No context-limit threshold or custom compaction prompt exists in it.
 
 What Limen does with context:
-- **It does not compact or hand off.** Pi (or OMP) compacts the session. Limen keeps big stable text out of the thread and leaves the full record on disk (`limen-2026-10-10.md:41`).
-- **Rules live on the system prompt, plus a hidden per-turn cue** rebuilt every turn, so they survive compaction (`hook/communication.ts`, `limen-2026-10-10.md:63`). Pi-only (a Pi extension).
-- **Bounded wake:** `handoffExcerpt` clips a finished job's result to 15 lines / 1200 chars + 10 commits (`limen-2026-10-10.md:83`). orka already copied this as the digest.
-- **`limen continue` copies the parent's jsonl** into the child. Context is kept, not shrunk (`limen-2026-10-10.md:33`).
+- **It does not compact or hand off.** Pi (or OMP) compacts the session. Limen keeps big stable text out of the thread and leaves the full record on disk.
+- **Rules live on the system prompt, plus a hidden per-turn cue** rebuilt every turn, so they survive compaction (`hook/communication.ts`). Pi-only (a Pi extension).
+- **Bounded wake:** `handoffExcerpt` clips a finished job's result to 15 lines / 1200 chars + 10 commits. orka already copied this as the digest.
+- **`limen continue` copies the parent's jsonl** into the child. Context is kept, not shrunk.
 - **A correction goes to the same coordinator, which keeps its context** (`overment-vs-orca.md:14`, `overment-agents.html` "Correction").
 - **Worker reading budget:** about ten reads, then a probe edit; stop if the seam widens (`templates/worker.md`). **Handoffs under ~200 words** (`templates/agents.md`).
 - **AGENTS.md:** a project `AGENTS.md` replaces Limen's inherited shop manual (`hook/communication.ts:234-237`, `docs/setup.md:76`). Limen treats AGENTS.md as the one project file.
@@ -266,7 +266,7 @@ What orka changes: the note goes to `<jobdir>/handoff/<name>-<n>.md`, not `$TMPD
 
 ## Limen, latest source (2026-10-21)
 
-Source: https://github.com/overment/limen, `main` at `a8cb4b0` (2026-10-21 15:06 +02:00), `package.json` `@overment/limen` 0.1.0. There are no tags or releases. The npm package named `limen` is unrelated (0.0.0, last changed 2022). I read a sparse, shallow clone of `src/`, `hook/`, `templates/` and `docs/`. Refs below are to that commit. The newest public writing is https://mega.dev/autonomous-product-development; `docs/research/overment-agents.html` covers Adam's messages from Sep 1 to Oct 20.
+Source: https://github.com/overment/limen, `main` at `a8cb4b0` (2026-10-21 15:06 +02:00), `package.json` `@overment/limen` 0.1.0. There are no tags or releases. The npm package named `limen` is unrelated (0.0.0, last changed 2022). I read a sparse, shallow clone of `src/`, `hook/`, `templates/` and `docs/`. Refs below are to that commit. The newest public writing is https://mega.dev/autonomous-product-development.
 
 **a. Context limits.** Limen has none.
 - No threshold, no measurement of a live context window, and no compaction prompt anywhere in the code.

@@ -1,6 +1,6 @@
 # Workers: finish wake and steer inbox
 
-The path between workers and the orchestrator is run by orka, not by the agents. Workers only write their files. orka tells the orchestrator when they are done, and it delivers messages to a pane between that pane's tool calls. The design follows Limen's completion wake and steer inbox (docs/research/limen-2026-10-10.md, sections 3 and 4).
+The path between workers and the orchestrator is run by orka, not by the agents. Workers only write their files. orka tells the orchestrator when they are done, and it delivers messages to a pane between that pane's tool calls. The design follows Limen's completion wake and steer inbox (https://github.com/overment/limen).
 
 ## Finish wake
 

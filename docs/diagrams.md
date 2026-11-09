@@ -26,7 +26,7 @@ The PNGs are generated, so never edit them by hand. Change the clip, re-render, 
 
 ## Older diagrams
 
-Stills of diagram-framework clips (`clips/orca-*`, commit `abb09c8`) from before the step diagrams. They still show the old name, orca. The README no longer uses them; they stay because older notes (tasks/15, research/IMPROVEMENTS-pstack-limen.md) point to them, and the context-injection diagram has no step equivalent.
+Stills of diagram-framework clips (`clips/orca-*`, commit `abb09c8`) from before the step diagrams. They still show the old name, orca. The README no longer uses them; they stay because the context-injection diagram has no step equivalent.
 
 | Image | What it shows |
 | --- | --- |
