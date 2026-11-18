@@ -80,6 +80,44 @@ test("idle without done fires once", async () => {
   assert.equal(h.posts[0].status, "idle");
 });
 
+test("idle with live workers posts nothing and logs waiting once", async () => {
+  const h = harness({ statuses: ["idle", "idle", "idle", "idle", "idle", "unknown", "unknown", "unknown"], jobs: [running] });
+  const logs = [];
+  h.deps.log = (m) => logs.push(m);
+  h.deps.workersLive = async () => true;
+  await run(h);
+  assert.equal(h.posts.length, 0);
+  assert.deepEqual(logs.filter((m) => m.startsWith("waiting")), ["waiting j1: workers live"]);
+});
+
+test("idle, no live workers, no question posts one stuck", async () => {
+  const h = harness({ statuses: ["idle", "idle", "idle", "unknown", "unknown", "unknown"], panes: ["builder finished\nnothing more to do"], jobs: [running] });
+  h.deps.workersLive = () => false;
+  await run(h);
+  assert.equal(h.posts.length, 1);
+  assert.equal(h.posts[0].kind, "stuck");
+  assert.equal(h.posts[0].status, "idle");
+});
+
+test("idle, no live workers, question in pane posts needs-input idle", async () => {
+  const h = harness({ statuses: ["idle", "idle", "idle", "unknown", "unknown", "unknown"], jobs: [running] });
+  h.deps.workersLive = async () => false;
+  await run(h);
+  assert.equal(h.posts.length, 1);
+  assert.equal(h.posts[0].kind, "needs-input");
+  assert.equal(h.posts[0].status, "idle");
+});
+
+test("workersLive that throws counts as not live", async () => {
+  const h = harness({ statuses: ["idle", "idle", "idle", "unknown", "unknown", "unknown"], jobs: [running] });
+  h.deps.workersLive = () => {
+    throw new Error("boom");
+  };
+  await run(h);
+  assert.equal(h.posts.length, 1);
+  assert.equal(h.posts[0].kind, "needs-input");
+});
+
 test("idle while awaiting direction does not post: orka propose already notified", async () => {
   const awaiting = { id: "j1", title: "T", status: "awaiting-direction" };
   const h = harness({ statuses: ["idle", "idle", "idle", "unknown", "unknown", "unknown"], panes: ["approach written; waiting"], jobs: [awaiting] });
