@@ -73,7 +73,7 @@ function running(t, id) {
 // The prompt text a run call sent to herdr, ids masked so two jobs compare.
 function promptOf(t, id) {
   const log = t.calls();
-  return log.slice(log.indexOf("herdr agent prompt")).replaceAll(t.repo, "REPO").replaceAll(id, "JOB").replace(/\bj\d+rf\b/g, "AGENT").replace(/\b[0-9a-f]{40}\b/g, "SHA").replace(/orka-[0-9a-f]{8}-/g, "orka-BROWSER-").replace(/\b[2-6]\d{4}\b/g, "PORT");
+  return log.slice(log.indexOf("herdr agent prompt")).replaceAll(ORKA, "BIN").replaceAll(t.repo, "REPO").replaceAll(id, "JOB").replace(/\bj\d+rf\b/g, "AGENT").replace(/\b[0-9a-f]{40}\b/g, "SHA").replace(/orka-[0-9a-f]{8}-/g, "orka-BROWSER-").replace(/\b[2-6]\d{4}\b/g, "PORT");
 }
 
 function orchestratorLog(...flags) {
