@@ -88,7 +88,7 @@ const VALUE_FLAGS = new Set([
   "wake",
   "wake-file",
 ]);
-const BOOL_FLAGS = new Set(["dry-run", "help", "force", "keep", "base", "ui", "stdin", "pr", "push", "no-gate", "fix"]);
+const BOOL_FLAGS = new Set(["dry-run", "help", "force", "keep", "base", "ui", "stdin", "pr", "push", "no-gate", "fix", "live"]);
 const FINISH_STATUSES = new Set(["done", "failed", "stopped"]);
 // Direction gate: a new-feature job pauses here after planning until orka approve (or orka steer revises the plan).
 const AWAITING = "awaiting-direction";
@@ -3214,12 +3214,95 @@ function featureMapStep(repo, job, w, key) {
   return note;
 }
 
+// A worker's turn ended (done or idle) and results/<name>.json was never written: after WAKE_GRACE_MS
+// the orchestrator gets one wake with the worker's last pane lines. The grace starts when the watcher
+// first sees the worker ended (job.wakeSeen[name]); a working or blocked pane clears it. One wake per
+// worker: job.wakes.endedWithoutResult[name]. Same delivery rules as the finished-wake; dry writes nothing.
+const WAKE_GRACE_MS = (() => {
+  const n = Number(brand.env("WAKE_GRACE_MS"));
+  return brand.env("WAKE_GRACE_MS") != null && brand.env("WAKE_GRACE_MS") !== "" && Number.isFinite(n) && n >= 0 ? n : 60000;
+})();
+const ENDED_PANE_LINES = 15;
+
+function endedWithoutResultStep(repo, id, job, w, { log, dry, graceMs, now, leadHandoff, seen }) {
+  if (w.closed || PENDING.has(w.handoff?.state) || job.wakes?.endedWithoutResult?.[w.name]) return;
+  const status = agentStatus(w.name);
+  const clearSeen = () => {
+    if (dry || !job.wakeSeen?.[w.name]) return;
+    updateJob(repo, id, (j) => {
+      if (j.wakeSeen) delete j.wakeSeen[w.name];
+    });
+  };
+  if (status !== "done" && status !== "idle") {
+    clearSeen();
+    return;
+  }
+  const first = Date.parse(job.wakeSeen?.[w.name] || "");
+  if (!Number.isFinite(first)) {
+    if (!dry) updateJob(repo, id, (j) => (j.wakeSeen = { ...(j.wakeSeen || {}), [w.name]: new Date(now).toISOString() }));
+    seen.push({ kind: "wake", worker: w.name, state: `ended without a result: grace ${Math.round(graceMs / 1000)}s started` });
+    return;
+  }
+  if (now - first < graceMs) {
+    seen.push({ kind: "wake", worker: w.name, state: `ended without a result: within grace (${Math.ceil((graceMs - (now - first)) / 1000)}s left)` });
+    return;
+  }
+  if (leadHandoff) {
+    seen.push({ kind: "wake", worker: w.name, state: "held: the orchestrator is handing off" });
+    return;
+  }
+  const lead = agentStatus(job.agent);
+  const mode = context.SAFE_STATUSES.includes(lead) ? "now" : lead === "working" ? "queue" : "";
+  if (!mode) {
+    seen.push({ kind: "wake", worker: w.name, state: `held: orchestrator ${lead}` });
+    return;
+  }
+  const tail = w.pane ? String(herdr(["pane", "read", w.pane, "--source", "recent"]).text || "").split("\n").map((l) => l.trimEnd()).filter((l) => l.trim()).slice(-ENDED_PANE_LINES) : [];
+  const text = [`orka wake: worker ${w.name} ended its turn without a result (no ${w.result}).`, `Last pane lines:`, ...(tail.length ? tail : ["(pane unreadable)"]), `Nudge it with orka steer, or run orka digest ${id}.`].join("\n");
+  seen.push({ kind: "wake", worker: w.name, state: `ended-without-result wake ${mode === "now" ? "sent" : "queued mid-turn"}`, text });
+  if (dry) return;
+  const sent = mode === "now" ? promptWithRetry(job.agent, text, { readyStatuses: context.SAFE_STATUSES }) : queuePrompt(job.agent, text);
+  if (!sent.ok) {
+    log(`wake ${w.name}: ended-without-result not delivered (${sent.reason}); retrying next poll`);
+    return;
+  }
+  const at = new Date(now).toISOString();
+  updateJob(repo, id, (j) => {
+    j.wakes = { ...(j.wakes || {}), endedWithoutResult: { ...(j.wakes?.endedWithoutResult || {}), [w.name]: { worker: w.name, at, mode, agent: j.agent, pane: j.pane } } };
+  });
+  appendDecision(repo, id, ["wake", `wake orchestrator: ${w.name} ended without a result`, status, w.result, mode === "now" ? `delivered to ${job.agent} (${job.pane})` : `queued mid-turn for ${job.agent} (${job.pane})`]);
+  log(`wake ${w.name} -> ${job.agent} (${job.pane}): ended without a result, ${mode === "now" ? "delivered" : "queued mid-turn"}`);
+}
+
+// True while a worker can still produce a wake: working or blocked, a result not yet woken, or an
+// ended-without-result worker still in grace or undelivered. The watcher does not post needs-input then.
+function workersLive(repo, id) {
+  let job;
+  try {
+    job = load(repo, id);
+  } catch {
+    return false;
+  }
+  const owner = new Map((job.workers || []).filter((w) => w?.result).map((w) => [w.result, w.name]));
+  for (const w of job.workers || []) {
+    if (!w?.name || w.retired || w.closed) continue;
+    const status = agentStatus(w.name);
+    if (status === "working" || status === "blocked") return true;
+    if (!w.result || owner.get(w.result) !== w.name) continue;
+    const key = wake.wakeKey(w.name, w.result);
+    if (key) {
+      if (!job.wakes?.[key]) return true;
+    } else if (!existsSync(w.result) && (status === "done" || status === "idle") && !job.wakes?.endedWithoutResult?.[w.name]) return true;
+  }
+  return false;
+}
+
 // Harness-sent wake and inbox delivery (docs/workers.md). The watcher runs this every poll:
 // 1. a worker or verifier whose turn ended with its result file written gets one wake to the current
 //    orchestrator (held while the orchestrator hands off; queued mid-turn while it works);
 // 2. steers waiting in an inbox go to an idle target with herdr agent prompt (its hook delivers them
 //    between tool calls while it works). Always to whichever pane holds the name now.
-function wakeTick(repo, id, { log = console.log, dry = false } = {}) {
+function wakeTick(repo, id, { log = console.log, dry = false, graceMs = WAKE_GRACE_MS, now = Date.now() } = {}) {
   const job = load(repo, id);
   const seen = [];
   if (job.status !== "running" || !job.agent) return seen;
@@ -3230,6 +3313,10 @@ function wakeTick(repo, id, { log = console.log, dry = false } = {}) {
   for (const w of job.workers || []) {
     if (!w?.result || w.retired || owner.get(w.result) !== w.name) continue;
     const key = wake.wakeKey(w.name, w.result);
+    if (!key && !existsSync(w.result)) {
+      endedWithoutResultStep(repo, id, job, w, { log, dry, graceMs, now, leadHandoff, seen });
+      continue;
+    }
     if (!key || job.wakes?.[key]) continue;
     const status = agentStatus(w.name);
     if (status === "working" || status === "blocked") {
@@ -3301,10 +3388,11 @@ function wakeTick(repo, id, { log = console.log, dry = false } = {}) {
 }
 
 function cmdWake(args) {
-  allowFlags(args, ["cwd", "dry-run"]);
+  allowFlags(args, ["cwd", "dry-run", "live"]);
   const id = args._[1];
-  if (!id) fail("need: orka wake <id> [--dry-run]");
+  if (!id) fail("need: orka wake <id> [--dry-run | --live]");
   const repo = requireRepo(args.cwd || process.cwd());
+  if (args.live) return console.log(`workers live: ${workersLive(repo, String(id))}`);
   const seen = wakeTick(repo, String(id), { dry: Boolean(args["dry-run"]) });
   for (const s of seen) console.log(`${s.kind} ${s.worker || s.target}: ${s.state}`);
   if (!seen.length) console.log("nothing to wake or deliver");
@@ -4942,6 +5030,7 @@ async function cmdWatch(args) {
       handoffTick(repo, id, { log });
     },
     busy: () => handoffBusy(repo, id),
+    workersLive: (j) => workersLive(repo, j?.id || id),
     post: async (payload) => {
       const cfg = readFinishConfig(repo, job);
       if (cfg.off) return log("no finish webhook configured; needs-input not sent");
@@ -5818,7 +5907,7 @@ function help() {
   orka digest <id> [--cwd <repo>]
   orka steer <id> [--to <worker>] "message"   (running job: via the target's inbox, delivered between tool calls or when idle;
            also on a finished job whose orchestrator pane is still open: starts a follow-up round)
-  orka wake <id> [--dry-run]   (one pass of the watcher's finish wakes and inbox delivery; docs/workers.md)
+  orka wake <id> [--dry-run | --live]   (one pass of the watcher's finish wakes and inbox delivery; docs/workers.md)
   orka propose <id> [--dry-run]   (orchestrator, direction gate: approach.md written; pause and notify Olaf)
   orka review <id> [--dry-run]   (orchestrator: verifier passed, summary.txt written; status review, Olaf is notified)
   orka approve <id> ["note"]   (Olaf only; by status: awaiting-direction -> approves the plan, the orchestrator builds;
