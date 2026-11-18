@@ -72,7 +72,7 @@ Docs: [gates.md](docs/gates.md).
 
 ![A fresh verifier runs the checks and writes a verdict; a fail routes evidence back to the builder, a repeated fail forces a strategy change](docs/img/readme/6-verifier.png)
 
-One verifier starts with a fresh context. It runs `orka verify`, the project's checks and targeted `agent-browser` checks, and writes a verdict. It never edits product code. On `fail`, the orchestrator routes each blocking failure, with its evidence, to the builder that owns it, then starts the next round. If the same check fails two rounds in a row, that is a stall, and the orchestrator must change strategy (`orka strategy`).
+One verifier starts with a fresh context. It runs `orka verify`, the project's checks and targeted `agent-browser` checks, and writes a verdict. It never edits product code. On `fail`, the orchestrator routes each blocking failure, with its evidence, to the builder that owns it, then starts the next round. If the same check fails two rounds in a row, or `--stall-after N` (default 3) fail rounds follow each other whatever the checks, that is a stall, and the orchestrator must change strategy (`orka strategy`).
 Docs: [verifier.md](docs/verifier.md), [verify.md](docs/verify.md), [doctor.md](docs/doctor.md).
 
 ### 7. Review and sign-off

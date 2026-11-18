@@ -3,7 +3,7 @@
 ```bash
 orka init [--cwd <repo>]
 orka new --title "..." --goal "..." [--cwd <repo>] [--kind claude|pi] [--keep] \
-  [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds N] \
+  [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds N] [--stall-after N] \
   [--ui] [--playbook feature|bug-fix|investigation|hillclimb] [--no-gate] [--wake <bot> | --wake-file <path>]
 orka new --spec specs/<feature>/spec.md [--title "..."] [--goal "extra"] [same flags as above]
 orka spec init <feature> [--cwd <repo>]
@@ -37,7 +37,7 @@ orka chain [--dry-run] [--cwd <repo>]
 orka help
 ```
 
-`--kind` defaults to `claude`. `--max-rounds N` (positive integer) on `new` or `run` stores `job.maxRounds`, an opt-in ceiling on verifier rounds; by default there is none. `--role` on `orka worker` is `builder` (default) or `verifier`.
+`--kind` defaults to `claude`. `--max-rounds N` (positive integer) on `new` or `run` stores `job.maxRounds`, an opt-in ceiling on verifier rounds; by default there is none. `--stall-after N` (integer >= 2, default 3) on `new` sets how many consecutive fail rounds count as a stall regardless of check names ([verifier.md](verifier.md)). `--role` on `orka worker` is `builder` (default) or `verifier`.
 
 `--spec <path>` builds the job from a committed spec: the title defaults to its `# ` heading and the goal is built from its What, Why, Limits and Done when sections (`--goal` text, if given, goes first). The spec must be committed at HEAD and have What and Done when filled in. Its text is pasted into every worker and verifier brief. `spec init <feature>` writes the template to `specs/<feature>/spec.md` in the current checkout; you fill it in and commit it. See [specs.md](specs.md).
 

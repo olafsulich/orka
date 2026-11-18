@@ -42,7 +42,12 @@ Builders follow the same rule: if `--name api` is already used by a worker of th
 
 Loop: on `fail` the orchestrator reads `results/verifier.json`, routes each blocking failure with its evidence to the builder that owns those files (warnings are ignored for routing), then starts the verifier again. It runs `orka status <id>` after each round. There is no round limit unless `--max-rounds` was set.
 
-Stall: if the same blocking check fails in two consecutive rounds, `status` reports a stall. The orchestrator must not repeat the instruction. It changes strategy (rewrite the worker prompt with the evidence verbatim, split the work differently, start a fresh worker instead of resuming, or take another approach), records it with `orka strategy <id> [--premise "<shared premise>"] "<change>"`, and re-verifies. It stops only when the same failure survived 3 different strategy changes, or the fix needs a human decision or a secret, with `orka done <id> --give-up "<plain reason>"`. The orchestrator never marks its own work verified, never runs `orka verify`, and never edits checks.
+Stall: `status` reports a stall in two cases, recorded as `stall.kind`:
+
+- `"checks"`: the same blocking check fails in two consecutive rounds.
+- `"rounds"`: `--stall-after N` consecutive fail rounds (default 3), whatever the check names. It catches a worker that fixes one instance per round while the failing check changes each time. `orka new --stall-after <n>` (integer >= 2) sets N for the job.
+
+The orchestrator must not repeat the instruction. It changes strategy (rewrite the worker prompt with the evidence verbatim, split the work differently, start a fresh worker instead of resuming, or take another approach), records it with `orka strategy <id> [--premise "<shared premise>"] "<change>"`, and re-verifies. On kind `"rounds"` the verifier is also asked for a class sweep: list every instance of the failing class, not just the first. It stops only when the same failure survived 3 different strategy changes, or the fix needs a human decision or a secret, with `orka done <id> --give-up "<plain reason>"`. The orchestrator never marks its own work verified, never runs `orka verify`, and never edits checks.
 
 The job record carries the outcome:
 
@@ -51,12 +56,12 @@ The job record carries the outcome:
  "history":[{"round":1,"verdict":"fail","failing":["npm test"],"warnings":[],"at":"<iso>"},
             {"round":2,"verdict":"fail","failing":["npm test"],"warnings":["editor #scrub"],"at":"<iso>"},
             {"round":3,"verdict":"pass","failing":[],"warnings":["editor #scrub"],"at":"<iso>"}],
- "stall":{"checks":["npm test"],"rounds":[1,2]},
+ "stall":{"kind":"checks","checks":["npm test"],"rounds":[1,2]},
  "strategyChanges":[{"round":2,"change":"fresh worker with verifier evidence","at":"<iso>"}],
  "stopReason":"<only when given up>"}}
 ```
 
-`stall` is set when the failing sets of two consecutive rounds intersect, and holds the shared checks and the two rounds. orka records a round as soon as it can: when the next verifier round starts, on `orka status`, and in `orka done`.
+`stall` holds `kind` and the rounds involved. Kind `checks` is set when the failing sets of two consecutive rounds intersect and lists the shared checks. Kind `rounds` is set after N consecutive fail rounds (`--stall-after`, default 3) and lists those rounds. orka records a round as soon as it can: when the next verifier round starts, on `orka status`, and in `orka done`.
 
 `orka done` records the verdict and history for the latest round. A final `fail` marks the job `failed` (`verifier failed after N rounds: <blocking checks>`); otherwise `done`. With no verifier run, behaviour is unchanged. The finish wake line and `orka status` report `verified by verifier: pass, round 2` (or `verifier: fail, round 3`), and nothing when no verifier ran. The same text is the `verifier` field of the finish wake payload, alongside the `verification` object.
 
