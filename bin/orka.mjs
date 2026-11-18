@@ -73,6 +73,7 @@ const VALUE_FLAGS = new Set([
   "model",
   "role",
   "max-rounds",
+  "stall-after",
   "playbook",
   "give-up",
   "premise",
@@ -1483,6 +1484,13 @@ function verifierState(job) {
   return { rounds: Number(v.rounds) || 0, verdict: v.verdict ?? null, history: Array.isArray(v.history) ? v.history : [] };
 }
 
+function parseStallAfter(args) {
+  if (!("stall-after" in args)) return null;
+  const raw = args["stall-after"];
+  if (typeof raw !== "string" || !/^([2-9]|[1-9][0-9]+)$/.test(raw)) fail(`--stall-after needs an integer >= 2, got ${raw === true ? "nothing" : raw}`);
+  return Number(raw);
+}
+
 function parseMaxRounds(args) {
   if (!("max-rounds" in args)) return null;
   const raw = args["max-rounds"];
@@ -1606,13 +1614,31 @@ function normaliseResult(result) {
   return { verdict, failures, warnings };
 }
 
-function stallOf(history, round) {
+const DEFAULT_STALL_AFTER = 3;
+
+// A stall is one of two shapes. kind "checks": rounds N-1 and N both fail and share a check name
+// ({kind, checks:[shared], rounds:[N-1, N]}). kind "rounds": the last K rounds (K = opts.stallAfter, default 3)
+// all fail, whatever their check names ({kind, checks:[union of failing], rounds:[N-K+1..N]}). "checks" wins
+// when both apply: it names the exact repeated check.
+function stallOf(history, round, opts = {}) {
   const now = history.find((h) => h.round === round);
+  if (!now) return null;
   const before = history.find((h) => h.round === round - 1);
-  if (!now || !before) return null;
-  const prev = new Set(before.failing || []);
-  const checks = (now.failing || []).filter((c) => prev.has(c));
-  return checks.length ? { checks, rounds: [round - 1, round] } : null;
+  if (before) {
+    const prev = new Set(before.failing || []);
+    const checks = (now.failing || []).filter((c) => prev.has(c));
+    if (checks.length) return { kind: "checks", checks, rounds: [round - 1, round] };
+  }
+  const k = Number(opts.stallAfter) >= 2 ? Number(opts.stallAfter) : DEFAULT_STALL_AFTER;
+  const rounds = [];
+  const union = [];
+  for (let r = round - k + 1; r <= round; r++) {
+    const h = history.find((x) => x.round === r);
+    if (!h || h.verdict !== "fail") return null;
+    rounds.push(r);
+    for (const c of h.failing || []) if (!union.includes(c)) union.push(c);
+  }
+  return { kind: "rounds", checks: union, rounds };
 }
 
 // Head SHA and patch id of the job's code as it is right now: the diff against baseCommit with the
@@ -1661,7 +1687,7 @@ function computeVerifier(repo, job) {
     ...(result.by === "gate" ? { by: "gate" } : {}),
   });
   history.sort((a, b) => a.round - b.round);
-  const next = { ...job.verifier, rounds: round, verdict: norm.verdict, history, stall: stallOf(history, round) };
+  const next = { ...job.verifier, rounds: round, verdict: norm.verdict, history, stall: stallOf(history, round, { stallAfter: job.stallAfter }) };
   if (!Array.isArray(next.strategyChanges)) next.strategyChanges = [];
   // The first time orka reads this round's result it records the code snapshot; later reads compare.
   const snap = codeSnapshot(job);
@@ -1787,6 +1813,9 @@ function verifierPrompt(job, name, task, alias, round) {
     ...approvedProofLines(job),
     ...specPromptLines(job),
     ...(job.playbook === "bug-fix" ? [...REPRO_VERIFIER_LINES(dir), ``] : []),
+    ...(job.verifier?.stall?.kind === "rounds"
+      ? [`Class sweep (the last ${job.verifier.stall.rounds.length} rounds all failed, each on a different check): the fixes are chasing symptoms. Do not stop at the first failure. List every instance of the failing class (all the places the same kind of problem can occur), check each one, and report them all in failures, so the next round fixes the class, not one instance.`, ``]
+      : []),
     `Evidence standard (a pass needs proof, not a claim):`,
     `- Test the real user path: run the feature the way a user would (the real command, page or API), not only unit tests or a private helper.`,
     `- Check side effects (files written, network calls, state changed), not just the exit code.`,
@@ -1855,7 +1884,7 @@ const FEATURE_FLOW = (job, dir) => ({
     `It writes ${dir}/results/${VERIFIER_NAME}.json: "verdict" pass or fail, "failures" (blocking: what this job changed, each with its evidence) and "warnings" (pre-existing failures the verifier showed also fail on the base commit; they never block a pass).`,
     `If the verdict is blocked, the environment stopped the verifier, not the code: do not route anything to the builders, and it does not count as a round. orka has run orka doctor (see orka digest). If a listed fix is repo-local, run orka doctor ${job.id} --fix or do it, then start the verifier again; anything else (a system package, a trust dialog, sudo) you report to Olaf and wait.`,
     `If the verdict is fail, read ${dir}/results/${VERIFIER_NAME}.json and route each blocking failure WITH its evidence to the builder that owns those files (a new or resumed builder worker). Ignore warnings for routing. Wait for their reports, then start the verifier again.`,
-    `Run orka status ${job.id} after each verifier round. If it reports a stall (the same check failing two rounds in a row), do NOT repeat the same instruction.`,
+    `Run orka status ${job.id} after each verifier round. If it reports a stall, do NOT repeat the same instruction. A stall is either kind "checks" (the same check failing two rounds in a row) or kind "rounds" (${job.stallAfter || DEFAULT_STALL_AFTER} consecutive fail rounds, --stall-after, even when the failing checks differ). On kind "rounds", also ask the verifier for a class sweep: every instance of the failing class, not the first one found. The next verifier prompt asks for it by itself.`,
     `Before changing strategy, attack the premise: write in one sentence the premise the failed fixes share, list what else could explain the failure (a census), and pick the strategy that drops that premise.`,
     `Change strategy instead: rewrite the worker prompt using the verifier's evidence verbatim, split the work differently, start a fresh worker instead of resuming one, or take a different approach.`,
     `Record the change with: orka strategy ${job.id} --premise "<the shared premise you dropped>" "<what you changed>", then re-verify.`,
@@ -2128,7 +2157,7 @@ function wakeOfNew(repo, args) {
 
 async function cmdNew(args) {
   if ("model" in args) fail("use --worker-model on orka new, not --model");
-  allowFlags(args, ["cwd", "title", "goal", "kind", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds", "ui", "playbook", "spec", "no-gate", "stack-on", "wake", "wake-file"]);
+  allowFlags(args, ["cwd", "title", "goal", "kind", "orchestrator-model", "worker-model", "verifier-model", "keep", "max-rounds", "stall-after", "ui", "playbook", "spec", "no-gate", "stack-on", "wake", "wake-file"]);
   const kind = args.kind || "claude";
   const repo = requireRepo(args.cwd || process.cwd());
   const spec = "spec" in args ? resolveSpec(repo, flagValue(args, "spec")) : null;
@@ -2151,6 +2180,7 @@ async function cmdNew(args) {
   if (check.code !== 0) fail(`refused branch name ${branch}`);
   if (existsSync(jobPath(repo, id))) fail(`job ${id} already exists`);
   const maxRounds = parseMaxRounds(args);
+  const stallAfter = parseStallAfter(args);
   const playbook = parsePlaybook(args) || "feature";
   const wake = wakeOfNew(repo, args);
   const job = {
@@ -2188,6 +2218,7 @@ async function cmdNew(args) {
     created: new Date().toISOString(),
   };
   if (maxRounds) job.maxRounds = maxRounds;
+  if (stallAfter) job.stallAfter = stallAfter;
   if (spec) job.spec = { path: spec.rel, feature: spec.feature, commit: spec.commit, ...(spec.parsed.kind ? { kind: spec.parsed.kind } : {}) };
   // orka chain --signoff end: the job's worktree starts from the previous chained job's branch.
   if ("stack-on" in args) {
@@ -3430,7 +3461,9 @@ function printVerifierDetail(job) {
   if (last?.failing?.length) console.log(`  last failing: ${last.failing.join(", ")}`);
   if (last?.warnings?.length) console.log(`  warnings (non-blocking): ${last.warnings.join(", ")}`);
   if (v.stall) {
-    console.log(`  stall: ${v.stall.checks.join(", ")} failed in rounds ${v.stall.rounds[0]} and ${v.stall.rounds[1]}; change strategy, then run orka strategy ${job.id} --premise "<shared premise>" "<what changed>"`);
+    const [first, last] = [v.stall.rounds[0], v.stall.rounds.at(-1)];
+    const what = v.stall.kind === "rounds" ? `rounds ${first}-${last} all failed (${v.stall.checks.join(", ")}); the failures keep moving, so ask the verifier for a class sweep (every instance of the failing class)` : `${v.stall.checks.join(", ")} failed in rounds ${first} and ${last}`;
+    console.log(`  stall: ${what}; change strategy, then run orka strategy ${job.id} --premise "<shared premise>" "<what changed>"`);
   }
   for (const c of v.strategyChanges || []) console.log(`  strategy change (round ${c.round}): ${c.premise ? `premise: ${c.premise} | change: ` : ""}${c.change}`);
   if (v.stopReason) console.log(`  verifier stop: ${v.stopReason}`);
@@ -5802,7 +5835,7 @@ function help() {
   orka new --title "..." --goal "..." [--cwd <repo>] [--kind claude|pi] [--keep]
   orka new --spec specs/<feature>/spec.md [--title "..."] [--goal "extra"] [...]   (intake built from a committed spec)
   orka spec init <feature> [--cwd <repo>]   (scaffolds specs/<feature>/spec.md; you fill and commit it)
-           [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds <N>]
+           [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds <N>] [--stall-after <N>]
            [--wake <bot> | --wake-file <path>]   (where this job's webhooks go; docs/webhooks.md)
   orka run <id> [--dry-run] [--cwd <repo>] [--keep]   (panes on herdr-core, seen in the Herdr app; ORKA_BACKEND=herdr: the deprecated herdr TUI; docs/backends.md)
            [--orchestrator-model <alias>] [--worker-model <alias>] [--verifier-model <alias>] [--max-rounds <N>]
@@ -5897,7 +5930,10 @@ Verifier (both kinds)
   never do: the verdict is "pass" when failures is empty.
   There is no round limit. orka new/run --max-rounds N sets an opt-in ceiling; a round beyond it is refused.
   orka records every round in job.verifier.history {round,verdict,failing,warnings}. If the same blocking check
-  fails in two consecutive rounds, job.verifier.stall is set and orka status says so. The orchestrator must then
+  fails in two consecutive rounds ({kind:"checks",checks,rounds:[N-1,N]}), or the last K rounds all fail whatever their
+  checks (K = orka new --stall-after <n>, integer >= 2, default 3; {kind:"rounds",checks:<union>,rounds:[N-K+1..N]}),
+  job.verifier.stall is set and orka status says so. On kind "rounds" the next verifier prompt asks for a class sweep
+  (every instance of the failing class). The orchestrator must then
   change strategy and record it with orka strategy <id> "<what changed>" before re-verifying.
   The orchestrator never runs orka verify or edits checks. If it cannot progress (the same failure survived 3
   strategy changes, or a human decision or secret is needed): orka done <id> --give-up "<reason>" marks the job failed.
