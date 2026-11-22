@@ -33,6 +33,17 @@ A repo with no entry is L1. orka never raises a level on its own.
 
 Limits: a hook is a guard, not a sandbox. `git push --no-verify`, another `-c core.hooksPath`, or a fast-forward of main (no hook fires) get past it. The prompts forbid these; a jailbreak-proof boundary would need a separate git user or remote permissions.
 
+## Orchestrator guard
+
+The orchestrator is thin: it only communicates, delegates and tracks. It never edits product files or implements the goal. Every fix, even a failing gate, goes to a worker (`orka worker` or `orka steer`). There is no solo mode.
+
+- **Claude lead.** The pane starts with a separate settings file, `context/claude-settings-lead.json`, with a PreToolUse hook that runs `lib/orchestrator-guard.mjs`. The hook refuses `Edit`, `Write`, `MultiEdit` and `NotebookEdit` on any path inside the worktree. Worker and verifier panes keep their normal settings.
+- **Pi lead.** `context/pi-lead.mjs` loads the handoff extension plus `piGuardExtension`, which refuses the same tools. The pi path relies on pi's `tool_call` event.
+- **Allowed.** `orka worker`, `steer`, `status`, `digest`, `strategy`, `log`, `propose`, `review`, `done` and `reap`; read-only inspection; and `git commit` before `orka review`. The only file the lead writes is `<jobDir>/summary.txt`, which is outside the worktree.
+- **Logged.** Each refusal appends a row to `.orka/jobs/<id>/decisions.tsv`: phase `guard`, decision `refused <Tool>`, result `refused`.
+
+Like the git hooks, the guard stops a mistake. It is not a sandbox: it matches only those four tools, so it does not watch shell commands.
+
 ## orka chain
 
 The old `~/bin/orca-chain` as a command. It runs `<state>/chain-queue` one job at a time:

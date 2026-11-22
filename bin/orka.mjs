@@ -1062,10 +1062,10 @@ function assertAgentName(name) {
 // the right file when it measures context; every pane of a job shares one transcript folder.
 // resume (orka resume): claude reopens the session with --resume <id>; pi's --session-id already
 // continues an existing session of that id.
-function startArgs(name, pane, kind, alias, sessionId, job = null, { resume = false } = {}) {
+function startArgs(name, pane, kind, alias, sessionId, job = null, { resume = false, lead = false } = {}) {
   const args = ["agent", "start", name, "--kind", kind, "--pane", pane, "--timeout", "60000"];
   const session = sessionId ? [resume && kind === "claude" ? "--resume" : "--session-id", sessionId] : [];
-  const extra = [...(kind === "claude" ? ["--model", alias] : []), ...session, ...(job ? paneExtras(job, kind) : [])];
+  const extra = [...(kind === "claude" ? ["--model", alias] : []), ...session, ...(job ? paneExtras(job, kind, { lead }) : [])];
   if (extra.length) args.push("--", ...extra);
   return args;
 }
@@ -1078,24 +1078,38 @@ function startArgs(name, pane, kind, alias, sessionId, job = null, { resume = fa
 const PLUGIN_DIR = join(dirname(ORKA), "..", "plugin");
 const HANDOFF_SKILL = join(PLUGIN_DIR, "skills", "handoff", "SKILL.md");
 const HANDOFF_HOOK = join(dirname(ORKA), "..", "lib", "handoff-hook.mjs");
+const ORCHESTRATOR_GUARD = join(dirname(ORKA), "..", "lib", "orchestrator-guard.mjs");
 
 function captureDir(repo, id) {
   return join(jobDir(repo, id), "context");
 }
 
-function paneExtras(job, kind) {
+// lead: the orchestrator pane. It gets the write guard (lib/orchestrator-guard.mjs) on top of the
+// handoff hook, in its own settings file / extension file: every pane of a job shares captureDir,
+// so a shared file would be overwritten by the next worker.
+function paneExtras(job, kind, { lead = false } = {}) {
   const dir = captureDir(job.repo, job.id);
   mkdirSync(dir, { recursive: true });
   const paths = { jobFile: jobPath(job.repo, job.id), jobDir: jobDir(job.repo, job.id), configFile: configPath(job.repo) };
   if (kind === "pi") {
-    const ext = join(dir, "pi-handoff.mjs");
-    writeFileSync(ext, `import { piExtension } from ${JSON.stringify(pathToFileURL(HANDOFF_HOOK).href)};\nexport default piExtension(${JSON.stringify(paths)});\n`);
+    const ext = join(dir, lead ? "pi-lead.mjs" : "pi-handoff.mjs");
+    const hookUrl = JSON.stringify(pathToFileURL(HANDOFF_HOOK).href);
+    writeFileSync(
+      ext,
+      lead
+        ? `import { piExtension } from ${hookUrl};\nimport { piGuardExtension } from ${JSON.stringify(pathToFileURL(ORCHESTRATOR_GUARD).href)};\nconst handoff = piExtension(${JSON.stringify(paths)});\nconst guard = piGuardExtension(${JSON.stringify({ jobDir: paths.jobDir, worktree: job.worktree })});\nexport default function (pi) {\n  handoff(pi);\n  guard(pi);\n}\n`
+        : `import { piExtension } from ${hookUrl};\nexport default piExtension(${JSON.stringify(paths)});\n`,
+    );
     return ["--skill", dirname(HANDOFF_SKILL), "-e", ext];
   }
-  const file = join(dir, "claude-settings.json");
+  const file = join(dir, lead ? "claude-settings-lead.json" : "claude-settings.json");
   const command = sh([process.execPath, join(dirname(ORKA), "..", "lib", "statusline.mjs"), dir]);
   const hook = sh([process.execPath, HANDOFF_HOOK, "claude", paths.jobFile, paths.jobDir, paths.configFile]);
   const settings = { statusLine: { type: "command", command, padding: 0 }, hooks: { PostToolUse: [{ matcher: "*", hooks: [{ type: "command", command: hook, timeout: 10 }] }] } };
+  if (lead) {
+    const guard = sh([process.execPath, ORCHESTRATOR_GUARD, "claude", paths.jobDir, job.worktree]);
+    settings.hooks.PreToolUse = [{ matcher: "Edit|Write|MultiEdit|NotebookEdit", hooks: [{ type: "command", command: guard, timeout: 10 }] }];
+  }
   writeFileSync(file, `${JSON.stringify(settings, null, 2)}\n`);
   return ["--settings", file, "--plugin-dir", PLUGIN_DIR];
 }
@@ -1936,13 +1950,21 @@ function gatePromptLines(job, dir) {
   ];
 }
 
+// The thin orchestrator: communicate, delegate, track. Every playbook shares this block.
+const THIN_ORCHESTRATOR_LINES = (job, dir) => [
+  `You are a thin orchestrator: you only communicate, delegate and track. Never implement the goal yourself, not even a one-line fix.`,
+  `Allowed: orka worker, steer, status, digest, strategy, log, propose, review, done, reap and approve-wait; read-only inspection (git diff, git log, git status, reading files, orka digest); git commit of the worktree before orka review; writing ${dir}/summary.txt.`,
+  `You must never Edit/Write/MultiEdit/NotebookEdit any file in the worktree (${job.worktree}). Every change, including fixing a failing gate, goes to a worker (orka worker, or orka steer to a running one). The only file you write is ${dir}/summary.txt, which is outside the worktree.`,
+  `Your pane enforces this with a guard hook: a refused edit is logged to ${dir}/decisions.tsv and tells you to start or steer a worker instead.`,
+];
+
 function orchestratorPrompt(job) {
   const dir = jobDir(job.repo, job.id);
   const pi = job.kind === "pi";
   const flow = (PLAYBOOK_FLOW[job.playbook] || FEATURE_FLOW)(job, dir);
   return [
     `You are the orchestrator for orka job ${job.id}, not the implementer.`,
-    `Do not implement the goal yourself. Do not edit the repo to satisfy the goal.`,
+    ...THIN_ORCHESTRATOR_LINES(job, dir),
     `Split the goal into the smallest set of worker tasks, then start one worker per task.`,
     `When tasks are independent, start several workers in parallel (several orka worker calls, one per task) instead of one after another.`,
     `Workers share one worktree, so never give two workers the same files. Split by file or area so edits cannot clash.`,
@@ -2355,7 +2377,7 @@ function startLead(job) {
   let last = null;
   job.sessionId = randomUUID();
   for (let attempt = 1; attempt <= 2; attempt++) {
-    last = herdr(startArgs(name, job.pane, kind, alias, job.sessionId, job), 90000);
+    last = herdr(startArgs(name, job.pane, kind, alias, job.sessionId, job, { lead: true }), 90000);
     if (last.code === 0 && !last.json?.error) {
       assertNotTrustBlocked(job.repo, kind, job.pane, "the orchestrator");
       return name;
@@ -3024,7 +3046,7 @@ function startSuccessor(repo, id, slot, log) {
   const pane = split.json?.result?.pane?.pane_id;
   if (!pane) return rollback(`pane split: ${herdrDetail(split)}`);
   const nextSession = randomUUID();
-  const started = herdr(startArgs(name, pane, slot.kind, slot.alias, nextSession, job), 90000);
+  const started = herdr(startArgs(name, pane, slot.kind, slot.alias, nextSession, job, { lead }), 90000);
   const trust = slot.kind === "claude" && trustDialogShown(pane);
   if (!herdrOk(started) || trust) {
     // The pane was split just now and never held an agent: close only that one.
@@ -5805,7 +5827,7 @@ function cmdResume(args) {
     delete job.workspaceClosed;
   }
   const sessionId = mode === "resume" ? job.sessionId : randomUUID();
-  const started = herdr(startArgs(name, pane, kind, alias, sessionId, job, { resume: mode === "resume" }), 90000);
+  const started = herdr(startArgs(name, pane, kind, alias, sessionId, job, { resume: mode === "resume", lead: true }), 90000);
   assertNotTrustBlocked(repo, kind, pane, "the resumed orchestrator");
   if (!herdrOk(started)) herdrFail(started, `agent start (resume; the new pane ${pane} stays open)`);
   const at = new Date().toISOString();

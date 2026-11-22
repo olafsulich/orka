@@ -2,7 +2,7 @@
 
 ## Layout
 
-Workers share the job worktree. They do not get sibling checkouts. Concurrent edits can clash; keep tasks from touching the same files. Sibling worktrees are later, if a job needs them.
+Workers share the job worktree. They do not get sibling checkouts. Concurrent edits can clash; keep tasks from touching the same files. Sibling worktrees are later, if a job needs them. The orchestrator does not edit this worktree: its pane runs `lib/orchestrator-guard.mjs` and refuses Edit/Write there ([autonomy.md](autonomy.md#orchestrator-guard)).
 
 ```text
 <repo>/.orka/config.json             local mark (gitignored)
