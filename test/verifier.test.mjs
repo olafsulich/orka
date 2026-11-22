@@ -232,16 +232,16 @@ test("stall detection: the same failing check in two consecutive rounds is recor
   writeFileSync(join(j.results, "verifier.json"), result(2, [{ check: "scrub", evidence: "still missing" }]));
   const out = t.orka(["status", j.id]).stdout;
   v = j.read().verifier;
-  assert.deepEqual(v.stall, { checks: ["scrub"], rounds: [1, 2] });
+  assert.deepEqual(v.stall, { kind: "checks", checks: ["scrub"], rounds: [1, 2] });
   assert.match(out, /stall: scrub failed in rounds 1 and 2/);
   assert.match(out, /last failing: scrub/);
   assert.match(out, /verifier rounds: 2/);
 
-  // a different failing set clears the stall
+  // a pass round clears the stall (a third fail round would now be a kind "rounds" stall; see stall-rounds.test.mjs)
   const third = j.read();
   third.verifier.rounds = 3;
   writeFileSync(j.path, JSON.stringify(third));
-  writeFileSync(join(j.results, "verifier.json"), result(3, [{ check: "other", evidence: "x" }]));
+  writeFileSync(join(j.results, "verifier.json"), result(3, []));
   t.orka(["status", j.id]);
   assert.equal(j.read().verifier.stall, null);
 });
