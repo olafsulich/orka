@@ -66,3 +66,13 @@ node --test test/finish-webhook.test.mjs
 Agents must not run `herdr-finish-watch`, `orka webhook`, or `orka stop`. Only the orchestrator runs `orka done`, once, at the end, after Olaf's `orka approve`. The CLI sends the wake after it has saved the terminal status.
 
 The needs-input alert uses the same destination; see [needs-input.md](needs-input.md).
+
+### Idle: waiting, stuck or needs-input
+
+When the lead pane goes idle (after the grace period) the watcher asks `deps.workersLive(job)`:
+
+- `true` (a worker is working, or a result or ended-turn wake is still pending): the lead is waiting. Nothing is posted; the watcher logs `waiting <jobId>: workers live` once per episode.
+- `false`, and the pane shows a question: `kind: "needs-input"`, `status: "idle"`, as before.
+- `false`, and the pane shows no question: `kind: "stuck"`, `status: "idle"`. The lead is idle with no worker running and nothing to answer, so a human should look.
+
+The `stuck` payload has the same fields as needs-input (`job`, `title`, `status`, `question` = the pane tail, `pane`). `workersLive` may be sync or async; a missing dep or a throw counts as `false` and keeps the legacy `needs-input` post. A blocked lead always posts `needs-input` with `status: "blocked"`.
